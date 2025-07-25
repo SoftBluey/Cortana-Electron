@@ -261,9 +261,8 @@ function onSearch() {
         const weatherMatch = query.match(/^(?:what's the )?weather (?:in|for) (.+)/i);
         
         const burgerDogMatch = query.match(/LeGamer|KernelOS|Leg Hammer|KNS/i);
-        const joelMatch = query.match(/THEVERYLOL30/i);
 
-        const isWebSearch = !genericTimeMatch && !timeQueryMatch && !jokeMatch && !retiledMatch && !calculatorMatch && !weatherMatch && !burgerDogMatch && !joelMatch;
+        const isWebSearch = !genericTimeMatch && !timeQueryMatch && !jokeMatch && !retiledMatch && !calculatorMatch && !weatherMatch && !burgerDogMatch
 
         setStateActive();
         gifDisplay.src = speakingGif;
@@ -272,9 +271,6 @@ function onSearch() {
         if (isWebSearch) {
             showWebView(`https://www.bing.com/search?q=${encodeURIComponent(query)}`);
         } 
-        else if (joelMatch) {
-            showWebView(`https://www.bing.com/search?q=Vinesauce+Joel`);
-        }
         else if (burgerDogMatch) {
             const burgerDogResponse = "Burger dog, B-B-Burger dog!";
             resultsDisplay.textContent = burgerDogResponse;
