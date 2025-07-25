@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Cortana Client</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app-container">
+        <div class="main-container">
+            <div id="close-btn" title="Close Application">×</div>
+            <div id="cortana-container" class="content-pane">
+                <div id="animation-container">
+                    <img id="gif-display">
+                    <div id="content-wrapper">
+                        <p id="results-display"></p>
+                        <div id="bing-link-container">
+                            <hr class="divider">
+                            <a href="#" id="bing-link">See more results on Bing.com</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div id="webview-container" class="content-pane">
+                <webview id="webview-frame" style="width:100%; height:100%;"></webview>
+            </div>
+        </div>
+        <div class="search-container">
+            <input type="text" id="search-bar" placeholder="Ask me anything...">
+        </div>
+    </div>
+    <script src="renderer.js"></script>
+</body>
+</html>

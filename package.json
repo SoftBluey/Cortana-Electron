@@ -1,0 +1,41 @@
+{
+  "name": "cortana-electron",
+  "version": "1.2.5",
+  "description": "A custom local Cortana client built with Electron.",
+  "main": "main.js",
+  "author": "BlueySoft",
+  "license": "ISC",
+  "scripts": {
+    "start": "electron .",
+    "postinstall": "electron-builder install-app-deps",
+    "dist": "electron-builder"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.blueysoft.cortana-electron",
+    "productName": "Cortana Electron",
+    "icon": "build/icon.ico",
+    "files": [
+      "main.js",
+      "renderer.js",
+      "index.html",
+      "style.css"
+    ],
+    "extraResources": [
+      {
+        "from": "assets",
+        "to": "../assets"
+      }
+    ],
+    "win": {
+      "target": "nsis"
+    }
+  },
+  "overrides": {
+    "node-abi": "4.0.0"
+  }
+}
