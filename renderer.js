@@ -262,7 +262,7 @@ function onSearch() {
         
         const burgerDogMatch = query.match(/LeGamer|KernelOS|Leg Hammer|KNS/i);
 
-        const isWebSearch = !genericTimeMatch && !timeQueryMatch && !jokeMatch && !retiledMatch && !calculatorMatch && !weatherMatch && !burgerDogMatch && !joelMatch;
+        const isWebSearch = !genericTimeMatch && !timeQueryMatch && !jokeMatch && !retiledMatch && !calculatorMatch && !weatherMatch && !burgerDogMatch
 
         setStateActive();
         gifDisplay.src = speakingGif;
