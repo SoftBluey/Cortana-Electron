@@ -1,4 +1,4 @@
-# Cortana-Electron
+# Electron Cortana, or... Cortana Electron!
 A custom, local Cortana client built with Electron, inspired by the classic design and functionality of Microsoft's original assistant.
 
 ### About The Project
