@@ -7,10 +7,11 @@ let webLinkContainer, webLink, webIcon;
 let appContainer;
 let finishSpeakingTimeout = null;
 let editingReminderId = null;
+let editingReminderSound = null;
 
-let reminderContainer, reminderTextInput, reminderTimeInput, reminderSaveBtn, reminderCancelBtn, reminderIcon;
+let reminderContainer, reminderTextInput, reminderTimeInput, reminderSoundInput, reminderSaveBtn, reminderCancelBtn, reminderIcon, reminderSoundBrowseBtn;
 
-let settingsContainer, settingsBtn, settingsBackBtn, voiceSelect, startupToggle, startupWarning, voiceWarning, searchEngineSelect, instantResponseToggle, themeColorPicker, movableToggle, pitchSlider, rateSlider, resetVoiceBtn, resetAllBtn;
+let settingsContainer, settingsBtn, settingsBackBtn, voiceSelect, startupToggle, startupWarning, voiceWarning, searchEngineSelect, instantResponseToggle, themeColorPicker, movableToggle, pitchSlider, rateSlider, resetVoiceBtn, resetReminderSoundBtn, resetAllBtn, reminderSoundSettingInput, reminderSoundBrowseSettingBtn, reminderSoundResetSettingBtn;
 let idleGreetingModeSelect, specificGreetingContainer, specificGreetingSelect, customGreetingContainer, customGreetingInput;
 let customActionFormContainer, customActionTriggerInput, customActionSaveBtn, customActionCancelBtn, customActionsList, addCustomActionBtn, actionSequenceList, actionSequenceWarning;
 
@@ -29,6 +30,7 @@ let webSearchEnabled = false;
 let idleGreetingMode = 'random';
 let specificIdleGreeting = "What's on your mind?";
 let customIdleGreeting = '';
+let reminderSound = "notify.wav";
 
 
 const appRoot = path.resolve(__dirname, __dirname.includes('app.asar') ? '../assets' : 'assets');
@@ -162,12 +164,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     reminderIcon = document.getElementById('reminder-icon');
     reminderTextInput = document.getElementById('reminder-text-input');
     reminderTimeInput = document.getElementById('reminder-time-input');
+    reminderSoundInput = document.getElementById('reminder-sound-input'); // May be null initially
+    reminderSoundBrowseBtn = document.getElementById('reminder-sound-browse-btn'); // May be null initially
     reminderSaveBtn = document.getElementById('reminder-save-btn');
     reminderCancelBtn = document.getElementById('reminder-cancel-btn');
 
     settingsContainer = document.getElementById('settings-container');
     settingsBtn = document.getElementById('settings-btn');
     settingsBackBtn = document.getElementById('settings-back-btn');
+    reminderSoundSettingInput = document.getElementById('reminder-sound-setting');
+    reminderSoundBrowseSettingBtn = document.getElementById('reminder-sound-browse-setting');
+    reminderSoundResetSettingBtn = document.getElementById('reminder-sound-reset-setting');
     voiceSelect = document.getElementById('voice-select');
     startupToggle = document.getElementById('startup-toggle');
     startupWarning = document.getElementById('startup-warning');
@@ -179,6 +186,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     pitchSlider = document.getElementById('pitch-slider');
     rateSlider = document.getElementById('rate-slider');
     resetVoiceBtn = document.getElementById('reset-voice-btn');
+    resetReminderSoundBtn = document.getElementById('reset-reminder-sound-btn');
     resetAllBtn = document.getElementById('reset-all-btn');
 
     idleGreetingModeSelect = document.getElementById('idle-greeting-mode-select');
@@ -276,12 +284,61 @@ window.addEventListener('DOMContentLoaded', async () => {
     pitchSlider.addEventListener('input', onPitchChanged);
     rateSlider.addEventListener('input', onRateChanged);
     resetVoiceBtn.addEventListener('click', onResetVoiceSettings);
+    resetReminderSoundBtn.addEventListener('click', onResetReminderSound);
     resetAllBtn.addEventListener('click', onResetAllSettings);
     
     idleGreetingModeSelect.addEventListener('change', onIdleGreetingModeChanged);
     specificGreetingSelect.addEventListener('change', onSpecificIdleGreetingChanged);
     customGreetingInput.addEventListener('input', onCustomIdleGreetingChanged);
 
+    // Reminder sound setting event listeners
+    if (reminderSoundSettingInput) {
+        reminderSoundSettingInput.addEventListener('change', (e) => {
+            reminderSound = e.target.value;
+            ipcRenderer.send('set-setting', {
+                key: 'reminderSound',
+                value: e.target.value
+            });
+        });
+    }
+    
+    if (reminderSoundBrowseSettingBtn) {
+        reminderSoundBrowseSettingBtn.addEventListener('click', () => {
+            ipcRenderer.invoke('show-open-dialog', { 
+                properties: ['openFile'],
+                filters: [{ name: 'Audio Files', extensions: ['wav', 'mp3', 'ogg', 'm4a', 'aac'] }]
+            }).then(result => {
+                if (!result.canceled && result.filePaths.length > 0) {
+                    // Store the full file path to allow custom sounds from anywhere
+                    const fullPath = result.filePaths[0];
+                    if (reminderSoundSettingInput) {
+                        reminderSoundSettingInput.value = fullPath;
+                        reminderSound = fullPath;
+                        // Save the setting
+                        ipcRenderer.send('set-setting', { 
+                            key: 'reminderSound', 
+                            value: fullPath 
+                        });
+                    }
+                }
+            });
+        });
+    }
+    
+    if (reminderSoundResetSettingBtn) {
+        reminderSoundResetSettingBtn.addEventListener('click', () => {
+            if (reminderSoundSettingInput) {
+                reminderSoundSettingInput.value = "notify.wav";
+                reminderSound = "notify.wav";
+                // Save the setting
+                ipcRenderer.send('set-setting', { 
+                    key: 'reminderSound', 
+                    value: "notify.wav" 
+                });
+            }
+        });
+    }
+    
     addCustomActionBtn.addEventListener('click', () => showCustomActionForm());
     customActionSaveBtn.addEventListener('click', onSaveCustomAction);
     customActionCancelBtn.addEventListener('click', hideCustomActionForm);
@@ -331,6 +388,10 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     ipcRenderer.on('show-settings-ui', showSettingsUI);
 
+    ipcRenderer.on('play-reminder-sound', (event, soundFile) => {
+        playReminderSound(soundFile);
+    });
+
     await loadAndApplySettings();
     setupTTS();
     
@@ -350,7 +411,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchIcon.src = cortanaIcon;
 });
 
-function showSettingsUI() {
+async function showSettingsUI() {
     animationContainer.style.display = 'none';
     reminderContainer.classList.remove('visible');
     ipcRenderer.send('set-settings-visibility', true);
@@ -358,6 +419,9 @@ function showSettingsUI() {
     settingsContainer.classList.add('visible');
     document.querySelector('.settings-main-content').style.display = 'block';
     customActionFormContainer.classList.remove('visible');
+
+    // Refresh all settings when opening settings UI to ensure they're current
+    await loadAndApplySettings();
 
     searchBar.disabled = true;
     searchBar.placeholder = 'Unavailable...';
@@ -450,6 +514,19 @@ async function loadAndApplySettings() {
 
     customActions = settings.customActions || [];
     renderCustomActions();
+    
+    // Load reminder sound setting
+    if (settings.reminderSound) {
+        reminderSound = settings.reminderSound;
+        if (reminderSoundSettingInput) {
+            reminderSoundSettingInput.value = settings.reminderSound;
+        }
+    } else {
+        reminderSound = "notify.wav";
+        if (reminderSoundSettingInput) {
+            reminderSoundSettingInput.value = "notify.wav";
+        }
+    }
 }
 
 function renderCustomActions() {
@@ -582,6 +659,18 @@ function onResetVoiceSettings() {
     rateSlider.value = rate;
     ipcRenderer.send('set-setting', { key: 'pitch', value: pitch });
     ipcRenderer.send('set-setting', { key: 'rate', value: rate });
+}
+
+function onResetReminderSound() {
+    if (reminderSoundSettingInput) {
+        reminderSoundSettingInput.value = "notify.wav";
+        reminderSound = "notify.wav";
+        // Save the setting
+        ipcRenderer.send('set-setting', { 
+            key: 'reminderSound', 
+            value: "notify.wav" 
+        });
+    }
 }
 
 function onResetAllSettings() {
@@ -764,6 +853,7 @@ function setStateIdle() {
     }
 
     editingReminderId = null;
+    editingReminderSound = null; // Also reset the editing sound
     reminderContainer.classList.remove('visible');
     animationContainer.style.display = 'block';
 
@@ -867,11 +957,91 @@ function showWebLink() {
 function calculate(query) {
     let responseText;
     try {
-        const cleanQuery = query.replace(/,/g, '');
-        const result = new Function('return ' + cleanQuery)();
+        // Remove any spaces and validate the expression only contains numbers, operators, parentheses, and decimals
+        const cleanQuery = query.replace(/,/g, '').replace(/\s+/g, '');
+        
+        // Validate that the query only contains safe mathematical characters
+        if (!/^[\d+\-*/().]+$/.test(cleanQuery)) {
+            throw new Error('Invalid characters in calculation');
+        }
+        
+        // Check for potential issues like very long expressions that could cause DoS
+        if (cleanQuery.length > 100) {
+            throw new Error('Expression too complex');
+        }
+        
+        // Safe mathematical expression evaluator using recursive descent parser
+        let index = 0;
+        
+        function parseExpression() {
+            let result = parseTerm();
+            
+            while (index < cleanQuery.length && (cleanQuery[index] === '+' || cleanQuery[index] === '-')) {
+                const op = cleanQuery[index];
+                index++; // consume operator
+                const right = parseTerm();
+                result = op === '+' ? result + right : result - right;
+            }
+            
+            return result;
+        }
+        
+        function parseTerm() {
+            let result = parseFactor();
+            
+            while (index < cleanQuery.length && (cleanQuery[index] === '*' || cleanQuery[index] === '/')) {
+                const op = cleanQuery[index];
+                index++; // consume operator
+                const right = parseFactor();
+                if (op === '*') {
+                    result = result * right;
+                } else {
+                    if (right === 0) throw new Error('Division by zero');
+                    result = result / right;
+                }
+            }
+            
+            return result;
+        }
+        
+        function parseFactor() {
+            if (cleanQuery[index] === '(') {
+                index++; // consume '('
+                const result = parseExpression();
+                if (cleanQuery[index] !== ')') throw new Error('Mismatched parentheses');
+                index++; // consume ')'
+                return result;
+            } else {
+                return parseNumber();
+            }
+        }
+        
+        function parseNumber() {
+            let numStr = '';
+            while (index < cleanQuery.length && 
+                   (/\d/.test(cleanQuery[index]) || cleanQuery[index] === '.')) {
+                numStr += cleanQuery[index];
+                index++;
+            }
+            
+            if (numStr === '') throw new Error('Expected number');
+            
+            const num = parseFloat(numStr);
+            if (isNaN(num)) throw new Error('Invalid number');
+            
+            return num;
+        }
+        
+        const result = parseExpression();
+        
+        if (index !== cleanQuery.length) {
+            throw new Error('Unexpected characters');
+        }
+        
         if (isNaN(result) || !isFinite(result)) {
             throw new Error('Invalid calculation');
         }
+        
         responseText = `The answer is ${result}.`;
         displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, false);
     } catch (error) {
@@ -985,14 +1155,18 @@ function updateSaveButtonState() {
 }
 
 function showReminderUI(options = {}) {
-    const { initialText = '', initialTime = '', id = null } = options;
+    const { initialText = '', initialTime = '', initialSound = '', id = null } = options;
     editingReminderId = id;
+    editingReminderSound = initialSound; // Store the initial sound for this reminder
 
     animationContainer.style.display = 'none';
     reminderContainer.classList.add('visible');
 
     reminderTextInput.value = initialText;
     reminderTimeInput.value = initialTime;
+    // Set the sound - use initialSound if provided (for editing), otherwise use default
+    // Note: In this version, we don't dynamically modify the UI, but sound is handled in the background
+    // The sound is passed through the reminder payload when saving
 
     updateSaveButtonState();
 
@@ -1095,10 +1269,24 @@ function formatDateTimeForInput(date) {
 function onSaveReminder() {
     const reminder = reminderTextInput.value.trim();
     const timeValue = reminderTimeInput.value;
+    
+    let soundValue;
+    if (editingReminderId && editingReminderSound) {
+        // If we're editing an existing reminder, use the sound that was initially set for this reminder during editing
+        // This preserves the original reminder's sound unless the user somehow changed it in the UI (which isn't currently possible)
+        soundValue = editingReminderSound;
+    } else {
+        // For new reminders, read directly from the settings input field to ensure we get the latest value
+        soundValue = reminderSoundSettingInput.value || "notify.wav";
+    }
 
     if (reminder && timeValue) {
         const reminderDate = new Date(timeValue);
-        const reminderPayload = { reminder, reminderTime: reminderDate.toISOString() };
+        const reminderPayload = { 
+            reminder, 
+            reminderTime: reminderDate.toISOString(),
+            sound: soundValue
+        };
         let text;
 
         if (editingReminderId) {
@@ -1110,7 +1298,10 @@ function onSaveReminder() {
             text = `OK. I'll remind you to "${reminder}" on ${friendlyTime}.`;
         }
 
+        // Reset editing variables
         editingReminderId = null;
+        editingReminderSound = null;
+
         reminderContainer.classList.remove('visible');
         animationContainer.style.display = 'block';
         setStateActive();
@@ -1226,6 +1417,8 @@ async function showReminders() {
                 showReminderUI({
                     initialText: reminder.text,
                     initialTime: formatDateTimeForInput(reminderDate),
+                    // Use the sound property if available, otherwise default to settings
+                    initialSound: reminder.sound || settings.reminderSound || "notify.wav",
                     id: reminder.id
                 });
             };
@@ -1247,7 +1440,13 @@ async function showReminders() {
         });
     }
 
-    speak(responseText, onActionFinished);
+    // For interactive lists like reminders, speak but keep the UI active for interaction
+    speak(responseText, () => {
+        // Keep the active state for interaction instead of transitioning
+        isBusy = false;
+        searchBar.disabled = false;
+        searchBar.placeholder = 'Type here to search'; 
+    });
 }
 
 const commands = [
@@ -1290,7 +1489,9 @@ const commands = [
     {
         regex: /^(set a reminder|create a reminder|remind me)$/i,
         handler: () => {
-            showReminderUI({});
+            displayAndSpeak("Sure, what would you like me to remind you about?", () => {
+                showReminderUI({});
+            }, {}, false);
         }
     },
     {
@@ -1513,9 +1714,19 @@ async function executeActionSequence(actions) {
                 case 'play_sound':
                     await new Promise((resolve, reject) => {
                         const audio = new Audio(action.value);
-                        audio.onended = resolve;
-                        audio.onerror = reject;
-                        audio.play();
+                        const cleanup = () => {
+                            audio.onended = null;
+                            audio.onerror = null;
+                        };
+                        audio.onended = () => {
+                            cleanup();
+                            resolve();
+                        };
+                        audio.onerror = (error) => {
+                            cleanup();
+                            reject(error);
+                        };
+                        audio.play().catch(reject);
                     });
                     break;
                 case 'run_command':
@@ -1668,6 +1879,34 @@ function removeAction(index) {
     let actions = getCurrentActionsFromForm();
     actions.splice(index, 1);
     renderActionSequenceUI(actions);
+}
+
+function playReminderSound(soundFile) {
+    let soundPath;
+    // Check if soundFile is an absolute path (contains a full path) or just a filename
+    if (path.isAbsolute(soundFile)) {
+        // If it's an absolute path, convert it to a file URL for the Audio constructor
+        soundPath = 'file://' + soundFile.replace(/\\/g, '/');
+    } else {
+        // If it's just a filename, construct the path relative to appRoot (for backward compatibility)
+        const fullPath = path.join(appRoot, soundFile);
+        soundPath = 'file://' + fullPath.replace(/\\/g, '/');
+    }
+    
+    const audio = new Audio(soundPath);
+    
+    // Play the sound
+    audio.play().catch(error => {
+        console.error(`Failed to play reminder sound ${soundFile}:`, error);
+        // Fallback: try with the default notify.wav if a custom sound fails
+        if (soundFile !== "notify.wav") {
+            const fallbackPath = 'file://' + path.join(appRoot, "notify.wav").replace(/\\/g, '/');
+            const fallbackAudio = new Audio(fallbackPath);
+            fallbackAudio.play().catch(fallbackError => {
+                console.error('Failed to play fallback reminder sound:', fallbackError);
+            });
+        }
+    });
 }
 
 function validateAndApplyActionFormState() {

@@ -938,6 +938,34 @@ body.movable-mode #app-container {
     border-color: var(--primary-color);
 }
 
+.sound-setting-container {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    width: 100%;
+}
+
+.sound-setting-container input {
+    flex-grow: 1;
+    min-width: 0;
+}
+
+.metro-style-button {
+    background-color: #333;
+    border: 1px solid #888;
+    color: white;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 8px 12px;
+    transition: background-color 0.2s ease;
+    border-radius: 0;
+    text-align: center;
+}
+
+.metro-style-button:hover {
+    background-color: #444;
+}
+
 
 .speech-slider {
     -webkit-appearance: none;

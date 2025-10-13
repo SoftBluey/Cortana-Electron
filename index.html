@@ -148,6 +148,21 @@
                   </div>
                 </div>
                 <div class="settings-section">
+                  <h2>Notifications</h2>
+                  <div class="setting-item">
+                    <label for="reminder-sound-setting">Reminder Sound</label>
+                    <div class="sound-setting-container">
+                      <input
+                        type="text"
+                        id="reminder-sound-setting"
+                        class="settings-text-input"
+                        readonly
+                      />
+                      <button id="reminder-sound-browse-setting" class="metro-style-button">...</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="settings-section">
                   <h2>System</h2>
                   <div class="setting-item">
                     <label for="startup-toggle">Start with Windows</label>
@@ -181,6 +196,9 @@
                   <h2>Advanced</h2>
                   <button id="reset-voice-btn" class="settings-button">
                     Reset Voice Settings
+                  </button>
+                  <button id="reset-reminder-sound-btn" class="settings-button">
+                    Reset Reminder Sound
                   </button>
                   <button id="reset-all-btn" class="settings-button danger">
                     Reset All Settings & Reminders

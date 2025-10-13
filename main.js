@@ -47,6 +47,7 @@ let settings = {
   specificIdleGreeting: "What's on your mind?",
   customIdleGreeting: "",
   webSearchEnabled: false,
+  reminderSound: "notify.wav",  // Path to default reminder sound
 };
 const SETTINGS_FILE = path.join(app.getPath("userData"), "settings.json");
 const REMINDERS_FILE = path.join(app.getPath("userData"), "reminders.json");
@@ -67,6 +68,14 @@ const scheduleReminder = (reminderData) => {
           icon: iconPath,
         }).show();
       }
+      
+      // Play reminder sound if mainWindow exists
+      // Since there's no UI to set individual reminder sounds, always use the global setting
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const soundFile = settings.reminderSound || "notify.wav";
+        mainWindow.webContents.send("play-reminder-sound", soundFile);
+      }
+      
       // remove the fired reminder
       reminders = reminders.filter((r) => r.id !== reminderData.id);
       saveReminders();
@@ -78,10 +87,11 @@ const scheduleReminder = (reminderData) => {
 
 async function saveReminders() {
   try {
-    const remindersToSave = reminders.map(({ id, text, time }) => ({
+    const remindersToSave = reminders.map(({ id, text, time, sound }) => ({
       id,
       text,
       time,
+      sound,
     }));
     await fs.writeFile(
       REMINDERS_FILE,
@@ -161,7 +171,7 @@ async function checkForUpdates() {
 
     updateAvailable = compareVersions(currentVersion, remoteVersion) < 0;
 
-    if (mainWindow) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("update-status", {
         available: updateAvailable,
         currentVersion,
@@ -187,18 +197,20 @@ async function saveSettings() {
 if (!gotTheLock) {
   app.quit();
 } else {
-  app.on("second-instance", () => {
+  app.on("second-instance", (event, commandLine, workingDirectory) => {
     if (mainWindow) {
       showWindow();
     }
   });
 
   const sendAppVersion = async () => {
-    if (mainWindow) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
       const currentVersion = app.getVersion();
-      mainWindow.webContents.send("update-status", {
-        currentVersion: currentVersion,
-      });
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("update-status", {
+          currentVersion: currentVersion,
+        });
+      }
     }
   };
   app.whenReady().then(async () => {
@@ -211,10 +223,13 @@ if (!gotTheLock) {
     await loadReminders();
     await scanApplications(); // Call scanApplications here
 
+    // Apply the saved startup setting to the system
+    // Don't sync FROM system TO settings - that would overwrite user preferences
     app.setLoginItemSettings({
       openAtLogin: settings.openAtLogin,
       args: ["--hidden"],
-    });
+    })
+    
     createWindow();
 
     // Check for updates in the background
@@ -233,7 +248,9 @@ function showWindow() {
     isClosing = false;
     mainWindow.show();
     mainWindow.focus();
-    mainWindow.webContents.send("trigger-enter-animation");
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("trigger-enter-animation");
+    }
   }
 }
 
@@ -331,7 +348,9 @@ function createWindow() {
       click: () => {
         if (mainWindow) {
           showWindow();
-          mainWindow.webContents.send("show-settings-ui");
+          if (!mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("show-settings-ui");
+          }
         }
       },
     },
@@ -402,11 +421,7 @@ function createWindow() {
   });
 
   ipcMain.handle("get-settings", async () => {
-    const loginSettings = app.getLoginItemSettings();
-    if (settings.openAtLogin !== loginSettings.openAtLogin) {
-      settings.openAtLogin = loginSettings.openAtLogin;
-      await saveSettings();
-    }
+    // Just return the saved settings - don't overwrite them with system state
     return settings;
   });
 
@@ -474,9 +489,11 @@ function createWindow() {
       exec(`start "" "${sanitizedAppName}"`, (error) => {
         if (error) {
           console.error(`Fallback failed to open app ${appName}:`, error);
-          mainWindow.webContents.send("command-failed", {
-            command: "open-application",
-          });
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("command-failed", {
+              command: "open-application",
+            });
+          }
           resolve(false);
         } else {
           resolve(true);
@@ -495,9 +512,11 @@ function createWindow() {
     exec(command, (error) => {
       if (error) {
         console.error(`Failed to execute command "${command}":`, error);
-        mainWindow.webContents.send("command-failed", {
-          command: "run-command",
-        });
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("command-failed", {
+            command: "run-command",
+          });
+        }
       }
     });
   });
@@ -508,11 +527,12 @@ function createWindow() {
     return result;
   });
 
-  ipcMain.on("set-reminder", async (event, { reminder, reminderTime }) => {
+  ipcMain.on("set-reminder", async (event, { reminder, reminderTime, sound }) => {
     const newReminder = {
       id: Date.now().toString(),
       text: reminder,
       time: reminderTime,
+      sound: sound,  // Store the sound setting with the reminder
       timeout: null,
     };
     newReminder.timeout = scheduleReminder(newReminder);
@@ -524,7 +544,7 @@ function createWindow() {
 
   ipcMain.on(
     "update-reminder",
-    async (event, { id, reminder, reminderTime }) => {
+    async (event, { id, reminder, reminderTime, sound }) => {
       const reminderIndex = reminders.findIndex((r) => r.id === id);
       if (reminderIndex !== -1) {
         const existingReminder = reminders[reminderIndex];
@@ -534,6 +554,7 @@ function createWindow() {
           ...existingReminder,
           text: reminder,
           time: reminderTime,
+          sound: sound,
         };
 
         updatedReminder.timeout = scheduleReminder(updatedReminder);
@@ -559,7 +580,7 @@ function createWindow() {
   });
 
   ipcMain.handle("get-reminders", () => {
-    return reminders.map(({ id, text, time }) => ({ id, text, time }));
+    return reminders.map(({ id, text, time, sound }) => ({ id, text, time, sound }));
   });
 
   ipcMain.handle("get-app-version", () => {
@@ -595,7 +616,8 @@ function createWindow() {
           timezone
         )}`;
 
-        https
+        // Set up timeout to prevent hanging requests
+        const request = https
           .get(url, (res) => {
             if (res.statusCode !== 200) {
               res.resume();
@@ -642,6 +664,12 @@ function createWindow() {
             );
             reject(new Error(`Failed to get time for ${cityInput}`));
           });
+          
+        // Set timeout for the request
+        request.setTimeout(10000, () => { // 10 second timeout
+          request.abort();
+          reject(new Error(`Request timeout for ${cityInput}`));
+        });
       } catch (error) {
         console.error(`Time lookup failed for "${cityInput}" (setup):`, error);
         reject(new Error(`Failed to get time for ${cityInput}`));
