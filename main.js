@@ -20,7 +20,6 @@ const GITHUB_RAW_URL =
   "https://raw.githubusercontent.com/SoftBluey/Cortana-Electron/refs/heads/main/package.json";
 
 const APP_ID = "com.blueysoft.cortana-electron";
-app.setAppUserModelId(APP_ID);
 
 let mainWindow;
 const winWidth = 360;
@@ -49,13 +48,13 @@ let settings = {
   webSearchEnabled: false,
   reminderSound: "notify.wav",  // Path to default reminder sound
 };
-const SETTINGS_FILE = path.join(app.getPath("userData"), "settings.json");
-const REMINDERS_FILE = path.join(app.getPath("userData"), "reminders.json");
+let SETTINGS_FILE;
+let REMINDERS_FILE;
 let iconPath;
 
 const isSilentStart = process.argv.includes("--hidden");
 
-const gotTheLock = app.requestSingleInstanceLock();
+let gotTheLock;
 
 const scheduleReminder = (reminderData) => {
   const timeInMs = new Date(reminderData.time).getTime() - Date.now();
@@ -125,10 +124,26 @@ async function loadSettings() {
   try {
     const data = await fs.readFile(SETTINGS_FILE, "utf-8");
     const parsed = JSON.parse(data);
+    
+    // Validate that parsed data is an object
+    if (typeof parsed !== 'object' || parsed === null) {
+      throw new Error('Settings file contains invalid data');
+    }
+    
     settings = { ...settings, ...parsed };
   } catch (error) {
     if (error.code !== "ENOENT") {
       console.error("Failed to load settings, using defaults:", error);
+      // If settings file is corrupted, back it up and create new one
+      if (error instanceof SyntaxError || error.message === 'Settings file contains invalid data') {
+        try {
+          const backupFile = SETTINGS_FILE + '.backup';
+          await fs.copyFile(SETTINGS_FILE, backupFile);
+          console.log(`Corrupted settings backed up to ${backupFile}`);
+        } catch (backupError) {
+          console.error("Failed to backup corrupted settings:", backupError);
+        }
+      }
     }
     await saveSettings();
   }
@@ -194,48 +209,58 @@ async function saveSettings() {
   }
 }
 
-if (!gotTheLock) {
-  app.quit();
-} else {
+// Initialize app when ready
+const sendAppVersion = async () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    const currentVersion = app.getVersion();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("update-status", {
+        currentVersion: currentVersion,
+      });
+    }
+  }
+};
+
+app.whenReady().then(async () => {
+  // Initialize app-dependent variables
+  app.setAppUserModelId(APP_ID);
+  SETTINGS_FILE = path.join(app.getPath("userData"), "settings.json");
+  REMINDERS_FILE = path.join(app.getPath("userData"), "reminders.json");
+  gotTheLock = app.requestSingleInstanceLock();
+  
+  if (!gotTheLock) {
+    app.quit();
+    return;
+  }
+  
+  // Handle second instance
   app.on("second-instance", (event, commandLine, workingDirectory) => {
     if (mainWindow) {
       showWindow();
     }
   });
+  
+  const assetsPath = app.isPackaged
+    ? path.join(process.resourcesPath, "assets")
+    : path.join(__dirname, "assets");
+  iconPath = path.join(assetsPath, "icon.ico");
 
-  const sendAppVersion = async () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      const currentVersion = app.getVersion();
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("update-status", {
-          currentVersion: currentVersion,
-        });
-      }
-    }
-  };
-  app.whenReady().then(async () => {
-    const assetsPath = app.isPackaged
-      ? path.join(process.resourcesPath, "assets")
-      : path.join(__dirname, "assets");
-    iconPath = path.join(assetsPath, "icon.ico");
+  await loadSettings();
+  await loadReminders();
+  await scanApplications(); // Call scanApplications here
 
-    await loadSettings();
-    await loadReminders();
-    await scanApplications(); // Call scanApplications here
+  // Apply the saved startup setting to the system
+  // Don't sync FROM system TO settings - that would overwrite user preferences
+  app.setLoginItemSettings({
+    openAtLogin: settings.openAtLogin,
+    args: ["--hidden"],
+  })
+  
+  createWindow();
 
-    // Apply the saved startup setting to the system
-    // Don't sync FROM system TO settings - that would overwrite user preferences
-    app.setLoginItemSettings({
-      openAtLogin: settings.openAtLogin,
-      args: ["--hidden"],
-    })
-    
-    createWindow();
-
-    // Check for updates in the background
-    sendAppVersion();
-  });
-}
+  // Check for updates in the background
+  sendAppVersion();
+});
 
 function showWindow() {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -483,6 +508,19 @@ function createWindow() {
     return matchingApps;
   });
 
+  ipcMain.handle("search-applications", async (event, query) => {
+    const queryLower = query.toLowerCase();
+    const matchingAppNames = [];
+
+    for (const [name] of applicationCache.entries()) {
+      if (name.toLowerCase().includes(queryLower)) {
+        matchingAppNames.push(name);
+        if (matchingAppNames.length >= 5) break; // Limit to 5 results
+      }
+    }
+    return matchingAppNames;
+  });
+
   ipcMain.handle("open-application-fallback", async (event, appName) => {
     const sanitizedAppName = appName.replace(/"/g, "");
     return new Promise((resolve) => {
@@ -519,6 +557,23 @@ function createWindow() {
         }
       }
     });
+  });
+
+  ipcMain.on("run-special-command", (event, command) => {
+    // Handle special Windows commands and URIs
+    if (command.startsWith('ms-')) {
+      // Handle Windows URI schemes (like ms-settings:)
+      shell.openExternal(command).catch((err) => {
+        console.error(`Failed to open URI ${command}:`, err);
+      });
+    } else {
+      // Handle regular commands
+      exec(`start "" "${command}"`, (error) => {
+        if (error) {
+          console.error(`Failed to execute special command "${command}":`, error);
+        }
+      });
+    }
   });
 
   ipcMain.handle("show-open-dialog", async (event, options) => {

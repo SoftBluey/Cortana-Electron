@@ -1,13 +1,15 @@
 const { ipcRenderer } = require('electron');
 const path = require('path');
 
-let searchBar, searchIcon, webSearchToggle;
+let searchBar, searchIcon, webSearchToggle, searchSuggestions;
 let animationContainer, gifDisplay, resultsDisplay, contentWrapper;
 let webLinkContainer, webLink, webIcon;
 let appContainer;
 let finishSpeakingTimeout = null;
 let editingReminderId = null;
 let editingReminderSound = null;
+let selectedSuggestionIndex = -1;
+let currentSuggestions = [];
 
 let reminderContainer, reminderTextInput, reminderTimeInput, reminderSoundInput, reminderSaveBtn, reminderCancelBtn, reminderIcon, reminderSoundBrowseBtn;
 
@@ -127,6 +129,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchBar = document.getElementById('search-bar');
     searchIcon = document.getElementById('search-icon');
     webSearchToggle = document.getElementById('web-search-toggle');
+    searchSuggestions = document.getElementById('search-suggestions');
     animationContainer = document.getElementById('animation-container');
     gifDisplay = document.getElementById('gif-display');
     resultsDisplay = document.getElementById('results-display');
@@ -214,7 +217,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     assetsToPreload.forEach(src => { new Image().src = src; });
 
     document.getElementById('close-btn').addEventListener('click', () => ipcRenderer.send('close-app'));
-    searchBar.addEventListener('keydown', (event) => { if (event.key === 'Enter') onSearch(); });
+    
+    // Search bar event listeners
+    searchBar.addEventListener('input', onSearchInput);
+    searchBar.addEventListener('keydown', onSearchKeyDown);
+    searchBar.addEventListener('blur', () => {
+        // Delay hiding suggestions to allow click events to fire
+        setTimeout(() => hideSuggestions(), 200);
+    });
     
     webSearchToggle.addEventListener('click', (e) => {
         e.preventDefault();
@@ -410,6 +420,237 @@ window.addEventListener('DOMContentLoaded', async () => {
     isBusy = false;
     searchIcon.src = cortanaIcon;
 });
+
+// Search suggestions functionality
+const suggestionTemplates = [
+    // Time queries
+    { pattern: /^(time|what|whats|what's)/i, suggestions: [
+        { text: "What time is it?", type: "time", icon: "⏰" },
+        { text: "What's the time in London?", type: "time", icon: "🌍" },
+        { text: "What's the time in Tokyo?", type: "time", icon: "🌏" }
+    ]},
+    // Weather queries
+    { pattern: /^(weather|forecast)/i, suggestions: [
+        { text: "What's the weather in New York?", type: "weather", icon: "🌤️" },
+        { text: "What's the weather in London?", type: "weather", icon: "🌦️" },
+        { text: "Weather today", type: "weather", icon: "☁️" }
+    ]},
+    // Calculator queries
+    { pattern: /^[\d\s\+\-\*\/\(\)\.]+$|^(calculate|calc)/i, suggestions: [
+        { text: "Calculate 2 + 2", type: "calculator", icon: "🔢" },
+        { text: "Calculate 15% of 200", type: "calculator", icon: "🔢" },
+        { text: "Calculate square root of 144", type: "calculator", icon: "🔢" }
+    ]},
+    // Reminder queries
+    { pattern: /^(remind|reminder)/i, suggestions: [
+        { text: "Remind me to call mom", type: "reminder", icon: "⏰" },
+        { text: "Set a reminder", type: "reminder", icon: "📝" },
+        { text: "Show reminders", type: "reminder", icon: "📋" }
+    ]},
+    // Application queries - only show if no specific app name is typed
+    { pattern: /^(open|launch|start|run)$/i, suggestions: [
+        { text: "Open Calculator", type: "app", icon: "🔢" },
+        { text: "Open Notepad", type: "app", icon: "📝" },
+        { text: "Open Settings", type: "app", icon: "⚙️" }
+    ]},
+    // Joke queries
+    { pattern: /^(joke|tell|funny|laugh)/i, suggestions: [
+        { text: "Tell me a joke", type: "fun", icon: "😄" },
+        { text: "Tell me another joke", type: "fun", icon: "😂" },
+        { text: "Say a joke", type: "fun", icon: "🤣" }
+    ]},
+    // General queries
+    { pattern: /^(who|when|where|why|how)/i, suggestions: [
+        { text: "What can you do?", type: "help", icon: "❓" },
+        { text: "Who are you?", type: "help", icon: "👤" },
+        { text: "How are you?", type: "chat", icon: "💬" }
+    ]}
+];
+
+async function onSearchInput(event) {
+    const query = searchBar.value.trim();
+    
+    if (query.length === 0) {
+        hideSuggestions();
+        return;
+    }
+    
+    // Don't show suggestions when web search mode is enabled
+    if (webSearchEnabled) {
+        hideSuggestions();
+        return;
+    }
+    
+    // Generate suggestions based on input
+    const suggestions = await generateSuggestions(query);
+    
+    if (suggestions.length > 0) {
+        showSuggestions(suggestions);
+    } else {
+        hideSuggestions();
+    }
+}
+
+async function generateSuggestions(query) {
+    const suggestions = [];
+    const lowerQuery = query.toLowerCase();
+    
+    // Check if user is trying to open an app with a specific name
+    const openAppMatch = query.match(/^(open|launch|start|run)\s+(.+)/i);
+    if (openAppMatch && openAppMatch[2].length > 0) {
+        const appQuery = openAppMatch[2];
+        // Search for matching applications dynamically
+        const apps = await ipcRenderer.invoke('search-applications', appQuery);
+        if (apps && apps.length > 0) {
+            // Show dynamic app suggestions
+            apps.slice(0, 5).forEach(app => {
+                suggestions.push({
+                    text: `Open ${app}`,
+                    type: 'app',
+                    icon: '📱'
+                });
+            });
+            return suggestions;
+        }
+    }
+    
+    // Check template patterns for general suggestions
+    for (const template of suggestionTemplates) {
+        if (template.pattern.test(query)) {
+            // Filter suggestions to only include those that would actually work
+            const validSuggestions = template.suggestions.filter(suggestion => {
+                // Check if this suggestion would match any command
+                return wouldCommandMatch(suggestion.text);
+            });
+            suggestions.push(...validSuggestions);
+            break; // Only use first matching template
+        }
+    }
+    
+    // If no template matched, suggest apps and custom actions
+    if (suggestions.length === 0) {
+        // Suggest matching applications
+        const apps = await ipcRenderer.invoke('search-applications', query);
+        if (apps && apps.length > 0) {
+            apps.slice(0, 3).forEach(app => {
+                suggestions.push({
+                    text: `Open ${app}`,
+                    type: 'app',
+                    icon: '📱'
+                });
+            });
+        }
+        
+        // Suggest matching custom actions
+        const matchingActions = customActions.filter(action => 
+            action.trigger.toLowerCase().includes(lowerQuery)
+        );
+        if (matchingActions.length > 0) {
+            suggestions.push(...matchingActions.slice(0, 2).map(action => ({
+                text: action.trigger,
+                type: 'custom',
+                icon: '⚡'
+            })));
+        }
+    }
+    
+    return suggestions.slice(0, 5); // Limit to 5 suggestions
+}
+
+function showSuggestions(suggestions) {
+    currentSuggestions = suggestions;
+    selectedSuggestionIndex = -1;
+    
+    searchSuggestions.innerHTML = '';
+    
+    suggestions.forEach((suggestion, index) => {
+        const item = document.createElement('div');
+        item.className = 'suggestion-item';
+        item.dataset.index = index;
+        
+        const icon = document.createElement('span');
+        icon.className = 'suggestion-icon';
+        icon.textContent = suggestion.icon;
+        
+        const text = document.createElement('span');
+        text.className = 'suggestion-text';
+        text.textContent = suggestion.text;
+        
+        const type = document.createElement('span');
+        type.className = 'suggestion-type';
+        type.textContent = suggestion.type;
+        
+        item.appendChild(icon);
+        item.appendChild(text);
+        item.appendChild(type);
+        
+        item.addEventListener('click', () => {
+            searchBar.value = suggestion.text;
+            hideSuggestions();
+            onSearch();
+        });
+        
+        searchSuggestions.appendChild(item);
+    });
+    
+    searchSuggestions.classList.add('visible');
+}
+
+function hideSuggestions() {
+    searchSuggestions.classList.remove('visible');
+    currentSuggestions = [];
+    selectedSuggestionIndex = -1;
+}
+
+function onSearchKeyDown(event) {
+    if (currentSuggestions.length === 0) {
+        if (event.key === 'Enter') {
+            onSearch();
+        }
+        return;
+    }
+    
+    const items = searchSuggestions.querySelectorAll('.suggestion-item');
+    
+    switch (event.key) {
+        case 'ArrowDown':
+            event.preventDefault();
+            selectedSuggestionIndex = Math.min(selectedSuggestionIndex + 1, currentSuggestions.length - 1);
+            updateSelectedSuggestion(items);
+            break;
+            
+        case 'ArrowUp':
+            event.preventDefault();
+            selectedSuggestionIndex = Math.max(selectedSuggestionIndex - 1, -1);
+            updateSelectedSuggestion(items);
+            break;
+            
+        case 'Enter':
+            event.preventDefault();
+            if (selectedSuggestionIndex >= 0) {
+                searchBar.value = currentSuggestions[selectedSuggestionIndex].text;
+            }
+            hideSuggestions();
+            onSearch();
+            break;
+            
+        case 'Escape':
+            event.preventDefault();
+            hideSuggestions();
+            break;
+    }
+}
+
+function updateSelectedSuggestion(items) {
+    items.forEach((item, index) => {
+        if (index === selectedSuggestionIndex) {
+            item.classList.add('selected');
+            item.scrollIntoView({ block: 'nearest' });
+        } else {
+            item.classList.remove('selected');
+        }
+    });
+}
 
 async function showSettingsUI() {
     animationContainer.style.display = 'none';
@@ -972,8 +1213,15 @@ function calculate(query) {
         
         // Safe mathematical expression evaluator using recursive descent parser
         let index = 0;
+        let recursionDepth = 0;
+        const MAX_RECURSION_DEPTH = 50; // Prevent stack overflow from deeply nested expressions
         
         function parseExpression() {
+            recursionDepth++;
+            if (recursionDepth > MAX_RECURSION_DEPTH) {
+                throw new Error('Expression too deeply nested');
+            }
+            
             let result = parseTerm();
             
             while (index < cleanQuery.length && (cleanQuery[index] === '+' || cleanQuery[index] === '-')) {
@@ -983,6 +1231,7 @@ function calculate(query) {
                 result = op === '+' ? result + right : result - right;
             }
             
+            recursionDepth--;
             return result;
         }
         
@@ -1316,6 +1565,31 @@ function onSaveReminder() {
 
 
 async function handleOpenApplication(appName) {
+    // Handle special Windows commands
+    const specialCommands = {
+        'settings': 'ms-settings:',
+        'windows settings': 'ms-settings:',
+        'control panel': 'control',
+        'task manager': 'taskmgr',
+        'command prompt': 'cmd',
+        'cmd': 'cmd',
+        'powershell': 'powershell',
+        'notepad': 'notepad',
+        'calculator': 'calc',
+        'paint': 'mspaint',
+        'snipping tool': 'snippingtool',
+        'file explorer': 'explorer',
+        'explorer': 'explorer'
+    };
+    
+    const appNameLower = appName.toLowerCase();
+    if (specialCommands[appNameLower]) {
+        const command = specialCommands[appNameLower];
+        ipcRenderer.send('run-special-command', command);
+        displayAndSpeak(`Opening ${appName}...`, onActionFinished, {}, false);
+        return;
+    }
+    
     displayAndSpeak(`Looking for ${appName}...`, onActionFinished, {}, false);
 
     const apps = await ipcRenderer.invoke('find-application', appName);
@@ -1495,9 +1769,15 @@ const commands = [
         }
     },
     {
-        regex: /^(open|launch|start) (.+)/i,
+        regex: /^(open|launch|start|run) (.+)/i,
         handler: (match) => {
             handleOpenApplication(match[2].trim());
+        }
+    },
+    {
+        regex: /^(weather today|weather forecast|current weather|today'?s weather)$/i,
+        handler: () => {
+            displayAndSpeak("I need a location to check the weather. Try asking 'What's the weather in New York?'", onActionFinished, {}, false);
         }
     },
     {
@@ -1538,7 +1818,7 @@ const commands = [
         }
     },
     {
-        regex: /(tell me a|give me a|say a) joke/i,
+        regex: /(tell me a|give me a|say a) joke|make me laugh/i,
         handler: () => {
             const joke = getJoke();
             displayAndSpeak(joke, onActionFinished, { showWebLink: true }, false);
@@ -1558,9 +1838,9 @@ const commands = [
         }
     },
     {
-        regex: /who are you\??/i,
+        regex: /who (are you|made you|created you|built you)\??/i,
         handler: () => {
-            const response = "I am a remake of the 1607 styled Cortana from late 2016 Windows 10.";
+            const response = "I am a remake of the 1607 styled Cortana from late 2016 Windows 10, created by BlueySoft.";
             displayAndSpeak(response, onActionFinished, {}, false);
         }
     },
@@ -1632,6 +1912,30 @@ const commands = [
     }
 ];
 
+// Helper function to check if a command text would match any command handler
+function wouldCommandMatch(text) {
+    const lowerText = text.toLowerCase();
+    
+    // Check if it matches any custom action
+    const customAction = customActions.find(a => {
+        if (!a.trigger) return false;
+        const triggerLower = a.trigger.toLowerCase();
+        if (lowerText === triggerLower) return true;
+        const regex = new RegExp(`\\b${triggerLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+        return regex.test(lowerText);
+    });
+    if (customAction) return true;
+    
+    // Check if it matches any built-in command
+    for (const command of commands) {
+        if (lowerText.match(command.regex)) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
 function processQuery(query) {
     webLinkContainer.style.display = 'none';
     webLinkContainer.style.opacity = '0';
@@ -1649,7 +1953,17 @@ function processQuery(query) {
         return;
     }
 
-    const customAction = customActions.find(a => a.trigger && lowerCaseQuery.includes(a.trigger.toLowerCase()));
+    // Check for custom actions with exact match or word boundary matching
+    // This prevents false triggers (e.g., "open chrome" won't trigger a "chrome" custom action)
+    const customAction = customActions.find(a => {
+        if (!a.trigger) return false;
+        const triggerLower = a.trigger.toLowerCase();
+        // Check for exact match first
+        if (lowerCaseQuery === triggerLower) return true;
+        // Check if trigger appears as a complete word/phrase
+        const regex = new RegExp(`\\b${triggerLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+        return regex.test(lowerCaseQuery);
+    });
     if (customAction && customAction.actions.length > 0) {
         executeActionSequence(customAction.actions);
         return;
@@ -1883,14 +2197,34 @@ function removeAction(index) {
 
 function playReminderSound(soundFile) {
     let soundPath;
+    let fullFilePath;
+    
     // Check if soundFile is an absolute path (contains a full path) or just a filename
     if (path.isAbsolute(soundFile)) {
         // If it's an absolute path, convert it to a file URL for the Audio constructor
+        fullFilePath = soundFile;
         soundPath = 'file://' + soundFile.replace(/\\/g, '/');
     } else {
         // If it's just a filename, construct the path relative to appRoot (for backward compatibility)
-        const fullPath = path.join(appRoot, soundFile);
-        soundPath = 'file://' + fullPath.replace(/\\/g, '/');
+        fullFilePath = path.join(appRoot, soundFile);
+        soundPath = 'file://' + fullFilePath.replace(/\\/g, '/');
+    }
+    
+    // Check if the file exists before trying to play it
+    const fs = require('fs');
+    if (!fs.existsSync(fullFilePath)) {
+        console.warn(`Reminder sound file not found: ${fullFilePath}, using fallback`);
+        // Use fallback immediately if file doesn't exist
+        if (soundFile !== "notify.wav") {
+            const fallbackPath = path.join(appRoot, "notify.wav");
+            if (fs.existsSync(fallbackPath)) {
+                const fallbackAudio = new Audio('file://' + fallbackPath.replace(/\\/g, '/'));
+                fallbackAudio.play().catch(fallbackError => {
+                    console.error('Failed to play fallback reminder sound:', fallbackError);
+                });
+            }
+        }
+        return;
     }
     
     const audio = new Audio(soundPath);
