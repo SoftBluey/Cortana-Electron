@@ -64,3 +64,5 @@ To create a distributable `.exe` installer for Windows, run the following comman
 
 ``` sh
 npm run dist
+
+This project is licensed under the MIT License, see the LICENSE file for details.
