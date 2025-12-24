@@ -63,6 +63,6 @@ You must have [Node.js](https://nodejs.org/) installed on your system (which inc
 To create a distributable `.exe` installer for Windows, run the following command:
 
 ``` sh
-npm run dist
+npm run dist```
 
 This project is licensed under the MIT License, see the LICENSE file for details.
