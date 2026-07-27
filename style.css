@@ -518,7 +518,7 @@ body.movable-mode #app-container {
     background-color: #1f1f1f;
     border: 1px solid #333333;
     border-bottom: none;
-    max-height: 300px;
+    max-height: 240px;
     overflow-y: auto;
     display: none;
     z-index: 1000;
@@ -530,11 +530,10 @@ body.movable-mode #app-container {
 }
 
 .suggestion-item {
-    padding: 10px 15px;
+    padding: 8px 12px;
     cursor: pointer;
     display: flex;
     align-items: center;
-    gap: 10px;
     color: #ffffff;
     font-size: 14px;
     transition: background-color 0.1s ease;
@@ -550,30 +549,11 @@ body.movable-mode #app-container {
     background-color: var(--primary-color);
 }
 
-.suggestion-icon {
-    width: 16px;
-    height: 16px;
-    opacity: 0.7;
-    flex-shrink: 0;
-}
-
 .suggestion-text {
     flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-}
-
-.suggestion-type {
-    font-size: 11px;
-    color: #a2a2a2;
-    text-transform: uppercase;
-    flex-shrink: 0;
-}
-
-.suggestion-item:hover .suggestion-type,
-.suggestion-item.selected .suggestion-type {
-    color: rgba(255, 255, 255, 0.8);
 }
 
 #reminder-container,

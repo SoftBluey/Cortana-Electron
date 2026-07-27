@@ -485,45 +485,36 @@ window.addEventListener('DOMContentLoaded', async () => {
 const suggestionTemplates = [
     // Time queries
     { pattern: /^(time|what|whats|what's)/i, suggestions: [
-        { text: "What time is it?", type: "time", icon: "⏰" },
-        { text: "What's the time in London?", type: "time", icon: "🌍" },
-        { text: "What's the time in Tokyo?", type: "time", icon: "🌏" }
+        { text: "What time is it?" },
+        { text: "What's the time in London?" }
     ]},
     // Weather queries
     { pattern: /^(weather|forecast)/i, suggestions: [
-        { text: "What's the weather in New York?", type: "weather", icon: "🌤️" },
-        { text: "What's the weather in London?", type: "weather", icon: "🌦️" },
-        { text: "Weather today", type: "weather", icon: "☁️" }
+        { text: "What's the weather in New York?" },
+        { text: "What's the weather in London?" }
     ]},
     // Calculator queries
     { pattern: /^[\d\s\+\-\*\/\(\)\.]+$|^(calculate|calc)/i, suggestions: [
-        { text: "Calculate 2 + 2", type: "calculator", icon: "🔢" },
-        { text: "Calculate 15% of 200", type: "calculator", icon: "🔢" },
-        { text: "Calculate square root of 144", type: "calculator", icon: "🔢" }
+        { text: "Calculate 2 + 2" },
+        { text: "Calculate 15% of 200" }
     ]},
     // Reminder queries
     { pattern: /^(remind|reminder)/i, suggestions: [
-        { text: "Remind me to call mom", type: "reminder", icon: "⏰" },
-        { text: "Set a reminder", type: "reminder", icon: "📝" },
-        { text: "Show reminders", type: "reminder", icon: "📋" }
+        { text: "Remind me to call mom" },
+        { text: "Show reminders" }
     ]},
     // Application queries - only show if no specific app name is typed
     { pattern: /^(open|launch|start|run)$/i, suggestions: [
-        { text: "Open Calculator", type: "app", icon: "🔢" },
-        { text: "Open Notepad", type: "app", icon: "📝" },
-        { text: "Open Settings", type: "app", icon: "⚙️" }
+        { text: "Open Calculator" },
+        { text: "Open Notepad" }
     ]},
     // Joke queries
     { pattern: /^(joke|tell|funny|laugh)/i, suggestions: [
-        { text: "Tell me a joke", type: "fun", icon: "😄" },
-        { text: "Tell me another joke", type: "fun", icon: "😂" },
-        { text: "Say a joke", type: "fun", icon: "🤣" }
+        { text: "Tell me a joke" }
     ]},
     // General queries
     { pattern: /^(who|when|where|why|how)/i, suggestions: [
-        { text: "What can you do?", type: "help", icon: "❓" },
-        { text: "Who are you?", type: "help", icon: "👤" },
-        { text: "How are you?", type: "chat", icon: "💬" }
+        { text: "What can you do?" }
     ]}
 ];
 
@@ -564,11 +555,7 @@ async function generateSuggestions(query) {
         if (apps && apps.length > 0) {
             // Show dynamic app suggestions
             apps.slice(0, 5).forEach(app => {
-                suggestions.push({
-                    text: `Open ${app}`,
-                    type: 'app',
-                    icon: '📱'
-                });
+                suggestions.push({ text: `Open ${app}` });
             });
             return suggestions;
         }
@@ -593,11 +580,7 @@ async function generateSuggestions(query) {
         const apps = await ipcRenderer.invoke('search-applications', query);
         if (apps && apps.length > 0) {
             apps.slice(0, 3).forEach(app => {
-                suggestions.push({
-                    text: `Open ${app}`,
-                    type: 'app',
-                    icon: '📱'
-                });
+                suggestions.push({ text: `Open ${app}` });
             });
         }
         
@@ -607,14 +590,12 @@ async function generateSuggestions(query) {
         );
         if (matchingActions.length > 0) {
             suggestions.push(...matchingActions.slice(0, 2).map(action => ({
-                text: action.trigger,
-                type: 'custom',
-                icon: '⚡'
+                text: action.trigger
             })));
         }
     }
     
-    return suggestions.slice(0, 5); // Limit to 5 suggestions
+    return suggestions.slice(0, 4);
 }
 
 function showSuggestions(suggestions) {
@@ -628,21 +609,11 @@ function showSuggestions(suggestions) {
         item.className = 'suggestion-item';
         item.dataset.index = index;
         
-        const icon = document.createElement('span');
-        icon.className = 'suggestion-icon';
-        icon.textContent = suggestion.icon;
-        
         const text = document.createElement('span');
         text.className = 'suggestion-text';
         text.textContent = suggestion.text;
         
-        const type = document.createElement('span');
-        type.className = 'suggestion-type';
-        type.textContent = suggestion.type;
-        
-        item.appendChild(icon);
         item.appendChild(text);
-        item.appendChild(type);
         
         item.addEventListener('click', () => {
             searchBar.value = suggestion.text;
