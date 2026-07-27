@@ -416,7 +416,7 @@ function parseDuckDuckGoHTML(html) {
     if (redirMatch) {
       url = decodeURIComponent(redirMatch[1]);
     }
-    const title = decodeHTMLEntities(match[2].replace(/<[^>]*>/g, "").trim());
+    const title = decodeHTMLEntities(match[2].replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim());
     if (title && url && !url.startsWith("//duckduckgo.com")) {
       links.push({ url, title });
     }
@@ -424,7 +424,7 @@ function parseDuckDuckGoHTML(html) {
 
   const snippets = [];
   while ((match = snippetRegex.exec(html)) !== null) {
-    snippets.push(decodeHTMLEntities(match[1].replace(/<[^>]*>/g, "").trim()));
+    snippets.push(decodeHTMLEntities(match[1].replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim()));
   }
 
   for (let i = 0; i < links.length && i < 8; i++) {

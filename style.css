@@ -308,6 +308,9 @@ body.movable-mode #app-container {
     text-align: left;
     padding: 12px 0;
     border-bottom: 1px solid #333;
+    overflow: hidden;
+    width: 100%;
+    box-sizing: border-box;
 }
 
 .search-result-title {
@@ -317,6 +320,9 @@ body.movable-mode #app-container {
     cursor: pointer;
     display: block;
     margin-bottom: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .search-result-title:hover {
@@ -329,6 +335,7 @@ body.movable-mode #app-container {
     margin: 4px 0;
     line-height: 1.4;
     overflow-wrap: break-word;
+    word-break: break-word;
 }
 
 .search-result-url {
