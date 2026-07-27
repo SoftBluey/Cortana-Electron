@@ -966,8 +966,10 @@ body.movable-mode #app-container {
 #search-engine-select,
 #idle-greeting-mode-select,
 #specific-greeting-select,
+#tts-engine-select,
+#edge-voice-select,
 .action-item-type-select {
-    background-color: transparent;
+    background-color: #171717;
     color: white;
     border: 1px solid #888;
     padding: 8px 32px 8px 12px;
@@ -998,9 +1000,20 @@ body.movable-mode #app-container {
 
 #voice-select:hover, #search-engine-select:hover,
 #idle-greeting-mode-select:hover, #specific-greeting-select:hover,
+#tts-engine-select:hover, #edge-voice-select:hover,
 .settings-text-input:hover, .action-item-type-select:hover {
     background-color: #333;
 }
+
+#voice-select option, #search-engine-select option,
+#idle-greeting-mode-select option, #specific-greeting-select option,
+#tts-engine-select option, #edge-voice-select option,
+.action-item-type-select option {
+    background-color: #171717;
+    color: white;
+    padding: 4px 8px;
+}
+
 .settings-text-input:focus {
     border-color: var(--primary-color);
 }

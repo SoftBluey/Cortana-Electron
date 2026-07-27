@@ -14,6 +14,7 @@ let currentSuggestions = [];
 let reminderContainer, reminderTextInput, reminderTimeInput, reminderSoundInput, reminderSaveBtn, reminderCancelBtn, reminderIcon, reminderSoundBrowseBtn;
 
 let settingsContainer, settingsBtn, settingsBackBtn, voiceSelect, startupToggle, startupWarning, voiceWarning, searchEngineSelect, instantResponseToggle, themeColorPicker, movableToggle, pitchSlider, rateSlider, resetVoiceBtn, resetReminderSoundBtn, resetAllBtn, reminderSoundSettingInput, reminderSoundBrowseSettingBtn, reminderSoundResetSettingBtn;
+let ttsEngineSelect, edgeVoiceSelect, edgeVoiceContainer;
 let idleGreetingModeSelect, specificGreetingContainer, specificGreetingSelect, customGreetingContainer, customGreetingInput;
 let customActionFormContainer, customActionTriggerInput, customActionSaveBtn, customActionCancelBtn, customActionsList, addCustomActionBtn, actionSequenceList, actionSequenceWarning;
 
@@ -29,6 +30,9 @@ let themeColor = "#0078d7";
 let pitch = 1;
 let rate = 1;
 let webSearchEnabled = false;
+let ttsEngine = "system";
+let edgeVoice = "en-US-JennyNeural";
+let edgeVoices = [];
 let idleGreetingMode = 'random';
 let specificIdleGreeting = "What's on your mind?";
 let customIdleGreeting = '';
@@ -192,6 +196,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     resetReminderSoundBtn = document.getElementById('reset-reminder-sound-btn');
     resetAllBtn = document.getElementById('reset-all-btn');
 
+    ttsEngineSelect = document.getElementById('tts-engine-select');
+    edgeVoiceSelect = document.getElementById('edge-voice-select');
+    edgeVoiceContainer = document.getElementById('edge-voice-container');
+
     idleGreetingModeSelect = document.getElementById('idle-greeting-mode-select');
     specificGreetingContainer = document.getElementById('specific-greeting-container');
     specificGreetingSelect = document.getElementById('specific-greeting-select');
@@ -293,6 +301,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     webSearchToggle.addEventListener('change', onWebSearchToggleChanged);
     pitchSlider.addEventListener('input', onPitchChanged);
     rateSlider.addEventListener('input', onRateChanged);
+    ttsEngineSelect.addEventListener('change', onTtsEngineChanged);
+    edgeVoiceSelect.addEventListener('change', onEdgeVoiceChanged);
     resetVoiceBtn.addEventListener('click', onResetVoiceSettings);
     resetReminderSoundBtn.addEventListener('click', onResetReminderSound);
     resetAllBtn.addEventListener('click', onResetAllSettings);
@@ -745,6 +755,15 @@ async function loadAndApplySettings() {
     webSearchToggle.classList.toggle('active', webSearchEnabled);
     webSearchToggle.setAttribute('aria-pressed', webSearchEnabled);
 
+    ttsEngine = settings.ttsEngine || 'system';
+    edgeVoice = settings.edgeVoice || 'en-US-JennyNeural';
+    ttsEngineSelect.value = ttsEngine;
+    updateTtsEngineUI();
+
+    if (ttsEngine === 'edge') {
+        await loadEdgeVoices();
+    }
+
     idleGreetingMode = settings.idleGreetingMode || 'random';
     specificIdleGreeting = settings.specificIdleGreeting || "What's on your mind?";
     customIdleGreeting = settings.customIdleGreeting || '';
@@ -885,6 +904,15 @@ function onRateChanged(event) {
 }
 
 function onResetVoiceSettings() {
+    ttsEngine = 'system';
+    ttsEngineSelect.value = 'system';
+    ipcRenderer.send('set-setting', { key: 'ttsEngine', value: 'system' });
+
+    edgeVoice = 'en-US-JennyNeural';
+    edgeVoiceSelect.value = edgeVoice;
+    ipcRenderer.send('set-setting', { key: 'edgeVoice', value: edgeVoice });
+    updateTtsEngineUI();
+
     const defaultVoice = availableVoices.find(v => v.name.includes("Zira")) || availableVoices[0];
     
     if (defaultVoice) {
@@ -959,6 +987,42 @@ function onWebSearchToggleChanged() {
     webSearchEnabled = !webSearchEnabled;
     webSearchToggle.classList.toggle('active', webSearchEnabled);
     ipcRenderer.send('set-setting', { key: 'webSearchEnabled', value: webSearchEnabled });
+}
+
+function updateTtsEngineUI() {
+    const isEdge = ttsEngine === 'edge';
+    edgeVoiceContainer.style.display = isEdge ? 'block' : 'none';
+    voiceSelect.parentElement.style.display = isEdge ? 'none' : 'block';
+    pitchSlider.parentElement.style.display = isEdge ? 'none' : 'block';
+    rateSlider.parentElement.style.display = isEdge ? 'none' : 'block';
+}
+
+async function loadEdgeVoices() {
+    if (edgeVoices.length > 0) return;
+    edgeVoices = await ipcRenderer.invoke('get-edge-voices');
+    edgeVoiceSelect.innerHTML = '';
+    const sortedVoices = edgeVoices.sort((a, b) => (a.FriendlyName || '').localeCompare(b.FriendlyName || ''));
+    sortedVoices.forEach(voice => {
+        const option = document.createElement('option');
+        option.textContent = voice.FriendlyName || voice.ShortName;
+        option.value = voice.ShortName;
+        edgeVoiceSelect.appendChild(option);
+    });
+    edgeVoiceSelect.value = edgeVoice;
+}
+
+async function onTtsEngineChanged() {
+    ttsEngine = ttsEngineSelect.value;
+    ipcRenderer.send('set-setting', { key: 'ttsEngine', value: ttsEngine });
+    updateTtsEngineUI();
+    if (ttsEngine === 'edge') {
+        await loadEdgeVoices();
+    }
+}
+
+function onEdgeVoiceChanged() {
+    edgeVoice = edgeVoiceSelect.value;
+    ipcRenderer.send('set-setting', { key: 'edgeVoice', value: edgeVoice });
 }
 
 function onIdleGreetingModeChanged(event) {
@@ -1048,7 +1112,62 @@ function setupTTS() {
 
 function speak(text, onSpeechEndCallback) {
     window.speechSynthesis.cancel();
-    if (!currentVoice || !text) {
+    if (!text) {
+        if (onSpeechEndCallback) onSpeechEndCallback();
+        return;
+    }
+
+    if (ttsEngine === 'edge') {
+        speakEdge(text, onSpeechEndCallback);
+    } else {
+        speakSystem(text, onSpeechEndCallback);
+    }
+}
+
+let currentEdgeAudio = null;
+
+function speakEdge(text, onSpeechEndCallback) {
+    if (currentEdgeAudio) {
+        currentEdgeAudio.pause();
+        currentEdgeAudio = null;
+    }
+
+    ipcRenderer.invoke('synthesize-edge-tts', {
+        text,
+        voice: edgeVoice,
+        pitch,
+        rate
+    }).then(result => {
+        if (!result.success) {
+            console.error('Edge TTS failed:', result.error);
+            if (onSpeechEndCallback) onSpeechEndCallback();
+            return;
+        }
+        const audio = new Audio('file://' + result.filePath.replace(/\\/g, '/'));
+        currentEdgeAudio = audio;
+        audio.onended = () => {
+            currentEdgeAudio = null;
+            try { require('fs').unlinkSync(result.filePath); } catch(e) {}
+            if (onSpeechEndCallback) onSpeechEndCallback();
+        };
+        audio.onerror = () => {
+            currentEdgeAudio = null;
+            try { require('fs').unlinkSync(result.filePath); } catch(e) {}
+            if (onSpeechEndCallback) onSpeechEndCallback();
+        };
+        audio.play().catch(err => {
+            console.error('Edge TTS audio play failed:', err);
+            currentEdgeAudio = null;
+            if (onSpeechEndCallback) onSpeechEndCallback();
+        });
+    }).catch(err => {
+        console.error('Edge TTS invoke failed:', err);
+        if (onSpeechEndCallback) onSpeechEndCallback();
+    });
+}
+
+function speakSystem(text, onSpeechEndCallback) {
+    if (!currentVoice) {
         if (onSpeechEndCallback) onSpeechEndCallback();
         return;
     }
@@ -1100,6 +1219,10 @@ function setStateIdle() {
 
     clearTimeout(finishSpeakingTimeout);
     window.speechSynthesis.cancel();
+    if (currentEdgeAudio) {
+        currentEdgeAudio.pause();
+        currentEdgeAudio = null;
+    }
     requestSound.pause();
     requestSound.currentTime = 0;
     drumrollSound.pause();

@@ -14,6 +14,8 @@ const https = require("https");
 const { exec } = require("child_process");
 const fs = require("fs/promises");
 const cityTimezones = require("city-timezones");
+const { EdgeTTS } = require("node-edge-tts");
+const os = require("os");
 
 let updateAvailable = false;
 const GITHUB_RAW_URL =
@@ -46,7 +48,9 @@ let settings = {
   specificIdleGreeting: "What's on your mind?",
   customIdleGreeting: "",
   webSearchEnabled: false,
-  reminderSound: "notify.wav",  // Path to default reminder sound
+  reminderSound: "notify.wav",
+  ttsEngine: "system",
+  edgeVoice: "en-US-JennyNeural",
 };
 let SETTINGS_FILE;
 let REMINDERS_FILE;
@@ -267,8 +271,8 @@ function showWindow() {
     if (!mainWindow.isVisible() && !settings.isMovable) {
       const point = screen.getCursorScreenPoint();
       const display = screen.getDisplayNearestPoint(point);
-      const { x, height: screenHeight } = display.workArea;
-      mainWindow.setPosition(x, screenHeight - winHeight);
+      const { x, y, height: screenHeight } = display.workArea;
+      mainWindow.setPosition(x, y + screenHeight - winHeight);
     }
     isClosing = false;
     mainWindow.show();
@@ -355,9 +359,9 @@ function createWindow() {
   if (!settings.isMovable) {
     const point = screen.getCursorScreenPoint();
     const display = screen.getDisplayNearestPoint(point);
-    const { x, height: screenHeight } = display.workArea;
+    const { x, y, height: screenHeight } = display.workArea;
     winOptions.x = x;
-    winOptions.y = screenHeight - winHeight;
+    winOptions.y = y + screenHeight - winHeight;
   }
 
   mainWindow = new BrowserWindow(winOptions);
@@ -730,6 +734,60 @@ function createWindow() {
         reject(new Error(`Failed to get time for ${cityInput}`));
       }
     });
+  });
+
+  ipcMain.handle("get-edge-voices", async () => {
+    return [
+      { ShortName: "en-US-JennyNeural", FriendlyName: "Jenny (English, US)", Gender: "Female" },
+      { ShortName: "en-US-GuyNeural", FriendlyName: "Guy (English, US)", Gender: "Male" },
+      { ShortName: "en-US-AriaNeural", FriendlyName: "Aria (English, US)", Gender: "Female" },
+      { ShortName: "en-US-DavisNeural", FriendlyName: "Davis (English, US)", Gender: "Male" },
+      { ShortName: "en-US-SaraNeural", FriendlyName: "Sara (English, US)", Gender: "Female" },
+      { ShortName: "en-US-AndrewNeural", FriendlyName: "Andrew (English, US)", Gender: "Male" },
+      { ShortName: "en-US-EmmaNeural", FriendlyName: "Emma (English, US)", Gender: "Female" },
+      { ShortName: "en-US-BrianNeural", FriendlyName: "Brian (English, US)", Gender: "Male" },
+      { ShortName: "en-US-ChristopherNeural", FriendlyName: "Christopher (English, US)", Gender: "Male" },
+      { ShortName: "en-US-CorraNeural", FriendlyName: "Corra (English, US)", Gender: "Female" },
+      { ShortName: "en-US-ElizabethNeural", FriendlyName: "Elizabeth (English, US)", Gender: "Female" },
+      { ShortName: "en-US-EricNeural", FriendlyName: "Eric (English, US)", Gender: "Male" },
+      { ShortName: "en-US-MichelleNeural", FriendlyName: "Michelle (English, US)", Gender: "Female" },
+      { ShortName: "en-US-RyanNeural", FriendlyName: "Ryan (English, US)", Gender: "Male" },
+      { ShortName: "en-GB-SoniaNeural", FriendlyName: "Sonia (English, UK)", Gender: "Female" },
+      { ShortName: "en-GB-RyanNeural", FriendlyName: "Ryan (English, UK)", Gender: "Male" },
+      { ShortName: "en-AU-NatashaNeural", FriendlyName: "Natasha (English, AU)", Gender: "Female" },
+      { ShortName: "en-AU-WilliamNeural", FriendlyName: "William (English, AU)", Gender: "Male" },
+      { ShortName: "en-IE-ConnorNeural", FriendlyName: "Connor (English, IE)", Gender: "Male" },
+      { ShortName: "en-IN-NeerjaNeural", FriendlyName: "Neerja (English, IN)", Gender: "Female" },
+      { ShortName: "en-IN-PrabhatNeural", FriendlyName: "Prabhat (English, IN)", Gender: "Male" },
+    ];
+  });
+
+  ipcMain.handle("synthesize-edge-tts", async (event, { text, voice, pitch, rate }) => {
+    try {
+      const tempDir = os.tmpdir();
+      const outFile = path.join(tempDir, `cortana-tts-${Date.now()}.mp3`);
+
+      const pitchStr = pitch !== undefined && pitch !== 1
+        ? `${Math.round((pitch - 1) * 100)}%`
+        : "default";
+      const rateStr = rate !== undefined && rate !== 1
+        ? `${Math.round((rate - 1) * 100)}%`
+        : "default";
+
+      const tts = new EdgeTTS({
+        voice: voice || "en-US-JennyNeural",
+        lang: (voice || "en-US-JennyNeural").split("-").slice(0, 2).join("-"),
+        outputFormat: "audio-24khz-96kbitrate-mono-mp3",
+        pitch: pitchStr,
+        rate: rateStr,
+      });
+      await tts.ttsPromise(text, outFile);
+
+      return { success: true, filePath: outFile };
+    } catch (error) {
+      console.error("Edge TTS synthesis failed:", error);
+      return { success: false, error: error.message };
+    }
   });
 
   mainWindow.loadFile("index.html");

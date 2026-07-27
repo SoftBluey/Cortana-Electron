@@ -61,6 +61,17 @@
                 <div class="settings-section">
                   <h2>Personalisation</h2>
                   <div class="setting-item">
+                    <label for="tts-engine-select">Speech Engine</label>
+                    <select id="tts-engine-select">
+                      <option value="system">System (Local)</option>
+                      <option value="edge">Edge Neural (Online)</option>
+                    </select>
+                  </div>
+                  <div class="setting-item" id="edge-voice-container" style="display:none">
+                    <label for="edge-voice-select">Neural Voice</label>
+                    <select id="edge-voice-select"></select>
+                  </div>
+                  <div class="setting-item">
                     <label for="voice-select">Voice</label>
                     <select id="voice-select"></select>
                   </div>
