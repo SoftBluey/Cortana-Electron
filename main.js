@@ -1,6 +1,7 @@
 const {
   app,
   BrowserWindow,
+  BrowserView,
   screen,
   ipcMain,
   shell,
@@ -31,6 +32,8 @@ const winHeight = 640;
 let isSettingsVisible = false;
 let tray = null;
 let isClosing = false;
+let searchView = null;
+let searchViewActive = false;
 
 let applicationCache = new Map();
 
@@ -54,6 +57,11 @@ let settings = {
   ttsEngine: "edge",
   edgeVoice: "en-US-JennyNeural",
   timeFormat: "12",
+  openaiApiKey: "",
+  aiEnabled: false,
+  aiSystemPrompt: "You are Cortana, Microsoft's virtual assistant. Be helpful, concise, and friendly. Keep responses brief and conversational. Do not use markdown formatting.",
+  aiModel: "gpt-4o-mini",
+  aiApiUrl: "https://api.openai.com/v1/chat/completions",
 };
 let SETTINGS_FILE;
 let REMINDERS_FILE;
@@ -364,6 +372,12 @@ function closeApp() {
     return;
   }
   isClosing = true;
+  searchViewActive = false;
+  if (searchView) {
+    try { mainWindow.removeBrowserView(searchView); } catch {}
+    try { searchView.webContents.close(); } catch {}
+    searchView = null;
+  }
   mainWindow.webContents.send("go-idle-and-close");
 }
 
@@ -378,6 +392,98 @@ function registerIpcHandlers() {
   ipcMain.on("close-app", closeApp);
   ipcMain.on("open-external-link", (event, url) => {
     shell.openExternal(url);
+  });
+
+  ipcMain.on("show-search-view", (event, url) => {
+    searchViewActive = true;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (searchView) {
+      mainWindow.removeBrowserView(searchView);
+      searchView.webContents.close();
+      searchView = null;
+    }
+    searchView = new BrowserView({
+      webPreferences: { nodeIntegration: false, contextIsolation: true },
+    });
+    searchView.webContents.setWindowOpenHandler(({ url: targetUrl }) => {
+      shell.openExternal(targetUrl);
+      return { action: "deny" };
+    });
+    searchView.webContents.on("will-navigate", (e, navUrl) => {
+      if (navUrl !== url) {
+        e.preventDefault();
+        shell.openExternal(navUrl);
+      }
+    });
+    searchView.webContents.loadURL(url);
+    const [width, height] = mainWindow.getSize();
+    searchView.setBounds({ x: 0, y: 110, width, height: height - 110 - 45 });
+    mainWindow.addBrowserView(searchView);
+  });
+
+  ipcMain.on("hide-search-view", () => {
+    searchViewActive = false;
+    if (searchView && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.removeBrowserView(searchView);
+      searchView.webContents.close();
+      searchView = null;
+    }
+  });
+
+  ipcMain.handle("ask-openai", async (event, query) => {
+    const apiKey = settings.openaiApiKey;
+    const apiUrl = settings.aiApiUrl || "https://api.openai.com/v1/chat/completions";
+    const model = settings.aiModel || "gpt-4o-mini";
+    const systemPrompt = settings.aiSystemPrompt || "You are a helpful assistant. Be concise and conversational.";
+
+    if (!apiKey) {
+      return { success: false, error: "No API key configured. Add your key in Settings > AI." };
+    }
+    try {
+      const urlObj = new URL(apiUrl);
+      const body = JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: query },
+        ],
+        max_tokens: 500,
+      });
+      const data = await new Promise((resolve, reject) => {
+        const req = https.request(
+          {
+            hostname: urlObj.hostname,
+            port: urlObj.port || (urlObj.protocol === "https:" ? 443 : 80),
+            path: urlObj.pathname,
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${apiKey}`,
+            },
+          },
+          (res) => {
+            let responseData = "";
+            res.on("data", (chunk) => (responseData += chunk));
+            res.on("end", () => {
+              try {
+                resolve(JSON.parse(responseData));
+              } catch (e) {
+                reject(new Error("Invalid response from API"));
+              }
+            });
+          }
+        );
+        req.on("error", reject);
+        req.write(body);
+        req.end();
+      });
+      if (data.choices && data.choices[0]) {
+        return { success: true, text: data.choices[0].message.content.trim() };
+      }
+      return { success: false, error: data.error?.message || "No response from API" };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
   });
 
   ipcMain.handle("get-settings", async () => {
@@ -772,7 +878,7 @@ function createWindow() {
   });
 
   const handleBlur = () => {
-    if (isSettingsVisible || settings.isMovable) {
+    if (isSettingsVisible || settings.isMovable || searchViewActive) {
       return;
     }
     if (!mainWindow || mainWindow.isDestroyed()) {

@@ -18,6 +18,8 @@ let ttsEngineSelect, edgeVoiceSelect, edgeVoiceContainer;
 let timeFormatSelect;
 let idleGreetingModeSelect, specificGreetingContainer, specificGreetingSelect, customGreetingContainer, customGreetingInput;
 let customActionFormContainer, customActionTriggerInput, customActionSaveBtn, customActionCancelBtn, customActionsList, addCustomActionBtn, actionSequenceList, actionSequenceWarning;
+let aiToggle, openaiApiKeyInput, openaiApiKeyContainer;
+let aiModelInput, aiApiUrlInput, aiSystemPromptInput;
 
 let availableVoices = [];
 let customActions = [];
@@ -35,6 +37,12 @@ let ttsEngine = "edge";
 let edgeVoice = "en-US-JennyNeural";
 let edgeVoices = [];
 let timeFormat = "12";
+let searchViewActive = false;
+let aiEnabled = false;
+let aiSystemPrompt = '';
+let aiModel = '';
+let aiApiUrl = '';
+let searchViewHeader, searchViewBack, searchViewQuery;
 let idleGreetingMode = 'random';
 let specificIdleGreeting = "What's on your mind?";
 let customIdleGreeting = '';
@@ -218,6 +226,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     actionSequenceList = document.getElementById('action-sequence-list');
     actionSequenceWarning = document.getElementById('action-sequence-warning');
 
+    aiToggle = document.getElementById('ai-toggle');
+    openaiApiKeyInput = document.getElementById('openai-api-key-input');
+    openaiApiKeyContainer = document.getElementById('openai-api-key-container');
+    aiModelInput = document.getElementById('ai-model-input');
+    aiApiUrlInput = document.getElementById('ai-api-url-input');
+    aiSystemPromptInput = document.getElementById('ai-system-prompt-input');
+
+    searchViewHeader = document.getElementById('search-view-header');
+    searchViewBack = document.getElementById('search-view-back');
+    searchViewQuery = document.getElementById('search-view-query');
+
     document.getElementById('settings-btn-icon').src = settingsIconPng;
     document.getElementById('close-btn-icon').src = closeIconPng;
     document.getElementById('web-search-toggle-icon').src = searchIconPng;
@@ -227,7 +246,13 @@ window.addEventListener('DOMContentLoaded', async () => {
     const assetsToPreload = [idleVideo, speakingVideo, speakingEndVideo, thinkingVideo, listeningVideo, errorVideo, drumrollSound.src];
     assetsToPreload.forEach(src => { new Image().src = src; });
 
-    document.getElementById('close-btn').addEventListener('click', () => ipcRenderer.send('close-app'));
+    document.getElementById('close-btn').addEventListener('click', () => {
+        if (searchViewActive) {
+            hideSearchView();
+        } else {
+            ipcRenderer.send('close-app');
+        }
+    });
     
     // Search bar event listeners
     searchBar.addEventListener('input', onSearchInput);
@@ -266,10 +291,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
 
     gifDisplay.addEventListener('click', () => {
-        if (isBusy) {
+        if (searchViewActive) {
+            hideSearchView();
+        } else if (isBusy) {
             setStateIdle();
         }
     });
+
+    searchViewBack.addEventListener('click', hideSearchView);
 
     webLink.addEventListener('click', (e) => {
         e.preventDefault();
@@ -310,6 +339,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     resetReminderSoundBtn.addEventListener('click', onResetReminderSound);
     resetAllBtn.addEventListener('click', onResetAllSettings);
     
+    aiToggle.addEventListener('change', onAIChanged);
+    openaiApiKeyInput.addEventListener('input', onOpenAIKeyChanged);
+    aiModelInput.addEventListener('input', onAIModelChanged);
+    aiApiUrlInput.addEventListener('input', onAIApiUrlChanged);
+    aiSystemPromptInput.addEventListener('input', onAISystemPromptChanged);
+
     idleGreetingModeSelect.addEventListener('change', onIdleGreetingModeChanged);
     specificGreetingSelect.addEventListener('change', onSpecificIdleGreetingChanged);
     customGreetingInput.addEventListener('input', onCustomIdleGreetingChanged);
@@ -649,7 +684,11 @@ function onSearchKeyDown(event) {
             
         case 'Escape':
             event.preventDefault();
-            hideSuggestions();
+            if (searchViewActive) {
+                hideSearchView();
+            } else {
+                hideSuggestions();
+            }
             break;
     }
 }
@@ -793,6 +832,14 @@ async function loadAndApplySettings() {
             reminderSoundSettingInput.value = "notify.wav";
         }
     }
+
+    aiEnabled = settings.aiEnabled === true;
+    aiToggle.checked = aiEnabled;
+    openaiApiKeyInput.value = settings.openaiApiKey || '';
+    aiModelInput.value = settings.aiModel || 'gpt-4o-mini';
+    aiApiUrlInput.value = settings.aiApiUrl || 'https://api.openai.com/v1/chat/completions';
+    aiSystemPromptInput.value = settings.aiSystemPrompt || '';
+    updateAIUI();
 }
 
 function renderCustomActions() {
@@ -1042,6 +1089,32 @@ function formatReminderListOptions() {
     return { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: timeFormat === '12' };
 }
 
+function onAIChanged() {
+    aiEnabled = aiToggle.checked;
+    ipcRenderer.send('set-setting', { key: 'aiEnabled', value: aiEnabled });
+    updateAIUI();
+}
+
+function onOpenAIKeyChanged() {
+    ipcRenderer.send('set-setting', { key: 'openaiApiKey', value: openaiApiKeyInput.value });
+}
+
+function onAIModelChanged() {
+    ipcRenderer.send('set-setting', { key: 'aiModel', value: aiModelInput.value });
+}
+
+function onAIApiUrlChanged() {
+    ipcRenderer.send('set-setting', { key: 'aiApiUrl', value: aiApiUrlInput.value });
+}
+
+function onAISystemPromptChanged() {
+    ipcRenderer.send('set-setting', { key: 'aiSystemPrompt', value: aiSystemPromptInput.value });
+}
+
+function updateAIUI() {
+    openaiApiKeyContainer.style.display = aiEnabled ? 'block' : 'none';
+}
+
 function onIdleGreetingModeChanged(event) {
     idleGreetingMode = event.target.value;
     ipcRenderer.send('set-setting', { key: 'idleGreetingMode', value: idleGreetingMode });
@@ -1224,6 +1297,12 @@ function onActionFinished() {
 function setStateIdle() {
     if (animationContainer.className === 'idle' && document.activeElement === searchBar) return;
     
+    if (searchViewActive) {
+        searchViewActive = false;
+        ipcRenderer.send('hide-search-view');
+        searchViewHeader.classList.remove('visible');
+    }
+
     if (settingsContainer.classList.contains('visible')) {
         ipcRenderer.send('set-settings-visibility', false);
         settingsContainer.classList.remove('visible');
@@ -1294,17 +1373,28 @@ function getSearchUrl(query) {
 }
 
 function performWebSearch(query) {
-    const summaryText = `Searching the web for "${query}"...`;
     const searchUrl = getSearchUrl(query);
-    
-    displayAndSpeak(summaryText, () => {
-        ipcRenderer.send('open-external-link', searchUrl);
-        if (!isMovableMode) {
-            ipcRenderer.send('close-app');
-        } else {
-            onActionFinished();
-        }
-    }, {}, false);
+
+    searchViewActive = true;
+    searchViewQuery.textContent = query;
+    searchViewHeader.classList.add('visible');
+    ipcRenderer.send('show-search-view', searchUrl);
+    searchBar.disabled = false;
+    searchBar.value = '';
+    searchBar.placeholder = 'Press Escape to go back';
+    gifDisplay.src = idleVideo;
+
+    speak(`Searching the web for ${query}...`, null);
+}
+
+function hideSearchView() {
+    if (!searchViewActive) return;
+    searchViewActive = false;
+    ipcRenderer.send('hide-search-view');
+    searchViewHeader.classList.remove('visible');
+    searchBar.placeholder = 'Type here to search';
+    searchBar.value = '';
+    setStateIdle();
 }
 
 function showWebLink() {
@@ -2113,6 +2203,23 @@ function processQuery(query) {
             command.handler(match);
             return;
         }
+    }
+
+    if (aiEnabled && navigator.onLine) {
+        gifDisplay.src = thinkingVideo;
+        resultsDisplay.innerHTML = '';
+        const p = document.createElement('p');
+        p.className = 'fade-in-item';
+        p.textContent = 'Thinking...';
+        resultsDisplay.appendChild(p);
+        ipcRenderer.invoke('ask-openai', query).then(result => {
+            if (result.success) {
+                displayAndSpeak(result.text, onActionFinished, {}, false);
+            } else {
+                displayAndSpeak(result.error || "Sorry, I couldn't get an answer from AI.", onActionFinished, {}, true);
+            }
+        });
+        return;
     }
 
     displayAndSpeak("I'm sorry, I don't understand that command.", onActionFinished, {}, true);

@@ -29,6 +29,10 @@
               </div>
             </div>
           </div>
+          <div id="search-view-header">
+            <button id="search-view-back">&#xE0A6;</button>
+            <span id="search-view-query"></span>
+          </div>
           <div id="reminder-container">
             <img id="reminder-icon" alt="Cortana Icon" />
             <p class="reminder-title">What do you want to be reminded about?</p>
@@ -163,6 +167,54 @@
                       <option value="brave">Brave</option>
                       <option value="ecosia">Ecosia</option>
                     </select>
+                  </div>
+                </div>
+                <div class="settings-section">
+                  <h2>AI</h2>
+                  <div class="setting-item">
+                    <label for="ai-toggle">Use AI Responses</label>
+                    <label class="toggle-switch">
+                      <input type="checkbox" id="ai-toggle" />
+                      <span class="slider"></span>
+                    </label>
+                  </div>
+                  <div id="openai-api-key-container" class="setting-sub-item" style="display:none">
+                    <div class="setting-item">
+                      <label for="openai-api-key-input">API Key</label>
+                      <input
+                        type="password"
+                        id="openai-api-key-input"
+                        class="settings-text-input"
+                        placeholder="sk-..."
+                      />
+                    </div>
+                    <div class="setting-item">
+                      <label for="ai-model-input">Model</label>
+                      <input
+                        type="text"
+                        id="ai-model-input"
+                        class="settings-text-input"
+                        placeholder="gpt-4o-mini"
+                      />
+                    </div>
+                    <div class="setting-item">
+                      <label for="ai-api-url-input">API URL</label>
+                      <input
+                        type="text"
+                        id="ai-api-url-input"
+                        class="settings-text-input"
+                        placeholder="https://api.openai.com/v1/chat/completions"
+                      />
+                    </div>
+                    <div class="setting-item" style="flex-direction: column; align-items: stretch;">
+                      <label for="ai-system-prompt-input">System Prompt</label>
+                      <textarea
+                        id="ai-system-prompt-input"
+                        class="settings-text-input"
+                        placeholder="You are a helpful assistant..."
+                        rows="3"
+                      ></textarea>
+                    </div>
                   </div>
                 </div>
                 <div class="settings-section">
