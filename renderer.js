@@ -37,12 +37,11 @@ let ttsEngine = "edge";
 let edgeVoice = "en-US-JennyNeural";
 let edgeVoices = [];
 let timeFormat = "12";
-let searchViewActive = false;
+let searchResultsActive = false;
 let aiEnabled = false;
 let aiSystemPrompt = '';
 let aiModel = '';
 let aiApiUrl = '';
-let searchViewHeader, searchViewBack, searchViewQuery;
 let idleGreetingMode = 'random';
 let specificIdleGreeting = "What's on your mind?";
 let customIdleGreeting = '';
@@ -125,7 +124,26 @@ const jokes = [
     "What do you call a sad strawberry? A blueberry.",
     "I don't trust stairs. They're always up to something.",
     "What do you call someone with no body and no nose? Nobody knows.",
-    "Why was the stadium so cool? It was full of fans."
+    "Why was the stadium so cool? It was full of fans.",
+    "What do you call a dog that does magic tricks? A Labracadabrador.",
+    "Why don't oysters share their pearls? Because they're shellfish.",
+    "I'm on a seafood diet. I see food and I eat it.",
+    "What do you call a sleeping bull? A bulldozer.",
+    "Why did the student eat his homework? Because the teacher told him it was a piece of cake.",
+    "What do you call a fake stone? A shamrock.",
+    "Why do mushrooms get invited to all the parties? Because they're fun-guys.",
+    "What's the best thing about Switzerland? I don't know, but the flag is a big plus.",
+    "Why did the tomato turn red? Because it saw the salad dressing.",
+    "What do you call a bear that's stuck in the rain? A drizzly bear.",
+    "Why don't some couples go to the gym? Because some relationships don't work out.",
+    "Did you hear about the guy who invented the knock-knock joke? He won the no-bell prize.",
+    "What do you call an alligator in a vest? An investigator.",
+    "Why do cows have hooves instead of feet? Because they lactose.",
+    "What did the ocean say to the beach? Nothing, it just waved.",
+    "Why did the picture go to jail? Because it was framed.",
+    "What did the grape do when it got stepped on? Nothing, it just let out a little wine.",
+    "How do you catch a unique rabbit? Unique up on it.",
+    "Why do eggs hate jokes? Because they'd crack up."
 ];
 function getJoke() { return jokes[Math.floor(Math.random() * jokes.length)]; }
 const timeZoneAbbreviations = { 'est': 'America/New_York', 'edt': 'America/New_York', 'cst': 'America/Chicago', 'cdt': 'America/Chicago', 'mst': 'America/Denver', 'mdt': 'America/Denver', 'pst': 'America/Los_Angeles', 'pdt': 'America/Los_Angeles', 'gmt': 'Etc/GMT', 'utc': 'Etc/UTC', 'bst': 'Europe/London' };
@@ -233,10 +251,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     aiApiUrlInput = document.getElementById('ai-api-url-input');
     aiSystemPromptInput = document.getElementById('ai-system-prompt-input');
 
-    searchViewHeader = document.getElementById('search-view-header');
-    searchViewBack = document.getElementById('search-view-back');
-    searchViewQuery = document.getElementById('search-view-query');
-
     document.getElementById('settings-btn-icon').src = settingsIconPng;
     document.getElementById('close-btn-icon').src = closeIconPng;
     document.getElementById('web-search-toggle-icon').src = searchIconPng;
@@ -247,8 +261,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     assetsToPreload.forEach(src => { new Image().src = src; });
 
     document.getElementById('close-btn').addEventListener('click', () => {
-        if (searchViewActive) {
-            hideSearchView();
+        if (searchResultsActive) {
+            hideSearchResults();
         } else {
             ipcRenderer.send('close-app');
         }
@@ -291,14 +305,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
 
     gifDisplay.addEventListener('click', () => {
-        if (searchViewActive) {
-            hideSearchView();
+        if (searchResultsActive) {
+            hideSearchResults();
         } else if (isBusy) {
             setStateIdle();
         }
     });
-
-    searchViewBack.addEventListener('click', hideSearchView);
 
     webLink.addEventListener('click', (e) => {
         e.preventDefault();
@@ -684,8 +696,8 @@ function onSearchKeyDown(event) {
             
         case 'Escape':
             event.preventDefault();
-            if (searchViewActive) {
-                hideSearchView();
+            if (searchResultsActive) {
+                hideSearchResults();
             } else {
                 hideSuggestions();
             }
@@ -1297,10 +1309,8 @@ function onActionFinished() {
 function setStateIdle() {
     if (animationContainer.className === 'idle' && document.activeElement === searchBar) return;
     
-    if (searchViewActive) {
-        searchViewActive = false;
-        ipcRenderer.send('hide-search-view');
-        searchViewHeader.classList.remove('visible');
+    if (searchResultsActive) {
+        searchResultsActive = false;
     }
 
     if (settingsContainer.classList.contains('visible')) {
@@ -1372,26 +1382,65 @@ function getSearchUrl(query) {
     }
 }
 
-function performWebSearch(query) {
-    const searchUrl = getSearchUrl(query);
-
-    searchViewActive = true;
-    searchViewQuery.textContent = query;
-    searchViewHeader.classList.add('visible');
-    ipcRenderer.send('show-search-view', searchUrl);
+async function performWebSearch(query) {
+    searchResultsActive = true;
+    gifDisplay.src = thinkingVideo;
+    resultsDisplay.innerHTML = '';
+    const loadingP = document.createElement('p');
+    loadingP.className = 'fade-in-item';
+    loadingP.textContent = `Searching the web for "${query}"...`;
+    resultsDisplay.appendChild(loadingP);
     searchBar.disabled = false;
     searchBar.value = '';
     searchBar.placeholder = 'Press Escape to go back';
-    gifDisplay.src = idleVideo;
 
-    speak(`Searching the web for ${query}...`, null);
+    const result = await ipcRenderer.invoke('search-web', query);
+    if (!searchResultsActive) return;
+
+    resultsDisplay.innerHTML = '';
+    if (result.success && result.results.length > 0) {
+        result.results.forEach(r => {
+            const item = document.createElement('div');
+            item.className = 'search-result-item fade-in-item';
+            const title = document.createElement('a');
+            title.className = 'search-result-title';
+            title.textContent = r.title;
+            title.href = '#';
+            title.addEventListener('click', (e) => {
+                e.preventDefault();
+                ipcRenderer.send('open-external-link', r.url);
+            });
+            const snippet = document.createElement('p');
+            snippet.className = 'search-result-snippet';
+            snippet.textContent = r.snippet;
+            const url = document.createElement('span');
+            url.className = 'search-result-url';
+            url.textContent = r.url;
+            item.appendChild(title);
+            if (r.snippet) item.appendChild(snippet);
+            item.appendChild(url);
+            resultsDisplay.appendChild(item);
+        });
+
+        showWebLink();
+
+        gifDisplay.src = speakingVideo;
+        speak(`I found results for ${query}.`, () => {
+            onActionFinished();
+        });
+    } else {
+        const p = document.createElement('p');
+        p.className = 'fade-in-item';
+        p.textContent = 'No results found.';
+        resultsDisplay.appendChild(p);
+        gifDisplay.src = speakingVideo;
+        onActionFinished();
+    }
 }
 
-function hideSearchView() {
-    if (!searchViewActive) return;
-    searchViewActive = false;
-    ipcRenderer.send('hide-search-view');
-    searchViewHeader.classList.remove('visible');
+function hideSearchResults() {
+    if (!searchResultsActive) return;
+    searchResultsActive = false;
     searchBar.placeholder = 'Type here to search';
     searchBar.value = '';
     setStateIdle();

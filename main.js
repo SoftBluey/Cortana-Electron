@@ -1,7 +1,6 @@
 const {
   app,
   BrowserWindow,
-  BrowserView,
   screen,
   ipcMain,
   shell,
@@ -32,8 +31,6 @@ const winHeight = 640;
 let isSettingsVisible = false;
 let tray = null;
 let isClosing = false;
-let searchView = null;
-let searchViewActive = false;
 
 let applicationCache = new Map();
 
@@ -362,6 +359,85 @@ async function scanApplications() {
   console.log(`Scanned and cached ${applicationCache.size} applications.`);
 }
 
+function fetchDuckDuckGoResults(query) {
+  return new Promise((resolve, reject) => {
+    const postData = `q=${encodeURIComponent(query)}`;
+    const options = {
+      hostname: "html.duckduckgo.com",
+      path: "/html/",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(postData),
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      },
+    };
+    const req = https.request(options, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        try {
+          const results = parseDuckDuckGoHTML(data);
+          resolve(results);
+        } catch (e) {
+          reject(new Error("Failed to parse search results"));
+        }
+      });
+    });
+    req.on("error", reject);
+    req.write(postData);
+    req.end();
+  });
+}
+
+function decodeHTMLEntities(text) {
+  return text
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, " ");
+}
+
+function parseDuckDuckGoHTML(html) {
+  const results = [];
+  const resultRegex = /<a[^>]+class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const snippetRegex = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+
+  const links = [];
+  let match;
+  while ((match = resultRegex.exec(html)) !== null) {
+    let url = match[1];
+    const ddgRedirect = /uddg=([^&]+)/;
+    const redirMatch = ddgRedirect.exec(url);
+    if (redirMatch) {
+      url = decodeURIComponent(redirMatch[1]);
+    }
+    const title = decodeHTMLEntities(match[2].replace(/<[^>]*>/g, "").trim());
+    if (title && url && !url.startsWith("//duckduckgo.com")) {
+      links.push({ url, title });
+    }
+  }
+
+  const snippets = [];
+  while ((match = snippetRegex.exec(html)) !== null) {
+    snippets.push(decodeHTMLEntities(match[1].replace(/<[^>]*>/g, "").trim()));
+  }
+
+  for (let i = 0; i < links.length && i < 8; i++) {
+    results.push({
+      title: links[i].title,
+      url: links[i].url,
+      snippet: snippets[i] || "",
+    });
+  }
+
+  return results;
+}
+
 function closeApp() {
   if (
     isClosing ||
@@ -372,12 +448,6 @@ function closeApp() {
     return;
   }
   isClosing = true;
-  searchViewActive = false;
-  if (searchView) {
-    try { mainWindow.removeBrowserView(searchView); } catch {}
-    try { searchView.webContents.close(); } catch {}
-    searchView = null;
-  }
   mainWindow.webContents.send("go-idle-and-close");
 }
 
@@ -394,39 +464,12 @@ function registerIpcHandlers() {
     shell.openExternal(url);
   });
 
-  ipcMain.on("show-search-view", (event, url) => {
-    searchViewActive = true;
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    if (searchView) {
-      mainWindow.removeBrowserView(searchView);
-      searchView.webContents.close();
-      searchView = null;
-    }
-    searchView = new BrowserView({
-      webPreferences: { nodeIntegration: false, contextIsolation: true },
-    });
-    searchView.webContents.setWindowOpenHandler(({ url: targetUrl }) => {
-      shell.openExternal(targetUrl);
-      return { action: "deny" };
-    });
-    searchView.webContents.on("will-navigate", (e, navUrl) => {
-      if (navUrl !== url) {
-        e.preventDefault();
-        shell.openExternal(navUrl);
-      }
-    });
-    searchView.webContents.loadURL(url);
-    const [width, height] = mainWindow.getSize();
-    searchView.setBounds({ x: 0, y: 110, width, height: height - 110 - 45 });
-    mainWindow.addBrowserView(searchView);
-  });
-
-  ipcMain.on("hide-search-view", () => {
-    searchViewActive = false;
-    if (searchView && mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.removeBrowserView(searchView);
-      searchView.webContents.close();
-      searchView = null;
+  ipcMain.handle("search-web", async (event, query) => {
+    try {
+      const results = await fetchDuckDuckGoResults(query);
+      return { success: true, results };
+    } catch (error) {
+      return { success: false, error: error.message };
     }
   });
 
@@ -878,7 +921,7 @@ function createWindow() {
   });
 
   const handleBlur = () => {
-    if (isSettingsVisible || settings.isMovable || searchViewActive) {
+    if (isSettingsVisible || settings.isMovable) {
       return;
     }
     if (!mainWindow || mainWindow.isDestroyed()) {
