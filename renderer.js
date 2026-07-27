@@ -1050,10 +1050,10 @@ function onInstantResponseToggleChanged() {
 
 function updateTtsEngineUI() {
     const isEdge = ttsEngine === 'edge';
-    edgeVoiceContainer.style.display = isEdge ? 'block' : 'none';
-    voiceSelect.parentElement.style.display = isEdge ? 'none' : 'block';
-    pitchSlider.parentElement.style.display = isEdge ? 'none' : 'block';
-    rateSlider.parentElement.style.display = isEdge ? 'none' : 'block';
+    edgeVoiceContainer.style.display = isEdge ? 'flex' : 'none';
+    voiceSelect.parentElement.style.display = isEdge ? 'none' : 'flex';
+    pitchSlider.parentElement.style.display = isEdge ? 'none' : 'flex';
+    rateSlider.parentElement.style.display = isEdge ? 'none' : 'flex';
 }
 
 async function loadEdgeVoices() {
