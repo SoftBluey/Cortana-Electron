@@ -968,6 +968,7 @@ body.movable-mode #app-container {
 #specific-greeting-select,
 #tts-engine-select,
 #edge-voice-select,
+#time-format-select,
 .action-item-type-select {
     background-color: #171717;
     color: white;
@@ -985,13 +986,13 @@ body.movable-mode #app-container {
 }
 
 .settings-text-input {
-    background-color: transparent;
+    background-color: #171717;
     color: white;
     border: 1px solid #888;
     padding: 8px 12px;
     min-width: 150px;
     max-width: 180px;
-    text-align: right;
+    text-align: left;
     font-size: 15px;
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     outline: none;
@@ -1000,22 +1001,25 @@ body.movable-mode #app-container {
 
 #voice-select:hover, #search-engine-select:hover,
 #idle-greeting-mode-select:hover, #specific-greeting-select:hover,
-#tts-engine-select:hover, #edge-voice-select:hover,
+#tts-engine-select:hover, #edge-voice-select:hover, #time-format-select:hover,
 .settings-text-input:hover, .action-item-type-select:hover {
     background-color: #333;
 }
 
+#voice-select:focus, #search-engine-select:focus,
+#idle-greeting-mode-select:focus, #specific-greeting-select:focus,
+#tts-engine-select:focus, #edge-voice-select:focus, #time-format-select:focus,
+.settings-text-input:focus, .action-item-type-select:focus {
+    border-color: var(--primary-color);
+}
+
 #voice-select option, #search-engine-select option,
 #idle-greeting-mode-select option, #specific-greeting-select option,
-#tts-engine-select option, #edge-voice-select option,
+#tts-engine-select option, #edge-voice-select option, #time-format-select option,
 .action-item-type-select option {
     background-color: #171717;
     color: white;
     padding: 4px 8px;
-}
-
-.settings-text-input:focus {
-    border-color: var(--primary-color);
 }
 
 .sound-setting-container {

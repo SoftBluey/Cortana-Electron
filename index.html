@@ -64,7 +64,7 @@
                     <label for="tts-engine-select">Speech Engine</label>
                     <select id="tts-engine-select">
                       <option value="system">System (Local)</option>
-                      <option value="edge">Edge Neural (Online)</option>
+                      <option value="edge" selected>Edge Neural (Online)</option>
                     </select>
                   </div>
                   <div class="setting-item" id="edge-voice-container" style="display:none">
@@ -97,6 +97,10 @@
                       class="speech-slider"
                     />
                   </div>
+                  <p id="voice-warning" class="setting-warning">
+                    Cortana's default voice (Microsoft Zira Desktop) is not
+                    available.
+                  </p>
                   <div class="setting-item">
                     <label for="theme-color-picker">Theme Colour</label>
                     <input
@@ -104,6 +108,13 @@
                       id="theme-color-picker"
                       value="#0078d7"
                     />
+                  </div>
+                  <div class="setting-item">
+                    <label for="time-format-select">Time Format</label>
+                    <select id="time-format-select">
+                      <option value="12">12-hour (AM/PM)</option>
+                      <option value="24">24-hour (Military)</option>
+                    </select>
                   </div>
                   <div class="setting-item">
                     <label for="idle-greeting-mode-select">Idle Greeting</label>
@@ -133,10 +144,6 @@
                       />
                     </div>
                   </div>
-                  <p id="voice-warning" class="setting-warning">
-                    Cortana's default voice (Microsoft Zira Desktop) is not
-                    available.
-                  </p>
                 </div>
                 <div class="settings-section">
                   <h2>Custom Actions</h2>
@@ -175,6 +182,13 @@
                 </div>
                 <div class="settings-section">
                   <h2>System</h2>
+                  <div id="update-available" style="display:none">
+                    <p class="update-message"></p>
+                    <button id="update-button" class="settings-button">
+                      Download Update
+                    </button>
+                  </div>
+                  <p id="update-status">Version <span id="current-version"></span></p>
                   <div class="setting-item">
                     <label for="startup-toggle">Start with Windows</label>
                     <label class="toggle-switch">

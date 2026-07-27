@@ -11,8 +11,10 @@ const {
 } = require("electron");
 const path = require("path");
 const https = require("https");
+const crypto = require("crypto");
 const { exec } = require("child_process");
 const fs = require("fs/promises");
+const fssync = require("fs");
 const cityTimezones = require("city-timezones");
 const { EdgeTTS } = require("node-edge-tts");
 const os = require("os");
@@ -49,8 +51,9 @@ let settings = {
   customIdleGreeting: "",
   webSearchEnabled: false,
   reminderSound: "notify.wav",
-  ttsEngine: "system",
+  ttsEngine: "edge",
   edgeVoice: "en-US-JennyNeural",
+  timeFormat: "12",
 };
 let SETTINGS_FILE;
 let REMINDERS_FILE;
@@ -226,8 +229,19 @@ const sendAppVersion = async () => {
 };
 
 app.whenReady().then(async () => {
-  // Initialize app-dependent variables
   app.setAppUserModelId(APP_ID);
+  
+  // Clean up old Edge TTS temp files from previous sessions
+  try {
+    const tempDir = os.tmpdir();
+    const files = fssync.readdirSync(tempDir);
+    for (const file of files) {
+      if (file.startsWith("cortana-tts-") && file.endsWith(".mp3")) {
+        fssync.unlinkSync(path.join(tempDir, file));
+      }
+    }
+  } catch (e) { /* ignore cleanup errors */ }
+  
   SETTINGS_FILE = path.join(app.getPath("userData"), "settings.json");
   REMINDERS_FILE = path.join(app.getPath("userData"), "reminders.json");
   gotTheLock = app.requestSingleInstanceLock();
@@ -251,10 +265,10 @@ app.whenReady().then(async () => {
 
   await loadSettings();
   await loadReminders();
-  await scanApplications(); // Call scanApplications here
+  await scanApplications();
 
-  // Apply the saved startup setting to the system
-  // Don't sync FROM system TO settings - that would overwrite user preferences
+  registerIpcHandlers();
+
   app.setLoginItemSettings({
     openAtLogin: settings.openAtLogin,
     args: ["--hidden"],
@@ -340,6 +354,363 @@ async function scanApplications() {
   console.log(`Scanned and cached ${applicationCache.size} applications.`);
 }
 
+function closeApp() {
+  if (
+    isClosing ||
+    !mainWindow ||
+    mainWindow.isDestroyed() ||
+    !mainWindow.isVisible()
+  ) {
+    return;
+  }
+  isClosing = true;
+  mainWindow.webContents.send("go-idle-and-close");
+}
+
+function registerIpcHandlers() {
+  ipcMain.on("hide-window", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.hide();
+    }
+    isClosing = false;
+  });
+
+  ipcMain.on("close-app", closeApp);
+  ipcMain.on("open-external-link", (event, url) => {
+    shell.openExternal(url);
+  });
+
+  ipcMain.handle("get-settings", async () => {
+    return settings;
+  });
+
+  ipcMain.on("set-setting", async (event, { key, value }) => {
+    if (key in settings) {
+      settings[key] = value;
+      if (key === "openAtLogin") {
+        app.setLoginItemSettings({
+          openAtLogin: value,
+          args: ["--hidden"],
+        });
+      }
+      if (key === "isMovable") {
+        app.relaunch();
+        app.exit();
+      }
+      await saveSettings();
+    }
+  });
+
+  ipcMain.on("set-custom-actions", async (event, actions) => {
+    if (Array.isArray(actions)) {
+      settings.customActions = actions;
+      await saveSettings();
+    }
+  });
+
+  ipcMain.on("reset-all-settings", async () => {
+    try {
+      reminders.forEach((reminder) => {
+        if (reminder.timeout) clearTimeout(reminder.timeout);
+      });
+      reminders = [];
+      settings.customActions = [];
+
+      await fs.unlink(SETTINGS_FILE).catch((err) => {
+        if (err.code !== "ENOENT") throw err;
+      });
+      await fs.unlink(REMINDERS_FILE).catch((err) => {
+        if (err.code !== "ENOENT") throw err;
+      });
+
+      app.relaunch();
+      app.exit();
+    } catch (error) {
+      console.error("Failed to reset all settings:", error);
+    }
+  });
+
+  ipcMain.handle("find-application", async (event, query) => {
+    const queryLower = query.toLowerCase();
+    const matchingApps = [];
+
+    for (const [name, appPath] of applicationCache.entries()) {
+      if (name.toLowerCase().includes(queryLower)) {
+        matchingApps.push({ name, path: appPath });
+      }
+    }
+    return matchingApps;
+  });
+
+  ipcMain.handle("search-applications", async (event, query) => {
+    const queryLower = query.toLowerCase();
+    const matchingAppNames = [];
+
+    for (const [name] of applicationCache.entries()) {
+      if (name.toLowerCase().includes(queryLower)) {
+        matchingAppNames.push(name);
+        if (matchingAppNames.length >= 5) break;
+      }
+    }
+    return matchingAppNames;
+  });
+
+  ipcMain.handle("open-application-fallback", async (event, appName) => {
+    const sanitizedAppName = appName.replace(/"/g, "");
+    return new Promise((resolve) => {
+      exec(`start "" "${sanitizedAppName}"`, (error) => {
+        if (error) {
+          console.error(`Fallback failed to open app ${appName}:`, error);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("command-failed", {
+              command: "open-application",
+            });
+          }
+          resolve(false);
+        } else {
+          resolve(true);
+        }
+      });
+    });
+  });
+
+  ipcMain.on("open-path", (event, fsPath) => {
+    shell.openPath(fsPath).catch((err) => {
+      console.error(`Failed to open path ${fsPath}:`, err);
+    });
+  });
+
+  ipcMain.on("run-command", (event, command) => {
+    exec(command, (error) => {
+      if (error) {
+        console.error(`Failed to execute command "${command}":`, error);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("command-failed", {
+            command: "run-command",
+          });
+        }
+      }
+    });
+  });
+
+  ipcMain.on("run-special-command", (event, command) => {
+    if (command.startsWith('ms-')) {
+      shell.openExternal(command).catch((err) => {
+        console.error(`Failed to open URI ${command}:`, err);
+      });
+    } else {
+      exec(`start "" "${command}"`, (error) => {
+        if (error) {
+          console.error(`Failed to execute special command "${command}":`, error);
+        }
+      });
+    }
+  });
+
+  ipcMain.handle("show-open-dialog", async (event, options) => {
+    if (!mainWindow) return;
+    const result = await dialog.showOpenDialog(mainWindow, options);
+    return result;
+  });
+
+  ipcMain.on("set-reminder", async (event, { reminder, reminderTime, sound }) => {
+    const newReminder = {
+      id: crypto.randomUUID(),
+      text: reminder,
+      time: reminderTime,
+      sound: sound,
+      timeout: null,
+    };
+    newReminder.timeout = scheduleReminder(newReminder);
+    if (newReminder.timeout) {
+      reminders.push(newReminder);
+      await saveReminders();
+    }
+  });
+
+  ipcMain.on(
+    "update-reminder",
+    async (event, { id, reminder, reminderTime, sound }) => {
+      const reminderIndex = reminders.findIndex((r) => r.id === id);
+      if (reminderIndex !== -1) {
+        const existingReminder = reminders[reminderIndex];
+        if (existingReminder.timeout) clearTimeout(existingReminder.timeout);
+
+        const updatedReminder = {
+          ...existingReminder,
+          text: reminder,
+          time: reminderTime,
+          sound: sound,
+        };
+
+        updatedReminder.timeout = scheduleReminder(updatedReminder);
+        if (updatedReminder.timeout) {
+          reminders[reminderIndex] = updatedReminder;
+        } else {
+          reminders.splice(reminderIndex, 1);
+        }
+
+        await saveReminders();
+      }
+    }
+  );
+
+  ipcMain.on("remove-reminder", async (event, id) => {
+    const reminderIndex = reminders.findIndex((r) => r.id === id);
+    if (reminderIndex !== -1) {
+      clearTimeout(reminders[reminderIndex].timeout);
+      reminders.splice(reminderIndex, 1);
+      await saveReminders();
+    }
+  });
+
+  ipcMain.handle("get-reminders", () => {
+    return reminders.map(({ id, text, time, sound }) => ({ id, text, time, sound }));
+  });
+
+  ipcMain.handle("get-app-version", () => {
+    return app.getVersion();
+  });
+
+  ipcMain.handle("check-for-updates", async () => {
+    return await checkForUpdates();
+  });
+
+  ipcMain.on("open-github-releases", () => {
+    shell.openExternal(
+      "https://github.com/SoftBluey/Cortana-Electron/releases"
+    );
+  });
+
+  ipcMain.on("set-settings-visibility", (event, visible) => {
+    isSettingsVisible = visible;
+  });
+
+  ipcMain.handle("get-time-for-location", async (event, cityInput, format) => {
+    return new Promise((resolve, reject) => {
+      try {
+        const matches = cityTimezones.lookupViaCity(cityInput.trim());
+        if (!matches || matches.length === 0) {
+          return reject(
+            new Error(`Could not find timezone for city: ${cityInput}`)
+          );
+        }
+
+        const timezone = matches[0].timezone;
+        const url = `https://timeapi.io/api/Time/current/zone?timeZone=${encodeURIComponent(
+          timezone
+        )}`;
+
+        const request = https
+          .get(url, (res) => {
+            if (res.statusCode !== 200) {
+              res.resume();
+              return reject(
+                new Error(`Time API returned status ${res.statusCode}`)
+              );
+            }
+
+            let data = "";
+            res.on("data", (chunk) => {
+              data += chunk;
+            });
+            res.on("end", () => {
+              try {
+                const jsonData = JSON.parse(data);
+                if (!jsonData.dateTime) {
+                  return reject(new Error("Missing dateTime in API response"));
+                }
+                const dateTime = new Date(jsonData.dateTime);
+                const formattedTime = dateTime.toLocaleTimeString([], {
+                  hour: "numeric",
+                  minute: "2-digit",
+                  hour12: format !== "24",
+                });
+
+                resolve({
+                  city: matches[0].city,
+                  country: matches[0].country,
+                  timeZone: timezone,
+                  time: formattedTime,
+                });
+              } catch (parseError) {
+                console.error(
+                  `Time lookup failed for "${cityInput}" (parsing):`,
+                  parseError
+                );
+                reject(new Error(`Failed to parse time data for ${cityInput}`));
+              }
+            });
+          })
+          .on("error", (err) => {
+            console.error(
+              `Time lookup failed for "${cityInput}" (network):`,
+              err
+            );
+            reject(new Error(`Failed to get time for ${cityInput}`));
+          });
+          
+        request.setTimeout(10000, () => {
+          request.destroy();
+          reject(new Error(`Request timeout for ${cityInput}`));
+        });
+      } catch (error) {
+        console.error(`Time lookup failed for "${cityInput}" (setup):`, error);
+        reject(new Error(`Failed to get time for ${cityInput}`));
+      }
+    });
+  });
+
+  ipcMain.handle("get-edge-voices", async () => {
+    return [
+      { ShortName: "en-US-JennyNeural", FriendlyName: "Jenny (English, US)", Gender: "Female" },
+      { ShortName: "en-US-GuyNeural", FriendlyName: "Guy (English, US)", Gender: "Male" },
+      { ShortName: "en-US-AriaNeural", FriendlyName: "Aria (English, US)", Gender: "Female" },
+      { ShortName: "en-US-AndrewNeural", FriendlyName: "Andrew (English, US)", Gender: "Male" },
+      { ShortName: "en-US-EmmaNeural", FriendlyName: "Emma (English, US)", Gender: "Female" },
+      { ShortName: "en-US-BrianNeural", FriendlyName: "Brian (English, US)", Gender: "Male" },
+      { ShortName: "en-US-ChristopherNeural", FriendlyName: "Christopher (English, US)", Gender: "Male" },
+      { ShortName: "en-US-EricNeural", FriendlyName: "Eric (English, US)", Gender: "Male" },
+      { ShortName: "en-US-MichelleNeural", FriendlyName: "Michelle (English, US)", Gender: "Female" },
+      { ShortName: "en-GB-SoniaNeural", FriendlyName: "Sonia (English, UK)", Gender: "Female" },
+      { ShortName: "en-GB-RyanNeural", FriendlyName: "Ryan (English, UK)", Gender: "Male" },
+      { ShortName: "en-AU-NatashaNeural", FriendlyName: "Natasha (English, AU)", Gender: "Female" },
+      { ShortName: "en-AU-WilliamNeural", FriendlyName: "William (English, AU)", Gender: "Male" },
+      { ShortName: "en-IE-ConnorNeural", FriendlyName: "Connor (English, IE)", Gender: "Male" },
+      { ShortName: "en-IN-NeerjaNeural", FriendlyName: "Neerja (English, IN)", Gender: "Female" },
+      { ShortName: "en-IN-PrabhatNeural", FriendlyName: "Prabhat (English, IN)", Gender: "Male" },
+    ];
+  });
+
+  ipcMain.handle("synthesize-edge-tts", async (event, { text, voice, pitch, rate }) => {
+    try {
+      const tempDir = os.tmpdir();
+      const outFile = path.join(tempDir, `cortana-tts-${Date.now()}.mp3`);
+
+      const pitchStr = pitch !== undefined && pitch !== 1
+        ? `${Math.round((pitch - 1) * 100)}%`
+        : "default";
+      const rateStr = rate !== undefined && rate !== 1
+        ? `${Math.round((rate - 1) * 100)}%`
+        : "default";
+
+      const tts = new EdgeTTS({
+        voice: voice || "en-US-JennyNeural",
+        lang: (voice || "en-US-JennyNeural").split("-").slice(0, 2).join("-"),
+        outputFormat: "audio-24khz-96kbitrate-mono-mp3",
+        pitch: pitchStr,
+        rate: rateStr,
+      });
+      await tts.ttsPromise(text, outFile);
+
+      return { success: true, filePath: outFile };
+    } catch (error) {
+      console.error("Edge TTS synthesis failed:", error);
+      return { success: false, error: error.message };
+    }
+  });
+}
+
 function createWindow() {
   const winOptions = {
     width: winWidth,
@@ -400,19 +771,6 @@ function createWindow() {
     }
   });
 
-  const closeApp = () => {
-    if (
-      isClosing ||
-      !mainWindow ||
-      mainWindow.isDestroyed() ||
-      !mainWindow.isVisible()
-    ) {
-      return;
-    }
-    isClosing = true;
-    mainWindow.webContents.send("go-idle-and-close");
-  };
-
   const handleBlur = () => {
     if (isSettingsVisible || settings.isMovable) {
       return;
@@ -434,359 +792,6 @@ function createWindow() {
       } else {
         closeApp();
       }
-    }
-  });
-
-  ipcMain.on("hide-window", () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.hide();
-    }
-    isClosing = false;
-  });
-
-  ipcMain.on("close-app", closeApp);
-  ipcMain.on("open-external-link", (event, url) => {
-    shell.openExternal(url);
-  });
-
-  ipcMain.handle("get-settings", async () => {
-    // Just return the saved settings - don't overwrite them with system state
-    return settings;
-  });
-
-  ipcMain.on("set-setting", async (event, { key, value }) => {
-    if (key in settings) {
-      settings[key] = value;
-      if (key === "openAtLogin") {
-        app.setLoginItemSettings({
-          openAtLogin: value,
-          args: ["--hidden"],
-        });
-      }
-      if (key === "isMovable") {
-        app.relaunch();
-        app.exit();
-      }
-      await saveSettings();
-    }
-  });
-
-  ipcMain.on("set-custom-actions", async (event, actions) => {
-    if (Array.isArray(actions)) {
-      settings.customActions = actions;
-      await saveSettings();
-    }
-  });
-
-  ipcMain.on("reset-all-settings", async () => {
-    try {
-      reminders.forEach((reminder) => {
-        if (reminder.timeout) clearTimeout(reminder.timeout);
-      });
-      reminders = [];
-      settings.customActions = [];
-
-      await fs.unlink(SETTINGS_FILE).catch((err) => {
-        if (err.code !== "ENOENT") throw err;
-      });
-      await fs.unlink(REMINDERS_FILE).catch((err) => {
-        if (err.code !== "ENOENT") throw err;
-      });
-
-      app.relaunch();
-      app.exit();
-    } catch (error) {
-      console.error("Failed to reset all settings:", error);
-    }
-  });
-
-  ipcMain.handle("find-application", async (event, query) => {
-    const queryLower = query.toLowerCase();
-    const matchingApps = [];
-
-    for (const [name, path] of applicationCache.entries()) {
-      if (name.toLowerCase().includes(queryLower)) {
-        matchingApps.push({ name, path });
-      }
-    }
-    return matchingApps;
-  });
-
-  ipcMain.handle("search-applications", async (event, query) => {
-    const queryLower = query.toLowerCase();
-    const matchingAppNames = [];
-
-    for (const [name] of applicationCache.entries()) {
-      if (name.toLowerCase().includes(queryLower)) {
-        matchingAppNames.push(name);
-        if (matchingAppNames.length >= 5) break; // Limit to 5 results
-      }
-    }
-    return matchingAppNames;
-  });
-
-  ipcMain.handle("open-application-fallback", async (event, appName) => {
-    const sanitizedAppName = appName.replace(/"/g, "");
-    return new Promise((resolve) => {
-      exec(`start "" "${sanitizedAppName}"`, (error) => {
-        if (error) {
-          console.error(`Fallback failed to open app ${appName}:`, error);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send("command-failed", {
-              command: "open-application",
-            });
-          }
-          resolve(false);
-        } else {
-          resolve(true);
-        }
-      });
-    });
-  });
-
-  ipcMain.on("open-path", (event, fsPath) => {
-    shell.openPath(fsPath).catch((err) => {
-      console.error(`Failed to open path ${fsPath}:`, err);
-    });
-  });
-
-  ipcMain.on("run-command", (event, command) => {
-    exec(command, (error) => {
-      if (error) {
-        console.error(`Failed to execute command "${command}":`, error);
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send("command-failed", {
-            command: "run-command",
-          });
-        }
-      }
-    });
-  });
-
-  ipcMain.on("run-special-command", (event, command) => {
-    // Handle special Windows commands and URIs
-    if (command.startsWith('ms-')) {
-      // Handle Windows URI schemes (like ms-settings:)
-      shell.openExternal(command).catch((err) => {
-        console.error(`Failed to open URI ${command}:`, err);
-      });
-    } else {
-      // Handle regular commands
-      exec(`start "" "${command}"`, (error) => {
-        if (error) {
-          console.error(`Failed to execute special command "${command}":`, error);
-        }
-      });
-    }
-  });
-
-  ipcMain.handle("show-open-dialog", async (event, options) => {
-    if (!mainWindow) return;
-    const result = await dialog.showOpenDialog(mainWindow, options);
-    return result;
-  });
-
-  ipcMain.on("set-reminder", async (event, { reminder, reminderTime, sound }) => {
-    const newReminder = {
-      id: Date.now().toString(),
-      text: reminder,
-      time: reminderTime,
-      sound: sound,  // Store the sound setting with the reminder
-      timeout: null,
-    };
-    newReminder.timeout = scheduleReminder(newReminder);
-    if (newReminder.timeout) {
-      reminders.push(newReminder);
-      await saveReminders();
-    }
-  });
-
-  ipcMain.on(
-    "update-reminder",
-    async (event, { id, reminder, reminderTime, sound }) => {
-      const reminderIndex = reminders.findIndex((r) => r.id === id);
-      if (reminderIndex !== -1) {
-        const existingReminder = reminders[reminderIndex];
-        if (existingReminder.timeout) clearTimeout(existingReminder.timeout);
-
-        const updatedReminder = {
-          ...existingReminder,
-          text: reminder,
-          time: reminderTime,
-          sound: sound,
-        };
-
-        updatedReminder.timeout = scheduleReminder(updatedReminder);
-        if (updatedReminder.timeout) {
-          reminders[reminderIndex] = updatedReminder;
-        } else {
-          // If scheduling failed (time is in the past), remove it
-          reminders.splice(reminderIndex, 1);
-        }
-
-        await saveReminders();
-      }
-    }
-  );
-
-  ipcMain.on("remove-reminder", async (event, id) => {
-    const reminderIndex = reminders.findIndex((r) => r.id === id);
-    if (reminderIndex !== -1) {
-      clearTimeout(reminders[reminderIndex].timeout);
-      reminders.splice(reminderIndex, 1);
-      await saveReminders();
-    }
-  });
-
-  ipcMain.handle("get-reminders", () => {
-    return reminders.map(({ id, text, time, sound }) => ({ id, text, time, sound }));
-  });
-
-  ipcMain.handle("get-app-version", () => {
-    return app.getVersion();
-  });
-
-  ipcMain.handle("check-for-updates", async () => {
-    return await checkForUpdates();
-  });
-
-  ipcMain.on("open-github-releases", () => {
-    shell.openExternal(
-      "https://github.com/SoftBluey/Cortana-Electron/releases"
-    );
-  });
-
-  ipcMain.on("set-settings-visibility", (event, visible) => {
-    isSettingsVisible = visible;
-  });
-
-  ipcMain.handle("get-time-for-location", async (event, cityInput) => {
-    return new Promise((resolve, reject) => {
-      try {
-        const matches = cityTimezones.lookupViaCity(cityInput.trim());
-        if (!matches || matches.length === 0) {
-          return reject(
-            new Error(`Could not find timezone for city: ${cityInput}`)
-          );
-        }
-
-        const timezone = matches[0].timezone;
-        const url = `https://timeapi.io/api/Time/current/zone?timeZone=${encodeURIComponent(
-          timezone
-        )}`;
-
-        // Set up timeout to prevent hanging requests
-        const request = https
-          .get(url, (res) => {
-            if (res.statusCode !== 200) {
-              res.resume();
-              return reject(
-                new Error(`Time API returned status ${res.statusCode}`)
-              );
-            }
-
-            let data = "";
-            res.on("data", (chunk) => {
-              data += chunk;
-            });
-            res.on("end", () => {
-              try {
-                const jsonData = JSON.parse(data);
-                if (!jsonData.dateTime) {
-                  return reject(new Error("Missing dateTime in API response"));
-                }
-                const dateTime = new Date(jsonData.dateTime);
-                const formattedTime = dateTime.toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                });
-
-                resolve({
-                  city: matches[0].city,
-                  country: matches[0].country,
-                  timeZone: timezone,
-                  time: formattedTime,
-                });
-              } catch (parseError) {
-                console.error(
-                  `Time lookup failed for "${cityInput}" (parsing):`,
-                  parseError
-                );
-                reject(new Error(`Failed to parse time data for ${cityInput}`));
-              }
-            });
-          })
-          .on("error", (err) => {
-            console.error(
-              `Time lookup failed for "${cityInput}" (network):`,
-              err
-            );
-            reject(new Error(`Failed to get time for ${cityInput}`));
-          });
-          
-        // Set timeout for the request
-        request.setTimeout(10000, () => { // 10 second timeout
-          request.abort();
-          reject(new Error(`Request timeout for ${cityInput}`));
-        });
-      } catch (error) {
-        console.error(`Time lookup failed for "${cityInput}" (setup):`, error);
-        reject(new Error(`Failed to get time for ${cityInput}`));
-      }
-    });
-  });
-
-  ipcMain.handle("get-edge-voices", async () => {
-    return [
-      { ShortName: "en-US-JennyNeural", FriendlyName: "Jenny (English, US)", Gender: "Female" },
-      { ShortName: "en-US-GuyNeural", FriendlyName: "Guy (English, US)", Gender: "Male" },
-      { ShortName: "en-US-AriaNeural", FriendlyName: "Aria (English, US)", Gender: "Female" },
-      { ShortName: "en-US-DavisNeural", FriendlyName: "Davis (English, US)", Gender: "Male" },
-      { ShortName: "en-US-SaraNeural", FriendlyName: "Sara (English, US)", Gender: "Female" },
-      { ShortName: "en-US-AndrewNeural", FriendlyName: "Andrew (English, US)", Gender: "Male" },
-      { ShortName: "en-US-EmmaNeural", FriendlyName: "Emma (English, US)", Gender: "Female" },
-      { ShortName: "en-US-BrianNeural", FriendlyName: "Brian (English, US)", Gender: "Male" },
-      { ShortName: "en-US-ChristopherNeural", FriendlyName: "Christopher (English, US)", Gender: "Male" },
-      { ShortName: "en-US-CorraNeural", FriendlyName: "Corra (English, US)", Gender: "Female" },
-      { ShortName: "en-US-ElizabethNeural", FriendlyName: "Elizabeth (English, US)", Gender: "Female" },
-      { ShortName: "en-US-EricNeural", FriendlyName: "Eric (English, US)", Gender: "Male" },
-      { ShortName: "en-US-MichelleNeural", FriendlyName: "Michelle (English, US)", Gender: "Female" },
-      { ShortName: "en-US-RyanNeural", FriendlyName: "Ryan (English, US)", Gender: "Male" },
-      { ShortName: "en-GB-SoniaNeural", FriendlyName: "Sonia (English, UK)", Gender: "Female" },
-      { ShortName: "en-GB-RyanNeural", FriendlyName: "Ryan (English, UK)", Gender: "Male" },
-      { ShortName: "en-AU-NatashaNeural", FriendlyName: "Natasha (English, AU)", Gender: "Female" },
-      { ShortName: "en-AU-WilliamNeural", FriendlyName: "William (English, AU)", Gender: "Male" },
-      { ShortName: "en-IE-ConnorNeural", FriendlyName: "Connor (English, IE)", Gender: "Male" },
-      { ShortName: "en-IN-NeerjaNeural", FriendlyName: "Neerja (English, IN)", Gender: "Female" },
-      { ShortName: "en-IN-PrabhatNeural", FriendlyName: "Prabhat (English, IN)", Gender: "Male" },
-    ];
-  });
-
-  ipcMain.handle("synthesize-edge-tts", async (event, { text, voice, pitch, rate }) => {
-    try {
-      const tempDir = os.tmpdir();
-      const outFile = path.join(tempDir, `cortana-tts-${Date.now()}.mp3`);
-
-      const pitchStr = pitch !== undefined && pitch !== 1
-        ? `${Math.round((pitch - 1) * 100)}%`
-        : "default";
-      const rateStr = rate !== undefined && rate !== 1
-        ? `${Math.round((rate - 1) * 100)}%`
-        : "default";
-
-      const tts = new EdgeTTS({
-        voice: voice || "en-US-JennyNeural",
-        lang: (voice || "en-US-JennyNeural").split("-").slice(0, 2).join("-"),
-        outputFormat: "audio-24khz-96kbitrate-mono-mp3",
-        pitch: pitchStr,
-        rate: rateStr,
-      });
-      await tts.ttsPromise(text, outFile);
-
-      return { success: true, filePath: outFile };
-    } catch (error) {
-      console.error("Edge TTS synthesis failed:", error);
-      return { success: false, error: error.message };
     }
   });
 

@@ -15,6 +15,7 @@ let reminderContainer, reminderTextInput, reminderTimeInput, reminderSoundInput,
 
 let settingsContainer, settingsBtn, settingsBackBtn, voiceSelect, startupToggle, startupWarning, voiceWarning, searchEngineSelect, instantResponseToggle, themeColorPicker, movableToggle, pitchSlider, rateSlider, resetVoiceBtn, resetReminderSoundBtn, resetAllBtn, reminderSoundSettingInput, reminderSoundBrowseSettingBtn, reminderSoundResetSettingBtn;
 let ttsEngineSelect, edgeVoiceSelect, edgeVoiceContainer;
+let timeFormatSelect;
 let idleGreetingModeSelect, specificGreetingContainer, specificGreetingSelect, customGreetingContainer, customGreetingInput;
 let customActionFormContainer, customActionTriggerInput, customActionSaveBtn, customActionCancelBtn, customActionsList, addCustomActionBtn, actionSequenceList, actionSequenceWarning;
 
@@ -30,9 +31,10 @@ let themeColor = "#0078d7";
 let pitch = 1;
 let rate = 1;
 let webSearchEnabled = false;
-let ttsEngine = "system";
+let ttsEngine = "edge";
 let edgeVoice = "en-US-JennyNeural";
 let edgeVoices = [];
+let timeFormat = "12";
 let idleGreetingMode = 'random';
 let specificIdleGreeting = "What's on your mind?";
 let customIdleGreeting = '';
@@ -199,6 +201,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     ttsEngineSelect = document.getElementById('tts-engine-select');
     edgeVoiceSelect = document.getElementById('edge-voice-select');
     edgeVoiceContainer = document.getElementById('edge-voice-container');
+    timeFormatSelect = document.getElementById('time-format-select');
 
     idleGreetingModeSelect = document.getElementById('idle-greeting-mode-select');
     specificGreetingContainer = document.getElementById('specific-greeting-container');
@@ -298,11 +301,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     instantResponseToggle.addEventListener('change', onInstantResponseToggleChanged);
     themeColorPicker.addEventListener('input', onThemeColorChanged, false);
     movableToggle.addEventListener('change', onMovableToggleChanged);
-    webSearchToggle.addEventListener('change', onWebSearchToggleChanged);
     pitchSlider.addEventListener('input', onPitchChanged);
     rateSlider.addEventListener('input', onRateChanged);
     ttsEngineSelect.addEventListener('change', onTtsEngineChanged);
     edgeVoiceSelect.addEventListener('change', onEdgeVoiceChanged);
+    timeFormatSelect.addEventListener('change', onTimeFormatChanged);
     resetVoiceBtn.addEventListener('click', onResetVoiceSettings);
     resetReminderSoundBtn.addEventListener('click', onResetReminderSound);
     resetAllBtn.addEventListener('click', onResetAllSettings);
@@ -764,6 +767,9 @@ async function loadAndApplySettings() {
         await loadEdgeVoices();
     }
 
+    timeFormat = settings.timeFormat || '12';
+    timeFormatSelect.value = timeFormat;
+
     idleGreetingMode = settings.idleGreetingMode || 'random';
     specificIdleGreeting = settings.specificIdleGreeting || "What's on your mind?";
     customIdleGreeting = settings.customIdleGreeting || '';
@@ -983,12 +989,6 @@ function onInstantResponseToggleChanged() {
     ipcRenderer.send('set-setting', { key: 'instantResponse', value: instantResponse });
 }
 
-function onWebSearchToggleChanged() {
-    webSearchEnabled = !webSearchEnabled;
-    webSearchToggle.classList.toggle('active', webSearchEnabled);
-    ipcRenderer.send('set-setting', { key: 'webSearchEnabled', value: webSearchEnabled });
-}
-
 function updateTtsEngineUI() {
     const isEdge = ttsEngine === 'edge';
     edgeVoiceContainer.style.display = isEdge ? 'block' : 'none';
@@ -1023,6 +1023,23 @@ async function onTtsEngineChanged() {
 function onEdgeVoiceChanged() {
     edgeVoice = edgeVoiceSelect.value;
     ipcRenderer.send('set-setting', { key: 'edgeVoice', value: edgeVoice });
+}
+
+function onTimeFormatChanged() {
+    timeFormat = timeFormatSelect.value;
+    ipcRenderer.send('set-setting', { key: 'timeFormat', value: timeFormat });
+}
+
+function formatTimeOptions() {
+    return { hour: 'numeric', minute: '2-digit', hour12: timeFormat === '12' };
+}
+
+function formatDateTimeOptions() {
+    return { weekday: 'long', hour: 'numeric', minute: '2-digit', hour12: timeFormat === '12' };
+}
+
+function formatReminderListOptions() {
+    return { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: timeFormat === '12' };
 }
 
 function onIdleGreetingModeChanged(event) {
@@ -1465,7 +1482,7 @@ async function getWeather(location) {
 async function getTimeForLocation(rawInput) {
     let text;
     try {
-        const result = await ipcRenderer.invoke('get-time-for-location', rawInput.trim());
+        const result = await ipcRenderer.invoke('get-time-for-location', rawInput.trim(), timeFormat);
 
         if (result.ambiguous) {
             text = "I found a few places with that name. Which one did you mean?";
@@ -1504,7 +1521,7 @@ async function getTimeForLocation(rawInput) {
 
 function getLocalTime() {
     const now = new Date();
-    const text = `The local time is ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    const text = `The local time is ${now.toLocaleTimeString([], formatTimeOptions())}`;
     displayAndSpeak(text, onActionFinished, { showWebLink: true }, false);
 }
 
@@ -1666,7 +1683,7 @@ function onSaveReminder() {
             text = `OK. I've updated your reminder.`;
         } else {
             ipcRenderer.send('set-reminder', reminderPayload);
-            const friendlyTime = reminderDate.toLocaleString([], { weekday: 'long', hour: '2-digit', minute: '2-digit' });
+            const friendlyTime = reminderDate.toLocaleString([], formatDateTimeOptions());
             text = `OK. I'll remind you to "${reminder}" on ${friendlyTime}.`;
         }
 
@@ -1795,9 +1812,7 @@ async function showReminders() {
 
             const time = document.createElement('span');
             const reminderDate = new Date(reminder.time);
-            time.textContent = reminderDate.toLocaleString([], {
-                month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
-            });
+            time.textContent = reminderDate.toLocaleString([], formatReminderListOptions());
             time.className = 'reminder-time';
 
             textContainer.appendChild(text);
@@ -1815,7 +1830,7 @@ async function showReminders() {
                     initialText: reminder.text,
                     initialTime: formatDateTimeForInput(reminderDate),
                     // Use the sound property if available, otherwise default to settings
-                    initialSound: reminder.sound || settings.reminderSound || "notify.wav",
+                    initialSound: reminder.sound || reminderSound || "notify.wav",
                     id: reminder.id
                 });
             };
