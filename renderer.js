@@ -13,7 +13,7 @@ let currentSuggestions = [];
 
 let reminderContainer, reminderTextInput, reminderTimeInput, reminderSoundInput, reminderSaveBtn, reminderCancelBtn, reminderIcon, reminderSoundBrowseBtn;
 
-let settingsContainer, settingsBtn, settingsBackBtn, voiceSelect, startupToggle, startupWarning, voiceWarning, searchEngineSelect, instantResponseToggle, themeColorPicker, movableToggle, pitchSlider, rateSlider, resetVoiceBtn, resetReminderSoundBtn, resetAllBtn, reminderSoundSettingInput, reminderSoundBrowseSettingBtn, reminderSoundResetSettingBtn;
+let settingsContainer, settingsBtn, settingsBackBtn, voiceSelect, startupToggle, startupWarning, voiceWarning, searchEngineSelect, themeColorPicker, movableToggle, pitchSlider, rateSlider, resetVoiceBtn, resetReminderSoundBtn, resetAllBtn, reminderSoundSettingInput, reminderSoundBrowseSettingBtn, reminderSoundResetSettingBtn;
 let ttsEngineSelect, edgeVoiceSelect, edgeVoiceContainer;
 let timeFormatSelect;
 let idleGreetingModeSelect, specificGreetingContainer, specificGreetingSelect, customGreetingContainer, customGreetingInput;
@@ -27,7 +27,6 @@ let currentVoice = null;
 let editingActionIndex = null;
 let preferredVoiceName = "Microsoft Zira Desktop";
 let currentSearchEngine = "bing";
-let instantResponse = false;
 let isMovableMode = false;
 let themeColor = "#0078d7";
 let pitch = 1;
@@ -215,7 +214,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     startupWarning = document.getElementById('startup-warning');
     voiceWarning = document.getElementById('voice-warning');
     searchEngineSelect = document.getElementById('search-engine-select');
-    instantResponseToggle = document.getElementById('instant-response-toggle');
     themeColorPicker = document.getElementById('theme-color-picker');
     movableToggle = document.getElementById('movable-toggle');
     pitchSlider = document.getElementById('pitch-slider');
@@ -304,13 +302,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         searchIcon.src = cortanaIcon;
     });
 
-    gifDisplay.addEventListener('click', () => {
-        if (searchResultsActive) {
-            hideSearchResults();
-        } else if (isBusy) {
-            setStateIdle();
-        }
-    });
+
 
     webLink.addEventListener('click', (e) => {
         e.preventDefault();
@@ -339,7 +331,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     voiceSelect.addEventListener('change', onVoiceChanged);
     startupToggle.addEventListener('change', onStartupToggleChanged);
     searchEngineSelect.addEventListener('change', onSearchEngineChanged);
-    instantResponseToggle.addEventListener('change', onInstantResponseToggleChanged);
+
     themeColorPicker.addEventListener('input', onThemeColorChanged, false);
     movableToggle.addEventListener('change', onMovableToggleChanged);
     pitchSlider.addEventListener('input', onPitchChanged);
@@ -755,8 +747,6 @@ async function loadAndApplySettings() {
     currentSearchEngine = settings.searchEngine;
     searchEngineSelect.value = settings.searchEngine;
 
-    instantResponse = settings.instantResponse;
-    instantResponseToggle.checked = settings.instantResponse;
 
     isMovableMode = settings.isMovable;
     movableToggle.checked = settings.isMovable;
@@ -1014,11 +1004,6 @@ function onSearchEngineChanged() {
     ipcRenderer.send('set-setting', { key: 'searchEngine', value: currentSearchEngine });
 }
 
-function onInstantResponseToggleChanged() {
-    instantResponse = instantResponseToggle.checked;
-    ipcRenderer.send('set-setting', { key: 'instantResponse', value: instantResponse });
-}
-
 function updateTtsEngineUI() {
     const isEdge = ttsEngine === 'edge';
     edgeVoiceContainer.style.display = isEdge ? 'flex' : 'none';
@@ -1116,6 +1101,8 @@ function onCustomIdleGreetingChanged(event) {
 
 function displayAndSpeak(text, callback, options = {}, isError = false) {
     resultsDisplay.innerHTML = '';
+    requestSound.pause();
+    requestSound.currentTime = 0;
 
     const p = document.createElement('p');
     p.className = 'fade-in-item';
@@ -1265,8 +1252,6 @@ function onActionFinished() {
 
     isBusy = false;
     gifDisplay.src = speakingEndVideo;
-    searchBar.disabled = false;
-    searchBar.placeholder = 'Type here to search';
 
     finishSpeakingTimeout = setTimeout(() => {
         if (animationContainer.className === 'active') {
@@ -1400,6 +1385,8 @@ async function performWebSearch(query) {
         showWebLink();
 
         gifDisplay.src = speakingVideo;
+        requestSound.pause();
+        requestSound.currentTime = 0;
         speak(`I found results for ${query}.`, () => {
             onActionFinished();
         });
@@ -2261,20 +2248,13 @@ function onSearch() {
     setStateActive();
     searchBar.blur();
     searchBar.value = '';
-    searchBar.placeholder = 'Thinking...';
-    searchBar.disabled = true;
     gifDisplay.src = thinkingVideo;
     
     resultsDisplay.innerHTML = '';
 
-    if (instantResponse) {
-        processQuery(query);
-    } else {
-        requestSound.play();
-        requestSound.onended = () => {
-            processQuery(query);
-        };
-    }
+    requestSound.currentTime = 0;
+    requestSound.play();
+    processQuery(query);
 }
 
 async function executeActionSequence(actions) {

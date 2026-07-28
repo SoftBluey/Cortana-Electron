@@ -41,7 +41,6 @@ let settings = {
   openAtLogin: true,
   preferredVoice: "Microsoft Zira Desktop",
   searchEngine: "bing",
-  instantResponse: false,
   themeColor: "#0078d7",
   customActions: [],
   isMovable: false,

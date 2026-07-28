@@ -152,7 +152,6 @@ body.movable-mode #app-container {
     transform: translateX(-50%);
     transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
     filter: hue-rotate(var(--hue-rotate-deg));
-    cursor: pointer;
 }
 
 #content-wrapper {
@@ -472,7 +471,6 @@ body.movable-mode #app-container {
     width: 25px;
     height: 25px;
     pointer-events: none;
-    transition: filter 0.2s ease-out;
 }
 
 #search-bar {
@@ -484,7 +482,6 @@ body.movable-mode #app-container {
     padding: 0 50px 0 45px;
     border: none;
     outline: none;
-    transition: background-color 0.2s ease-out;
 }
 
 #search-bar:hover {
@@ -496,12 +493,8 @@ body.movable-mode #app-container {
     color: black;
 }
 
-.search-input-wrapper:hover #search-icon {
-    filter: invert(100%);
-}
-
 .search-input-wrapper:focus-within #search-icon {
-    filter: invert(0%);
+    filter: brightness(0);
 }
 
 #search-bar::placeholder {
