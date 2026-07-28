@@ -1138,8 +1138,12 @@ function displayAndSpeak(text, callback, options = {}, isError = false) {
 
     if (isError) {
         errorSound.play();
-        errorSound.onended = () => speak(text, onSpeechEndCallback);
+        errorSound.onended = () => {
+            gifDisplay.src = speakingVideo;
+            speak(text, onSpeechEndCallback);
+        };
     } else {
+        gifDisplay.src = speakingVideo;
         speak(text, onSpeechEndCallback);
     }
 }

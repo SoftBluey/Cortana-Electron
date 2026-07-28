@@ -11,6 +11,7 @@ const {
 } = require("electron");
 const path = require("path");
 const https = require("https");
+const http = require("http");
 const crypto = require("crypto");
 const { exec } = require("child_process");
 const fs = require("fs/promises");
@@ -479,11 +480,13 @@ function registerIpcHandlers() {
     const model = settings.aiModel || "gpt-4o-mini";
     const systemPrompt = settings.aiSystemPrompt || "You are a helpful assistant. Be concise and conversational.";
 
-    if (!apiKey) {
+    const isLocal = !apiUrl.includes("openai.com") && !apiUrl.includes("api.openai.com");
+    if (!apiKey && !isLocal) {
       return { success: false, error: "No API key configured. Add your key in Settings > AI." };
     }
     try {
       const urlObj = new URL(apiUrl);
+      const transport = urlObj.protocol === "https:" ? https : http;
       const body = JSON.stringify({
         model,
         messages: [
@@ -492,17 +495,20 @@ function registerIpcHandlers() {
         ],
         max_tokens: 500,
       });
+      const headers = {
+        "Content-Type": "application/json",
+      };
+      if (apiKey) {
+        headers.Authorization = `Bearer ${apiKey}`;
+      }
       const data = await new Promise((resolve, reject) => {
-        const req = https.request(
+        const req = transport.request(
           {
             hostname: urlObj.hostname,
             port: urlObj.port || (urlObj.protocol === "https:" ? 443 : 80),
-            path: urlObj.pathname,
+            path: urlObj.pathname + urlObj.search,
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${apiKey}`,
-            },
+            headers,
           },
           (res) => {
             let responseData = "";
