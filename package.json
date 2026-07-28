@@ -4,7 +4,7 @@
   "description": "A electron app to bring Cortana back to your desktop!",
   "main": "main.js",
   "author": "BlueySoft",
-  "license": "ISC",
+  "license": "GPL-3.0",
   "scripts": {
     "start": "electron .",
     "postinstall": "electron-builder install-app-deps",
