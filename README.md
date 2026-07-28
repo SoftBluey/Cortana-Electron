@@ -12,7 +12,7 @@ So, I decided to try and work on bringing Cortana back, the way I remember.
 ### Features
 
 *   **TTS Responses:** Utilizes the built-in system Text-to-Speech engine (like Windows Zira) to speak responses.
-*   **Bing Web Search:** Opens a mobile-formatted Bing search in an integrated webview for general queries.
+*   **Web Search** allows you to search the web within Cortana Electron using a custom interface.
 *   **Built-in Skills:**
     *   **Weather Forecast:** Ask "weather in (City name!)" to get current conditions.
     *   **Calculator:** Type any simple math equation to get a quick answer. (An example would be: 8*8)
