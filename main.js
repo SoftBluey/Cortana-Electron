@@ -134,8 +134,21 @@ async function loadReminders() {
 
 async function loadSettings() {
   try {
-    const data = await fs.readFile(SETTINGS_FILE, "utf-8");
-    const parsed = JSON.parse(data);
+    let data = await fs.readFile(SETTINGS_FILE, "utf-8");
+
+    // Gracefully handle trailing data after valid JSON (common file corruption).
+    // Walk backwards from the last '}' until JSON.parse succeeds.
+    let parsed;
+    let bracePos = data.length;
+    while (true) {
+      bracePos = data.lastIndexOf("}", bracePos - 1);
+      if (bracePos === -1) break;
+      try {
+        parsed = JSON.parse(data.slice(0, bracePos + 1));
+        break;
+      } catch (_) {}
+    }
+    if (!parsed) parsed = JSON.parse(data);
     
     // Validate that parsed data is an object
     if (typeof parsed !== 'object' || parsed === null) {
@@ -475,9 +488,21 @@ function registerIpcHandlers() {
 
   ipcMain.handle("ask-openai", async (event, query) => {
     const apiKey = settings.openaiApiKey;
-    const apiUrl = settings.aiApiUrl || "https://api.openai.com/v1/chat/completions";
+    let apiUrl = settings.aiApiUrl || "https://api.openai.com/v1/chat/completions";
     const model = settings.aiModel || "gpt-4o-mini";
     const systemPrompt = settings.aiSystemPrompt || "You are a helpful assistant. Be concise and conversational.";
+
+    try {
+      const urlObj = new URL(apiUrl);
+      let path = urlObj.pathname.replace(/\/+$/, "");
+      if (!path.endsWith("chat/completions")) {
+        path = path.replace(/\/v1\/?$/, "");
+        path += "/v1/chat/completions";
+        apiUrl = urlObj.origin + path + urlObj.search;
+      }
+    } catch (_) {
+      // Invalid URL, will be caught again below
+    }
 
     const isLocal = !apiUrl.includes("openai.com") && !apiUrl.includes("api.openai.com");
     if (!apiKey && !isLocal) {

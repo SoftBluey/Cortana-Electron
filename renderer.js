@@ -19,7 +19,7 @@ let timeFormatSelect;
 let idleGreetingModeSelect, specificGreetingContainer, specificGreetingSelect, customGreetingContainer, customGreetingInput;
 let customActionFormContainer, customActionTriggerInput, customActionSaveBtn, customActionCancelBtn, customActionsList, addCustomActionBtn, actionSequenceList, actionSequenceWarning;
 let aiToggle, openaiApiKeyInput, openaiApiKeyContainer;
-let aiModelInput, aiApiUrlInput, aiSystemPromptInput;
+let aiModelInput, aiApiUrlInput, aiSystemPromptInput, aiPresetSelect, aiCustomFields, aiModelItem, aiApiUrlItem;
 
 let availableVoices = [];
 let customActions = [];
@@ -248,6 +248,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     aiModelInput = document.getElementById('ai-model-input');
     aiApiUrlInput = document.getElementById('ai-api-url-input');
     aiSystemPromptInput = document.getElementById('ai-system-prompt-input');
+    aiPresetSelect = document.getElementById('ai-preset-select');
+    aiCustomFields = document.getElementById('ai-custom-fields');
+    aiModelItem = document.getElementById('ai-model-item');
+    aiApiUrlItem = document.getElementById('ai-api-url-item');
 
     document.getElementById('settings-btn-icon').src = settingsIconPng;
     document.getElementById('close-btn-icon').src = closeIconPng;
@@ -348,6 +352,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     aiModelInput.addEventListener('input', onAIModelChanged);
     aiApiUrlInput.addEventListener('input', onAIApiUrlChanged);
     aiSystemPromptInput.addEventListener('input', onAISystemPromptChanged);
+    aiPresetSelect.addEventListener('change', onPresetChanged);
 
     idleGreetingModeSelect.addEventListener('change', onIdleGreetingModeChanged);
     specificGreetingSelect.addEventListener('change', onSpecificIdleGreetingChanged);
@@ -1061,6 +1066,41 @@ function onAIChanged() {
     aiEnabled = aiToggle.checked;
     ipcRenderer.send('set-setting', { key: 'aiEnabled', value: aiEnabled });
     updateAIUI();
+}
+
+const AI_PRESETS = {
+  openai:     { url: 'https://api.openai.com/v1/chat/completions',           model: 'gpt-4o-mini',              keyHint: 'sk-...' },
+  ollama:     { url: 'http://localhost:11434',                               model: 'phi3:mini',                keyHint: '',        local: true },
+  lmstudio:   { url: 'http://localhost:1234/v1/chat/completions',            model: '',                         keyHint: '',        local: true },
+  groq:       { url: 'https://api.groq.com/openai/v1/chat/completions',      model: 'llama-3.3-70b-versatile', keyHint: 'gsk_...' },
+  together:   { url: 'https://api.together.ai/v1/chat/completions',          model: 'Qwen/Qwen3.5-9B',         keyHint: '...' },
+  openrouter: { url: 'https://openrouter.ai/api/v1/chat/completions',        model: '~openai/gpt-latest',      keyHint: 'sk-or-...' },
+  perplexity: { url: 'https://api.perplexity.ai/chat/completions',           model: 'sonar-pro',                keyHint: 'pplx-...' },
+  xai:        { url: 'https://api.x.ai/v1/chat/completions',                 model: 'grok-4.5',                 keyHint: 'xai-...' },
+  mistral:    { url: 'https://api.mistral.ai/v1/chat/completions',           model: 'mistral-large-latest',     keyHint: '...' },
+  'google-gemini': { url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', model: 'gemini-3.6-flash', keyHint: 'AIza...' },
+  deepseek:   { url: 'https://api.deepseek.com/v1/chat/completions',         model: 'deepseek-chat',            keyHint: 'sk-...' },
+};
+
+function onPresetChanged() {
+    const val = aiPresetSelect.value;
+    const isCustom = val === 'custom';
+    const preset = AI_PRESETS[val];
+
+    const showLocalOrCustom = isCustom || preset?.local;
+    aiCustomFields.style.display = isCustom ? 'block' : 'none';
+    aiModelItem.style.display = showLocalOrCustom ? '' : 'none';
+    aiApiUrlItem.style.display = showLocalOrCustom ? '' : 'none';
+
+    if (preset) {
+        aiApiUrlInput.value = preset.url;
+        aiModelInput.value = preset.local ? '' : preset.model;
+        openaiApiKeyInput.value = '';
+        openaiApiKeyInput.placeholder = preset.keyHint || 'No API key needed';
+        ipcRenderer.send('set-setting', { key: 'openaiApiKey', value: '' });
+        ipcRenderer.send('set-setting', { key: 'aiApiUrl', value: preset.url });
+        ipcRenderer.send('set-setting', { key: 'aiModel', value: aiModelInput.value });
+    }
 }
 
 function onOpenAIKeyChanged() {

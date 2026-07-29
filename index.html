@@ -176,6 +176,24 @@
                   </div>
                   <div id="openai-api-key-container" class="setting-sub-item" style="display:none">
                     <div class="setting-item">
+                      <label for="ai-preset-select">Provider</label>
+                      <select id="ai-preset-select" class="settings-text-input">
+                        <option value="">Choose your provider</option>
+                        <option value="openai">OpenAI</option>
+                        <option value="ollama">Ollama (Local)</option>
+                        <option value="lmstudio">LM Studio (Local)</option>
+                        <option value="groq">Groq</option>
+                        <option value="together">Together AI</option>
+                        <option value="openrouter">OpenRouter</option>
+                        <option value="perplexity">Perplexity</option>
+                        <option value="xai">xAI (Grok)</option>
+                        <option value="mistral">Mistral AI</option>
+                        <option value="google-gemini">Google Gemini</option>
+                        <option value="deepseek">DeepSeek</option>
+                        <option value="custom">Custom</option>
+                      </select>
+                    </div>
+                    <div class="setting-item">
                       <label for="openai-api-key-input">API Key</label>
                       <input
                         type="password"
@@ -184,32 +202,34 @@
                         placeholder="sk-..."
                       />
                     </div>
-                    <div class="setting-item">
+                    <div class="setting-item" id="ai-model-item" style="display:none">
                       <label for="ai-model-input">Model</label>
                       <input
                         type="text"
                         id="ai-model-input"
                         class="settings-text-input"
-                        placeholder="gpt-4o-mini"
+                        placeholder=""
                       />
                     </div>
-                    <div class="setting-item">
+                    <div class="setting-item" id="ai-api-url-item" style="display:none">
                       <label for="ai-api-url-input">API URL</label>
                       <input
                         type="text"
                         id="ai-api-url-input"
                         class="settings-text-input"
-                        placeholder="https://api.openai.com/v1/chat/completions"
+                        placeholder=""
                       />
                     </div>
-                    <div class="setting-item" style="flex-direction: column; align-items: stretch;">
-                      <label for="ai-system-prompt-input">System Prompt</label>
-                      <textarea
-                        id="ai-system-prompt-input"
-                        class="settings-text-input"
-                        placeholder="You are a helpful assistant..."
-                        rows="3"
-                      ></textarea>
+                    <div id="ai-custom-fields" style="display:none">
+                      <div class="setting-item" style="flex-direction: column; align-items: stretch;">
+                        <label for="ai-system-prompt-input">System Prompt</label>
+                        <textarea
+                          id="ai-system-prompt-input"
+                          class="settings-text-input"
+                          placeholder="You are a helpful assistant..."
+                          rows="3"
+                        ></textarea>
+                      </div>
                     </div>
                   </div>
                 </div>

@@ -1018,6 +1018,22 @@ textarea.settings-text-input {
     line-height: 1.4;
 }
 
+textarea.settings-text-input::-webkit-scrollbar {
+    width: 6px;
+}
+
+textarea.settings-text-input::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+textarea.settings-text-input::-webkit-scrollbar-thumb {
+    background: #555;
+}
+
+textarea.settings-text-input::-webkit-scrollbar-thumb:hover {
+    background: #777;
+}
+
 #voice-select:hover, #search-engine-select:hover,
 #idle-greeting-mode-select:hover, #specific-greeting-select:hover,
 #tts-engine-select:hover, #edge-voice-select:hover, #time-format-select:hover,
