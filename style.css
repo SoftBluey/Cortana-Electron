@@ -816,6 +816,22 @@ body.movable-mode #app-container {
     overflow: hidden;
 }
 
+.saved-toast {
+    font-size: 11px;
+    color: var(--primary-color);
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    margin-right: 16px;
+    text-transform: uppercase;
+    font-weight: 600;
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+.saved-toast.visible {
+    opacity: 1;
+}
+
 .settings-content {
     padding: 0 24px;
     overflow-y: auto;

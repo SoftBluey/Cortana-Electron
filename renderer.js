@@ -366,6 +366,7 @@ window.addEventListener('DOMContentLoaded', async () => {
                 key: 'reminderSound',
                 value: e.target.value
             });
+            showSavedToast();
         });
     }
     
@@ -386,6 +387,7 @@ window.addEventListener('DOMContentLoaded', async () => {
                             key: 'reminderSound', 
                             value: fullPath 
                         });
+                        showSavedToast();
                     }
                 }
             });
@@ -402,6 +404,7 @@ window.addEventListener('DOMContentLoaded', async () => {
                     key: 'reminderSound', 
                     value: "notify.wav" 
                 });
+                showSavedToast();
             }
         });
     }
@@ -907,10 +910,24 @@ function onSaveCustomAction() {
     saveCustomActions();
     renderCustomActions();
     hideCustomActionForm();
+    showSavedToast();
 }
 
 function saveCustomActions() {
     ipcRenderer.send('set-custom-actions', customActions);
+}
+
+let savedToastTimer = null;
+
+function showSavedToast() {
+    const toast = document.getElementById('settings-saved-toast');
+    if (!toast) return;
+    toast.classList.add('visible');
+    if (savedToastTimer) clearTimeout(savedToastTimer);
+    savedToastTimer = setTimeout(() => {
+        toast.classList.remove('visible');
+        savedToastTimer = null;
+    }, 1200);
 }
 
 function onThemeColorChanged(event) {
@@ -922,16 +939,19 @@ function onThemeColorChanged(event) {
     const newHsl = hexToHsl(themeColor);
     const hueDifference = newHsl.h - defaultHue;
     document.documentElement.style.setProperty('--hue-rotate-deg', `${hueDifference}deg`);
+    showSavedToast();
 }
 
 function onPitchChanged(event) {
     pitch = parseFloat(event.target.value);
     ipcRenderer.send('set-setting', { key: 'pitch', value: pitch });
+    showSavedToast();
 }
 
 function onRateChanged(event) {
     rate = parseFloat(event.target.value);
     ipcRenderer.send('set-setting', { key: 'rate', value: rate });
+    showSavedToast();
 }
 
 function onResetVoiceSettings() {
@@ -959,6 +979,7 @@ function onResetVoiceSettings() {
     rateSlider.value = rate;
     ipcRenderer.send('set-setting', { key: 'pitch', value: pitch });
     ipcRenderer.send('set-setting', { key: 'rate', value: rate });
+    showSavedToast();
 }
 
 function onResetReminderSound() {
@@ -970,6 +991,7 @@ function onResetReminderSound() {
             key: 'reminderSound', 
             value: "notify.wav" 
         });
+        showSavedToast();
     }
 }
 
@@ -991,22 +1013,26 @@ function onVoiceChanged() {
     preferredVoiceName = selectedVoiceName;
     currentVoice = availableVoices.find(v => v.name === selectedVoiceName) || null;
     ipcRenderer.send('set-setting', { key: 'preferredVoice', value: selectedVoiceName });
+    showSavedToast();
 }
 
 function onStartupToggleChanged() {
     const isEnabled = startupToggle.checked;
     startupWarning.style.display = isEnabled ? 'none' : 'block';
     ipcRenderer.send('set-setting', { key: 'openAtLogin', value: isEnabled });
+    showSavedToast();
 }
 
 function onMovableToggleChanged() {
     const isEnabled = movableToggle.checked;
     ipcRenderer.send('set-setting', { key: 'isMovable', value: isEnabled });
+    showSavedToast();
 }
 
 function onSearchEngineChanged() {
     currentSearchEngine = searchEngineSelect.value;
     ipcRenderer.send('set-setting', { key: 'searchEngine', value: currentSearchEngine });
+    showSavedToast();
 }
 
 function updateTtsEngineUI() {
@@ -1038,16 +1064,19 @@ async function onTtsEngineChanged() {
     if (ttsEngine === 'edge') {
         await loadEdgeVoices();
     }
+    showSavedToast();
 }
 
 function onEdgeVoiceChanged() {
     edgeVoice = edgeVoiceSelect.value;
     ipcRenderer.send('set-setting', { key: 'edgeVoice', value: edgeVoice });
+    showSavedToast();
 }
 
 function onTimeFormatChanged() {
     timeFormat = timeFormatSelect.value;
     ipcRenderer.send('set-setting', { key: 'timeFormat', value: timeFormat });
+    showSavedToast();
 }
 
 function formatTimeOptions() {
@@ -1066,6 +1095,7 @@ function onAIChanged() {
     aiEnabled = aiToggle.checked;
     ipcRenderer.send('set-setting', { key: 'aiEnabled', value: aiEnabled });
     updateAIUI();
+    showSavedToast();
 }
 
 const AI_PRESETS = {
@@ -1101,22 +1131,27 @@ function onPresetChanged() {
         ipcRenderer.send('set-setting', { key: 'aiApiUrl', value: preset.url });
         ipcRenderer.send('set-setting', { key: 'aiModel', value: aiModelInput.value });
     }
+    showSavedToast();
 }
 
 function onOpenAIKeyChanged() {
     ipcRenderer.send('set-setting', { key: 'openaiApiKey', value: openaiApiKeyInput.value });
+    showSavedToast();
 }
 
 function onAIModelChanged() {
     ipcRenderer.send('set-setting', { key: 'aiModel', value: aiModelInput.value });
+    showSavedToast();
 }
 
 function onAIApiUrlChanged() {
     ipcRenderer.send('set-setting', { key: 'aiApiUrl', value: aiApiUrlInput.value });
+    showSavedToast();
 }
 
 function onAISystemPromptChanged() {
     ipcRenderer.send('set-setting', { key: 'aiSystemPrompt', value: aiSystemPromptInput.value });
+    showSavedToast();
 }
 
 function updateAIUI() {
@@ -1127,16 +1162,19 @@ function onIdleGreetingModeChanged(event) {
     idleGreetingMode = event.target.value;
     ipcRenderer.send('set-setting', { key: 'idleGreetingMode', value: idleGreetingMode });
     updateGreetingUI();
+    showSavedToast();
 }
 
 function onSpecificIdleGreetingChanged(event) {
     specificIdleGreeting = event.target.value;
     ipcRenderer.send('set-setting', { key: 'specificIdleGreeting', value: specificIdleGreeting });
+    showSavedToast();
 }
 
 function onCustomIdleGreetingChanged(event) {
     customIdleGreeting = event.target.value;
     ipcRenderer.send('set-setting', { key: 'customIdleGreeting', value: customIdleGreeting });
+    showSavedToast();
 }
 
 function displayAndSpeak(text, callback, options = {}, isError = false) {
