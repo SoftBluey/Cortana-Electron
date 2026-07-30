@@ -68,6 +68,7 @@ const searchIconPng = path.join(appRoot, 'search.png');
 const settingsIconPng = path.join(appRoot, 'settings.png');
 const closeIconPng = path.join(appRoot, 'close.png');
 const bingPng = path.join(appRoot, 'bing.png');
+const documentPng = path.join(appRoot, 'document.png');
 const requestSound = new Audio(path.join(appRoot, 'request.wav'));
 const onSound = new Audio(path.join(appRoot, 'on.wav'));
 const offSound = new Audio(path.join(appRoot, 'off.wav'));
@@ -1308,6 +1309,11 @@ function showSearchPanel(categories) {
             if (item.icon === 'cortana' || item.icon === 'web') {
                 const img = document.createElement('img');
                 img.src = searchIconPng;
+                img.style.cssText = 'width:24px;height:24px;';
+                icon.appendChild(img);
+            } else if (item.icon === 'file') {
+                const img = document.createElement('img');
+                img.src = documentPng;
                 img.style.cssText = 'width:24px;height:24px;';
                 icon.appendChild(img);
             } else {
