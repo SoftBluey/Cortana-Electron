@@ -604,25 +604,53 @@ async function generateCategorizedResults(query) {
     const categories = [];
     const lowerQuery = query.toLowerCase();
 
-    categories.push({
-        name: 'Cortana',
-        items: [{
+    const cortanaItems = [{
+        type: 'cortana',
+        title: `Search for "${query}"`,
+        subtitle: 'Continue with Cortana regular',
+        icon: PANEL_ICONS.cortana,
+        action: () => {
+            lastQuery = query;
+            isBusy = true;
+            setStateActive();
+            gifDisplay.src = thinkingVideo;
+            resultsDisplay.innerHTML = '';
+            requestSound.currentTime = 0;
+            requestSound.play();
+            processQuery(query);
+        }
+    }];
+
+    if (aiEnabled) {
+        cortanaItems.push({
             type: 'cortana',
-            title: `Search for "${query}"`,
-            subtitle: 'Continue with Cortana regular',
+            title: `Ask AI about "${query}"`,
+            subtitle: navigator.onLine ? 'Get an AI-generated answer' : 'Requires internet connection',
             icon: PANEL_ICONS.cortana,
-                action: () => {
-                    lastQuery = query;
-                    isBusy = true;
-                    setStateActive();
-                    gifDisplay.src = thinkingVideo;
-                    resultsDisplay.innerHTML = '';
-                    requestSound.currentTime = 0;
-                    requestSound.play();
-                    processQuery(query);
-                }
-        }]
-    });
+            action: () => {
+                lastQuery = query;
+                isBusy = true;
+                setStateActive();
+                gifDisplay.src = thinkingVideo;
+                resultsDisplay.innerHTML = '';
+                const p = document.createElement('p');
+                p.className = 'fade-in-item';
+                p.textContent = 'Thinking...';
+                resultsDisplay.appendChild(p);
+                requestSound.currentTime = 0;
+                requestSound.play();
+                ipcRenderer.invoke('ask-openai', query).then(result => {
+                    if (result.success) {
+                        displayAndSpeak(result.text, onActionFinished, {}, false);
+                    } else {
+                        displayAndSpeak(result.error || "Sorry, I couldn't get an answer from AI.", onActionFinished, {}, true);
+                    }
+                });
+            }
+        });
+    }
+
+    categories.push({ name: 'Cortana', items: cortanaItems });
 
     const apps = await ipcRenderer.invoke('search-applications', query);
     if (apps.length > 0) {
