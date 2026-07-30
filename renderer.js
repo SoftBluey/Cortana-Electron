@@ -611,7 +611,12 @@ async function generateCategorizedResults(query) {
         icon: PANEL_ICONS.cortana,
         action: () => {
             lastQuery = query;
-            searchIcon.src = searchIconPng;
+            isBusy = true;
+            setStateActive();
+            gifDisplay.src = thinkingVideo;
+            resultsDisplay.innerHTML = '';
+            requestSound.currentTime = 0;
+            requestSound.play();
             performWebSearch(query);
         }
     }];
