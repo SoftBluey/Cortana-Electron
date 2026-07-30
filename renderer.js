@@ -2229,7 +2229,9 @@ function getSearchUrl(query) {
 
 async function performWebSearch(query) {
     searchResultsActive = true;
-    searchIcon.src = searchIconPng;
+    if (document.activeElement === searchBar) {
+        searchIcon.src = searchIconPng;
+    }
     anim.goToState(AnimationState.THINKING);
     resultsDisplay.innerHTML = '';
     const loadingP = document.createElement('p');
