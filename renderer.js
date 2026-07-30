@@ -119,6 +119,23 @@ const ANIMATION_FILES = {
   idle_end: 'circle_idle_end.gif',
 };
 
+const SPECIAL_ANIMATIONS = [
+  { name: 'Birthday', start: 'bday_start.gif', loop: 'bday_static.gif' },
+  { name: 'Clippy', start: 'clippy_start.gif', loop: 'clippy_static.gif' },
+  { name: 'Clippy Retired', start: 'clippy_retired_start.gif', loop: 'clippy_retired_static.gif' },
+  { name: 'Halloween', start: 'halloween_start.gif', loop: 'halloween_static.gif' },
+  { name: 'Harry Potter', start: 'harrypotter_start.gif', loop: 'harrypotter_static.gif' },
+  { name: 'Lightbulb', start: 'lightbulb_start.gif', loop: 'lightbulb_static.gif' },
+  { name: 'Lock', start: 'lock_start.gif', loop: 'lock_static.gif' },
+  { name: 'Marriage', start: 'marriage_start.gif', loop: 'marriage_static.gif' },
+  { name: 'Minions', start: 'minions_start.gif', loop: 'minions_static.gif' },
+  { name: 'Record', start: 'record_start.gif', loop: 'record_loop.gif' },
+  { name: 'Rocket', start: 'rocket_start.gif', loop: 'rocket_loop.gif' },
+  { name: 'Space', start: 'space_start.gif', loop: 'space_end.gif' },
+  { name: 'Star Wars', start: 'starwars_start.gif', loop: 'starwars_static.gif' },
+  { name: 'Trophy', start: 'trophy_start.gif', loop: 'trophy_static.gif' },
+];
+
 const CHROMA_KEY_THRESHOLD = 10;
 
 function parseHexColor(hex) {
@@ -336,6 +353,10 @@ class AnimationManager {
     this._idlePlaying = false;
     this._destroyed = false;
 
+    this._isPlayingSpecial = false;
+    this._currentSpecialIndex = -1;
+    this._lastSpecialIndex = -1;
+
     this.renderer.onComplete = () => this._onAnimationEnd();
   }
 
@@ -350,6 +371,7 @@ class AnimationManager {
 
     this.queue = [];
     this._stopIdleCycle();
+    this._stopSpecial();
     this._playState(state, options);
   }
 
@@ -469,6 +491,51 @@ class AnimationManager {
 
   _stopIdleCycle() {
     this._idlePlaying = false;
+  }
+
+  pickSpecial() {
+    const count = SPECIAL_ANIMATIONS.length;
+    if (count === 0) return -1;
+    let id;
+    do {
+      id = Math.floor(Math.random() * count);
+    } while (id === this._lastSpecialIndex && count > 1);
+    this._lastSpecialIndex = id;
+    return id;
+  }
+
+  playSpecial(id) {
+    if (this._destroyed || id < 0 || id >= SPECIAL_ANIMATIONS.length) return;
+    this._stopIdleCycle();
+    this._stopSpecial();
+    this._isPlayingSpecial = true;
+    this._currentSpecialIndex = id;
+    this._playSpecialStart();
+  }
+
+  _stopSpecial() {
+    if (this._isPlayingSpecial) {
+      this._isPlayingSpecial = false;
+      this.renderer.stop();
+      this._currentSpecialIndex = -1;
+    }
+  }
+
+  _playSpecialStart() {
+    const special = SPECIAL_ANIMATIONS[this._currentSpecialIndex];
+    this.renderer.loadSync(path.join(appRoot, special.start));
+    this.renderer.playOneShot(() => this._onSpecialStartEnd());
+  }
+
+  _onSpecialStartEnd() {
+    if (this._destroyed || !this._isPlayingSpecial) return;
+    this._playSpecialLoop();
+  }
+
+  _playSpecialLoop() {
+    const special = SPECIAL_ANIMATIONS[this._currentSpecialIndex];
+    this.renderer.loadSync(path.join(appRoot, special.loop));
+    this.renderer.start(true);
   }
 }
 // ===================== END ANIMATION STATE MACHINE =====================
@@ -639,6 +706,16 @@ window.addEventListener('DOMContentLoaded', async () => {
     const circleCanvas = document.getElementById('circle-canvas');
     anim = new AnimationManager(circleCanvas);
     anim.init();
+
+    circleCanvas.addEventListener('click', () => {
+      if (anim._destroyed) return;
+      if (anim._isPlayingSpecial || anim.state === AnimationState.IDLE) {
+        const id = anim.pickSpecial();
+        if (id >= 0) {
+          anim.playSpecial(id);
+        }
+      }
+    });
     
     const updateAvailableDiv = document.getElementById('update-available');
     const updateButton = document.getElementById('update-button');
