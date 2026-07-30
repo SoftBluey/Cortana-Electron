@@ -49,7 +49,6 @@ let settings = {
   idleGreetingMode: "random",
   specificIdleGreeting: "What's on your mind?",
   customIdleGreeting: "",
-  webSearchEnabled: false,
   reminderSound: "notify.wav",
   ttsEngine: "edge",
   edgeVoice: "en-US-JennyNeural",
@@ -59,6 +58,8 @@ let settings = {
   aiSystemPrompt: "You are Cortana, Microsoft's virtual assistant. Be helpful, concise, and friendly. Keep responses brief and conversational. Do not use markdown formatting.",
   aiModel: "gpt-4o-mini",
   aiApiUrl: "https://api.openai.com/v1/chat/completions",
+  useEverythingSearch: false,
+  everythingPort: 80,
 };
 let SETTINGS_FILE;
 let REMINDERS_FILE;
@@ -633,6 +634,73 @@ function registerIpcHandlers() {
     }
     return matchingAppNames;
   });
+
+  ipcMain.handle("search-files", async (event, query) => {
+    if (settings.useEverythingSearch) {
+      try {
+        const port = settings.everythingPort || 80;
+        const results = await queryEverything(query, port);
+        if (results && results.results) {
+          return results.results.map(r => ({
+            name: r.name,
+            path: r.path ? path.join(r.path, r.name) : r.name,
+          }));
+        }
+      } catch (_) {}
+    }
+    const results = [];
+    const queryLower = query.toLowerCase();
+    const searchFolders = [
+      path.join(os.homedir(), "Documents"),
+      path.join(os.homedir(), "Desktop"),
+      path.join(os.homedir(), "Downloads"),
+    ];
+    for (const folder of searchFolders) {
+      try {
+        const entries = await fs.readdir(folder, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isFile() && entry.name.toLowerCase().includes(queryLower)) {
+            results.push({ name: entry.name, path: path.join(folder, entry.name) });
+          }
+        }
+      } catch (_) {}
+    }
+    return results.slice(0, 10);
+  });
+
+  ipcMain.handle("check-everything", async () => {
+    try {
+      const port = settings.everythingPort || 80;
+      await queryEverything("test", port);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  });
+
+  function queryEverything(query, port) {
+    return new Promise((resolve, reject) => {
+      const encodedQuery = encodeURIComponent(query);
+      const urlPath = `/?search=${encodedQuery}&json=1&count=10&path_column=1&sort=date_modified&ascending=0`;
+      const req = http.request(
+        { hostname: "localhost", port: port || 80, path: urlPath, method: "GET" },
+        (res) => {
+          let data = "";
+          res.on("data", (chunk) => (data += chunk));
+          res.on("end", () => {
+            try {
+              resolve(JSON.parse(data));
+            } catch (e) {
+              reject(e);
+            }
+          });
+        }
+      );
+      req.on("error", reject);
+      req.setTimeout(2000, () => { req.destroy(); reject(new Error("Timeout")); });
+      req.end();
+    });
+  }
 
   ipcMain.handle("open-application-fallback", async (event, appName) => {
     const sanitizedAppName = appName.replace(/"/g, "");

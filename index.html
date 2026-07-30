@@ -165,6 +165,22 @@
                       <option value="ecosia">Ecosia</option>
                     </select>
                   </div>
+                  <div class="setting-item">
+                    <label for="everything-toggle">Everything Search</label>
+                    <label class="toggle-switch">
+                      <input type="checkbox" id="everything-toggle" />
+                      <span class="slider"></span>
+                    </label>
+                  </div>
+                  <div id="everything-port-container" class="setting-sub-item" style="display:none">
+                    <div class="setting-item">
+                      <label for="everything-port-input">HTTP Port</label>
+                      <input type="number" id="everything-port-input" class="settings-text-input" value="80" min="1" max="65535" />
+                    </div>
+                    <p class="setting-warning" id="everything-warning" style="display:block; color: #a2a2a2; border: none;">
+                      Requires Everything with HTTP server enabled (Tools &gt; Options &gt; HTTP Server).
+                    </p>
+                  </div>
                 </div>
                 <div class="settings-section">
                   <h2>AI</h2>
@@ -289,6 +305,9 @@
                     Reset All Settings & Reminders
                   </button>
                 </div>
+                <div class="settings-footer">
+                  <p>Created by <a href="https://github.com/SoftBluey" target="_blank">BlueySoft</a></p>
+                </div>
               </div>
               <div id="custom-action-form-container">
                 <p class="reminder-title">Custom Action</p>
@@ -325,6 +344,7 @@
           </div>
         </div>
       </div>
+      <div id="search-panel" class="search-panel"></div>
       <div class="search-container">
         <div class="search-input-wrapper">
           <img id="search-icon" alt="Cortana Icon" />
@@ -334,17 +354,6 @@
             placeholder="Type here to search"
             autocomplete="off"
           />
-        </div>
-        <div id="search-suggestions" class="search-suggestions"></div>
-        <div class="web-search-toggle">
-          <button
-            class="metro-toggle-button"
-            id="web-search-toggle"
-            aria-pressed="false"
-          >
-            <img id="web-search-toggle-icon" alt="Web Search" />
-            <span>Web</span>
-          </button>
         </div>
       </div>
     </div>

@@ -1,15 +1,15 @@
 const { ipcRenderer } = require('electron');
 const path = require('path');
 
-let searchBar, searchIcon, webSearchToggle, searchSuggestions;
+let searchBar, searchIcon, searchPanel;
 let animationContainer, gifDisplay, resultsDisplay, contentWrapper;
 let webLinkContainer, webLink, webIcon;
 let appContainer;
 let finishSpeakingTimeout = null;
 let editingReminderId = null;
 let editingReminderSound = null;
-let selectedSuggestionIndex = -1;
-let currentSuggestions = [];
+let selectedPanelIndex = -1;
+let allPanelItems = [];
 
 let reminderContainer, reminderTextInput, reminderTimeInput, reminderSoundInput, reminderSaveBtn, reminderCancelBtn, reminderIcon, reminderSoundBrowseBtn;
 
@@ -31,7 +31,6 @@ let isMovableMode = false;
 let themeColor = "#0078d7";
 let pitch = 1;
 let rate = 1;
-let webSearchEnabled = false;
 let ttsEngine = "edge";
 let edgeVoice = "en-US-JennyNeural";
 let edgeVoices = [];
@@ -45,6 +44,9 @@ let idleGreetingMode = 'random';
 let specificIdleGreeting = "What's on your mind?";
 let customIdleGreeting = '';
 let reminderSound = "notify.wav";
+let useEverythingSearch = false;
+let everythingPort = 80;
+let blurCleanupTimer = null;
 
 
 const appRoot = path.resolve(__dirname, __dirname.includes('app.asar') ? '../assets' : 'assets');
@@ -69,6 +71,74 @@ const drumrollSound = new Audio(path.join(appRoot, 'drumroll.mp3'));
 
 let isBusy = false;
 let lastQuery = '';
+
+const WINDOWS_SETTINGS = [
+  { name: 'Display', uri: 'ms-settings:display' },
+  { name: 'Sound', uri: 'ms-settings:sound' },
+  { name: 'Notifications & actions', uri: 'ms-settings:notifications' },
+  { name: 'Focus assist', uri: 'ms-settings:quiethours' },
+  { name: 'Power & sleep', uri: 'ms-settings:powersleep' },
+  { name: 'Battery', uri: 'ms-settings:battery' },
+  { name: 'Storage', uri: 'ms-settings:storagesense' },
+  { name: 'Tablet mode', uri: 'ms-settings:tabletmode' },
+  { name: 'Multitasking', uri: 'ms-settings:multitasking' },
+  { name: 'Clipboard', uri: 'ms-settings:clipboard' },
+  { name: 'Bluetooth & other devices', uri: 'ms-settings:bluetooth' },
+  { name: 'Printers & scanners', uri: 'ms-settings:printers' },
+  { name: 'Mouse', uri: 'ms-settings:mousetouchpad' },
+  { name: 'Touchpad', uri: 'ms-settings:devices-touchpad' },
+  { name: 'Typing', uri: 'ms-settings:typing' },
+  { name: 'Pen & Windows Ink', uri: 'ms-settings:pen' },
+  { name: 'AutoPlay', uri: 'ms-settings:autoplay' },
+  { name: 'USB', uri: 'ms-settings:usb' },
+  { name: 'Network & Internet', uri: 'ms-settings:network' },
+  { name: 'Wi-Fi', uri: 'ms-settings:network-wifi' },
+  { name: 'Ethernet', uri: 'ms-settings:network-ethernet' },
+  { name: 'VPN', uri: 'ms-settings:network-vpn' },
+  { name: 'Airplane mode', uri: 'ms-settings:network-airplanemode' },
+  { name: 'Mobile hotspot', uri: 'ms-settings:network-mobilehotspot' },
+  { name: 'Data usage', uri: 'ms-settings:datausage' },
+  { name: 'Proxy', uri: 'ms-settings:network-proxy' },
+  { name: 'Personalization', uri: 'ms-settings:personalization' },
+  { name: 'Background', uri: 'ms-settings:personalization-background' },
+  { name: 'Colors', uri: 'ms-settings:personalization-colors' },
+  { name: 'Lock screen', uri: 'ms-settings:lockscreen' },
+  { name: 'Themes', uri: 'ms-settings:themes' },
+  { name: 'Fonts', uri: 'ms-settings:fonts' },
+  { name: 'Start', uri: 'ms-settings:personalization-start' },
+  { name: 'Taskbar', uri: 'ms-settings:taskbar' },
+  { name: 'Apps & features', uri: 'ms-settings:appsfeatures' },
+  { name: 'Default apps', uri: 'ms-settings:defaultapps' },
+  { name: 'Offline maps', uri: 'ms-settings:maps' },
+  { name: 'Video playback', uri: 'ms-settings:videoplayback' },
+  { name: 'Accounts', uri: 'ms-settings:accounts' },
+  { name: 'Your info', uri: 'ms-settings:yourinfo' },
+  { name: 'Email & app accounts', uri: 'ms-settings:emailandaccounts' },
+  { name: 'Sign-in options', uri: 'ms-settings:signinoptions' },
+  { name: 'Work access', uri: 'ms-settings:workplace' },
+  { name: 'Family & other people', uri: 'ms-settings:otherusers' },
+  { name: 'Date & time', uri: 'ms-settings:dateandtime' },
+  { name: 'Region & language', uri: 'ms-settings:regionlanguage' },
+  { name: 'Speech', uri: 'ms-settings:speech' },
+  { name: 'Game bar', uri: 'ms-settings:gaming-gamebar' },
+  { name: 'Captures', uri: 'ms-settings:gaming-gamedvr' },
+  { name: 'Game Mode', uri: 'ms-settings:gaming-gamemode' },
+  { name: 'Ease of Access', uri: 'ms-settings:easeofaccess' },
+  { name: 'Narrator', uri: 'ms-settings:easeofaccess-narrator' },
+  { name: 'Magnifier', uri: 'ms-settings:easeofaccess-magnifier' },
+  { name: 'High contrast', uri: 'ms-settings:easeofaccess-highcontrast' },
+  { name: 'Closed captions', uri: 'ms-settings:easeofaccess-closedcaptioning' },
+  { name: 'Keyboard', uri: 'ms-settings:easeofaccess-keyboard' },
+  { name: 'Cortana', uri: 'ms-settings:cortana' },
+  { name: 'Search', uri: 'ms-settings:search' },
+  { name: 'Privacy', uri: 'ms-settings:privacy' },
+  { name: 'Update & Security', uri: 'ms-settings:windowsupdate' },
+  { name: 'Windows Update', uri: 'ms-settings:windowsupdate' },
+  { name: 'Backup', uri: 'ms-settings:backup' },
+  { name: 'Troubleshoot', uri: 'ms-settings:troubleshoot' },
+  { name: 'Recovery', uri: 'ms-settings:recovery' },
+  { name: 'About', uri: 'ms-settings:about' },
+];
 
 const idleMessages = [
     "What's on your mind?",
@@ -159,8 +229,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     appContainer = document.getElementById('app-container');
     searchBar = document.getElementById('search-bar');
     searchIcon = document.getElementById('search-icon');
-    webSearchToggle = document.getElementById('web-search-toggle');
-    searchSuggestions = document.getElementById('search-suggestions');
+    searchPanel = document.getElementById('search-panel');
     animationContainer = document.getElementById('animation-container');
     gifDisplay = document.getElementById('gif-display');
     resultsDisplay = document.getElementById('results-display');
@@ -255,7 +324,6 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     document.getElementById('settings-btn-icon').src = settingsIconPng;
     document.getElementById('close-btn-icon').src = closeIconPng;
-    document.getElementById('web-search-toggle-icon').src = searchIconPng;
     searchIcon.src = cortanaIcon;
     reminderIcon.src = idleVideo;
 
@@ -274,18 +342,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchBar.addEventListener('input', onSearchInput);
     searchBar.addEventListener('keydown', onSearchKeyDown);
     searchBar.addEventListener('blur', () => {
-        // Delay hiding suggestions to allow click events to fire
-        setTimeout(() => hideSuggestions(), 200);
-    });
-    
-    webSearchToggle.addEventListener('click', (e) => {
-        e.preventDefault();
-        webSearchEnabled = !webSearchEnabled;
-        webSearchToggle.classList.toggle('active', webSearchEnabled);
-        webSearchToggle.setAttribute('aria-pressed', webSearchEnabled);
-        searchIcon.src = webSearchEnabled ? searchIconPng : cortanaIcon;
-        ipcRenderer.send('set-setting', { key: 'webSearchEnabled', value: webSearchEnabled });
-        searchBar.focus();
+        blurCleanupTimer = setTimeout(() => {
+            hideSearchPanel();
+            searchBar.value = '';
+            searchBar.placeholder = 'Type here to search';
+            setStateIdle();
+        }, 200);
+        if (animationContainer.className === 'idle') {
+            gifDisplay.src = idleVideo;
+        }
+        offSound.play();
+        searchIcon.src = cortanaIcon;
     });
 
     searchBar.addEventListener('focus', () => {
@@ -295,15 +362,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         }
         gifDisplay.src = listeningVideo;
         onSound.play();
-        searchIcon.src = webSearchEnabled ? searchIconPng : cortanaIcon;
-    });
-    
-    searchBar.addEventListener('blur', (e) => {
-        if (animationContainer.className === 'idle') {
-            gifDisplay.src = idleVideo;
-        }
-        offSound.play();
-        searchIcon.src = cortanaIcon;
+        searchIcon.src = searchIconPng;
     });
 
 
@@ -357,6 +416,32 @@ window.addEventListener('DOMContentLoaded', async () => {
     idleGreetingModeSelect.addEventListener('change', onIdleGreetingModeChanged);
     specificGreetingSelect.addEventListener('change', onSpecificIdleGreetingChanged);
     customGreetingInput.addEventListener('input', onCustomIdleGreetingChanged);
+
+    const everythingToggle = document.getElementById('everything-toggle');
+    const everythingPortInput = document.getElementById('everything-port-input');
+    if (everythingToggle) {
+      everythingToggle.addEventListener('change', (e) => {
+        useEverythingSearch = e.target.checked;
+        document.getElementById('everything-port-container').style.display = useEverythingSearch ? 'block' : 'none';
+        ipcRenderer.send('set-setting', { key: 'useEverythingSearch', value: useEverythingSearch });
+        showSavedToast();
+        if (useEverythingSearch) {
+          ipcRenderer.invoke('check-everything').then(ok => {
+            const warning = document.getElementById('everything-warning');
+            if (warning) {
+              warning.textContent = ok ? 'Everything HTTP server is reachable.' : 'Cannot reach Everything HTTP server. Check that it is enabled in Everything options.';
+              warning.style.color = ok ? 'green' : '#e74c3c';
+            }
+          });
+        }
+      });
+    }
+    if (everythingPortInput) {
+      everythingPortInput.addEventListener('input', (e) => {
+        everythingPort = parseInt(e.target.value) || 80;
+        ipcRenderer.send('set-setting', { key: 'everythingPort', value: everythingPort });
+      });
+    }
 
     // Reminder sound setting event listeners
     if (reminderSoundSettingInput) {
@@ -441,8 +526,22 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
 
     ipcRenderer.on('trigger-enter-animation', () => {
+        gifDisplay.style.transition = 'none';
+        gifDisplay.style.opacity = '0';
+        gifDisplay.style.transform = 'translateX(-50%) translateY(30px)';
         requestAnimationFrame(() => {
             appContainer.classList.add('visible');
+            requestAnimationFrame(() => {
+                gifDisplay.style.transition = '';
+                gifDisplay.style.opacity = '';
+                gifDisplay.style.transform = '';
+                const idleText = resultsDisplay.querySelector('.fade-in-item');
+                if (idleText) {
+                    idleText.style.animation = 'none';
+                    void idleText.offsetHeight;
+                    idleText.style.animation = '';
+                }
+            });
         });
     });
 
@@ -481,208 +580,240 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchIcon.src = cortanaIcon;
 });
 
-// Search suggestions functionality
-const suggestionTemplates = [
-    // Time queries
-    { pattern: /^(time|what|whats|what's)/i, suggestions: [
-        { text: "What time is it?" },
-        { text: "What's the time in London?" }
-    ]},
-    // Weather queries
-    { pattern: /^(weather|forecast)/i, suggestions: [
-        { text: "What's the weather in New York?" },
-        { text: "What's the weather in London?" }
-    ]},
-    // Calculator queries
-    { pattern: /^[\d\s\+\-\*\/\(\)\.]+$|^(calculate|calc)/i, suggestions: [
-        { text: "Calculate 2 + 2" },
-        { text: "Calculate 15% of 200" }
-    ]},
-    // Reminder queries
-    { pattern: /^(remind|reminder)/i, suggestions: [
-        { text: "Remind me to call mom" },
-        { text: "Show reminders" }
-    ]},
-    // Application queries - only show if no specific app name is typed
-    { pattern: /^(open|launch|start|run)$/i, suggestions: [
-        { text: "Open Calculator" },
-        { text: "Open Notepad" }
-    ]},
-    // Joke queries
-    { pattern: /^(joke|tell|funny|laugh)/i, suggestions: [
-        { text: "Tell me a joke" }
-    ]},
-    // General queries
-    { pattern: /^(who|when|where|why|how)/i, suggestions: [
-        { text: "What can you do?" }
-    ]}
-];
+// Search panel functionality
+const PANEL_ICONS = {
+  cortana: 'cortana',
+  app: 'app',
+  setting: 'setting',
+  file: 'file',
+  web: 'web',
+};
 
 async function onSearchInput(event) {
     const query = searchBar.value.trim();
-    
     if (query.length === 0) {
-        hideSuggestions();
+        hideSearchPanel();
         return;
     }
-    
-    // Don't show suggestions when web search mode is enabled
-    if (webSearchEnabled) {
-        hideSuggestions();
-        return;
-    }
-    
-    // Generate suggestions based on input
-    const suggestions = await generateSuggestions(query);
-    
-    if (suggestions.length > 0) {
-        showSuggestions(suggestions);
-    } else {
-        hideSuggestions();
-    }
+    const categories = await generateCategorizedResults(query);
+    showSearchPanel(categories);
 }
 
-async function generateSuggestions(query) {
-    const suggestions = [];
+async function generateCategorizedResults(query) {
+    const categories = [];
     const lowerQuery = query.toLowerCase();
-    
-    // Check if user is trying to open an app with a specific name
-    const openAppMatch = query.match(/^(open|launch|start|run)\s+(.+)/i);
-    if (openAppMatch && openAppMatch[2].length > 0) {
-        const appQuery = openAppMatch[2];
-        // Search for matching applications dynamically
-        const apps = await ipcRenderer.invoke('search-applications', appQuery);
-        if (apps && apps.length > 0) {
-            // Show dynamic app suggestions
-            apps.slice(0, 5).forEach(app => {
-                suggestions.push({ text: `Open ${app}` });
-            });
-            return suggestions;
-        }
-    }
-    
-    // Check template patterns for general suggestions
-    for (const template of suggestionTemplates) {
-        if (template.pattern.test(query)) {
-            // Filter suggestions to only include those that would actually work
-            const validSuggestions = template.suggestions.filter(suggestion => {
-                // Check if this suggestion would match any command
-                return wouldCommandMatch(suggestion.text);
-            });
-            suggestions.push(...validSuggestions);
-            break; // Only use first matching template
-        }
-    }
-    
-    // If no template matched, suggest apps and custom actions
-    if (suggestions.length === 0) {
-        // Suggest matching applications
-        const apps = await ipcRenderer.invoke('search-applications', query);
-        if (apps && apps.length > 0) {
-            apps.slice(0, 3).forEach(app => {
-                suggestions.push({ text: `Open ${app}` });
-            });
-        }
-        
-        // Suggest matching custom actions
-        const matchingActions = customActions.filter(action => 
-            action.trigger.toLowerCase().includes(lowerQuery)
-        );
-        if (matchingActions.length > 0) {
-            suggestions.push(...matchingActions.slice(0, 2).map(action => ({
-                text: action.trigger
-            })));
-        }
-    }
-    
-    return suggestions.slice(0, 4);
-}
 
-function showSuggestions(suggestions) {
-    currentSuggestions = suggestions;
-    selectedSuggestionIndex = -1;
-    
-    searchSuggestions.innerHTML = '';
-    
-    suggestions.forEach((suggestion, index) => {
-        const item = document.createElement('div');
-        item.className = 'suggestion-item';
-        item.dataset.index = index;
-        
-        const text = document.createElement('span');
-        text.className = 'suggestion-text';
-        text.textContent = suggestion.text;
-        
-        item.appendChild(text);
-        
-        item.addEventListener('click', () => {
-            searchBar.value = suggestion.text;
-            hideSuggestions();
-            onSearch();
-        });
-        
-        searchSuggestions.appendChild(item);
+    categories.push({
+        name: 'Cortana',
+        items: [{
+            type: 'cortana',
+            title: `Search for "${query}"`,
+            subtitle: 'Continue with Cortana regular',
+            icon: PANEL_ICONS.cortana,
+                action: () => {
+                    lastQuery = query;
+                    isBusy = true;
+                    setStateActive();
+                    gifDisplay.src = thinkingVideo;
+                    resultsDisplay.innerHTML = '';
+                    requestSound.currentTime = 0;
+                    requestSound.play();
+                    processQuery(query);
+                }
+        }]
     });
-    
-    searchSuggestions.classList.add('visible');
+
+    const apps = await ipcRenderer.invoke('search-applications', query);
+    if (apps.length > 0) {
+        categories.push({
+            name: 'Apps',
+            items: apps.slice(0, 6).map(name => ({
+                type: 'app',
+                title: name,
+                subtitle: 'Start menu',
+                icon: PANEL_ICONS.app,
+                action: () => {
+                    handleOpenApplication(name, true);
+                }
+            }))
+        });
+    }
+
+    const matchingSettings = WINDOWS_SETTINGS.filter(s =>
+        s.name.toLowerCase().includes(lowerQuery)
+    );
+    if (matchingSettings.length > 0) {
+        categories.push({
+            name: 'Settings',
+            items: matchingSettings.slice(0, 6).map(s => ({
+                type: 'setting',
+                title: s.name,
+                subtitle: 'Windows setting',
+                icon: PANEL_ICONS.setting,
+                action: () => {
+                    ipcRenderer.send('run-special-command', s.uri);
+                }
+            }))
+        });
+    }
+
+    try {
+        const files = await ipcRenderer.invoke('search-files', query);
+        if (files.length > 0) {
+            categories.push({
+                name: 'Other',
+                items: files.slice(0, 5).map(f => ({
+                    type: 'file',
+                    title: f.name,
+                    subtitle: f.path,
+                    icon: PANEL_ICONS.file,
+                    action: () => {
+                        ipcRenderer.send('open-path', f.path);
+                    }
+                }))
+            });
+        }
+    } catch (_) {}
+
+    return categories;
 }
 
-function hideSuggestions() {
-    searchSuggestions.classList.remove('visible');
-    currentSuggestions = [];
-    selectedSuggestionIndex = -1;
+function showSearchPanel(categories) {
+    selectedPanelIndex = -1;
+    allPanelItems = [];
+    searchPanel.innerHTML = '';
+
+    let globalIndex = 0;
+    categories.forEach((cat, ci) => {
+        const header = document.createElement('div');
+        header.className = 'search-panel-category';
+        header.textContent = cat.name;
+        searchPanel.appendChild(header);
+
+        cat.items.forEach((item, ii) => {
+            const el = document.createElement('div');
+            el.className = 'search-panel-item';
+            el.dataset.index = globalIndex;
+
+            const icon = document.createElement('div');
+            icon.className = 'search-panel-item-icon';
+            if (item.icon === 'cortana') {
+                const img = document.createElement('img');
+                img.src = searchIconPng;
+                img.style.cssText = 'width:24px;height:24px;';
+                icon.appendChild(img);
+            } else {
+                icon.textContent = getIconChar(item.icon);
+            }
+
+            const content = document.createElement('div');
+            content.className = 'search-panel-item-content';
+
+            const title = document.createElement('div');
+            title.className = 'search-panel-item-title';
+            title.textContent = item.title;
+
+            const subtitle = document.createElement('div');
+            subtitle.className = 'search-panel-item-subtitle';
+            subtitle.textContent = item.subtitle;
+
+            content.appendChild(title);
+            content.appendChild(subtitle);
+            el.appendChild(icon);
+            el.appendChild(content);
+
+            el.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                clearTimeout(blurCleanupTimer);
+                hideSearchPanel();
+                searchBar.value = '';
+                item.action();
+            });
+
+            allPanelItems.push({ el, action: item.action });
+            searchPanel.appendChild(el);
+            globalIndex++;
+        });
+    });
+
+    if (allPanelItems.length > 0) {
+        searchPanel.classList.add('visible');
+        selectedPanelIndex = 0;
+        updatePanelSelection();
+    } else {
+        hideSearchPanel();
+    }
+}
+
+function getIconChar(type) {
+    switch (type) {
+        case 'cortana': return '\uD83D\uDD0D';
+        case 'app': return '\u25A3';
+        case 'setting': return '\u2699';
+        case 'file': return '\uD83D\uDCC4';
+        case 'web': return '\uD83C\uDF10';
+        default: return '\u25CF';
+    }
+}
+
+function hideSearchPanel() {
+    searchPanel.classList.remove('visible');
+    allPanelItems = [];
+    selectedPanelIndex = -1;
 }
 
 function onSearchKeyDown(event) {
-    if (currentSuggestions.length === 0) {
+    if (allPanelItems.length === 0) {
         if (event.key === 'Enter') {
             onSearch();
         }
         return;
     }
-    
-    const items = searchSuggestions.querySelectorAll('.suggestion-item');
-    
+
     switch (event.key) {
         case 'ArrowDown':
             event.preventDefault();
-            selectedSuggestionIndex = Math.min(selectedSuggestionIndex + 1, currentSuggestions.length - 1);
-            updateSelectedSuggestion(items);
+            selectedPanelIndex = Math.min(selectedPanelIndex + 1, allPanelItems.length - 1);
+            updatePanelSelection();
             break;
-            
+
         case 'ArrowUp':
             event.preventDefault();
-            selectedSuggestionIndex = Math.max(selectedSuggestionIndex - 1, -1);
-            updateSelectedSuggestion(items);
+            selectedPanelIndex = Math.max(selectedPanelIndex - 1, -1);
+            updatePanelSelection();
             break;
-            
+
         case 'Enter':
             event.preventDefault();
-            if (selectedSuggestionIndex >= 0) {
-                searchBar.value = currentSuggestions[selectedSuggestionIndex].text;
+            const enterIndex = selectedPanelIndex;
+            const enterItems = allPanelItems;
+            hideSearchPanel();
+            if (enterIndex >= 0 && enterIndex < enterItems.length) {
+                searchBar.value = '';
+                enterItems[enterIndex].action();
+            } else {
+                onSearch();
             }
-            hideSuggestions();
-            onSearch();
             break;
-            
+
         case 'Escape':
             event.preventDefault();
-            if (searchResultsActive) {
-                hideSearchResults();
-            } else {
-                hideSuggestions();
-            }
+            hideSearchPanel();
+            searchBar.value = '';
+            searchBar.placeholder = 'Type here to search';
+            setStateIdle();
             break;
     }
 }
 
-function updateSelectedSuggestion(items) {
-    items.forEach((item, index) => {
-        if (index === selectedSuggestionIndex) {
-            item.classList.add('selected');
-            item.scrollIntoView({ block: 'nearest' });
+function updatePanelSelection() {
+    allPanelItems.forEach((item, index) => {
+        if (index === selectedPanelIndex) {
+            item.el.classList.add('selected');
+            item.el.scrollIntoView({ block: 'nearest' });
         } else {
-            item.classList.remove('selected');
+            item.el.classList.remove('selected');
         }
     });
 }
@@ -774,9 +905,14 @@ async function loadAndApplySettings() {
     rate = settings.rate || 1;
     rateSlider.value = rate;
 
-    webSearchEnabled = settings.webSearchEnabled === true;
-    webSearchToggle.classList.toggle('active', webSearchEnabled);
-    webSearchToggle.setAttribute('aria-pressed', webSearchEnabled);
+    useEverythingSearch = settings.useEverythingSearch === true;
+    everythingPort = settings.everythingPort || 80;
+    const everythingToggle = document.getElementById('everything-toggle');
+    const everythingPortInput = document.getElementById('everything-port-input');
+    if (everythingToggle) everythingToggle.checked = useEverythingSearch;
+    if (everythingPortInput) everythingPortInput.value = everythingPort;
+    const everythingPortContainer = document.getElementById('everything-port-container');
+    if (everythingPortContainer) everythingPortContainer.style.display = useEverythingSearch ? 'block' : 'none';
 
     ttsEngine = settings.ttsEngine || 'system';
     edgeVoice = settings.edgeVoice || 'en-US-JennyNeural';
@@ -1335,7 +1471,7 @@ function onActionFinished() {
         if (animationContainer.className === 'active') {
             if (document.activeElement === searchBar) {
                 gifDisplay.src = listeningVideo;
-                searchIcon.src = webSearchEnabled ? searchIconPng : cortanaIcon;
+                searchIcon.src = searchIconPng;
             } else {
                 gifDisplay.src = idleVideo;
                 searchIcon.src = cortanaIcon;
@@ -1376,7 +1512,7 @@ function setStateIdle() {
 
     animationContainer.className = 'idle';
     if (document.activeElement === searchBar) {
-        searchIcon.src = webSearchEnabled ? searchIconPng : cortanaIcon;
+        searchIcon.src = searchIconPng;
         gifDisplay.src = listeningVideo;
     } else {
         searchIcon.src = cortanaIcon;
@@ -1422,6 +1558,7 @@ function getSearchUrl(query) {
 
 async function performWebSearch(query) {
     searchResultsActive = true;
+    searchIcon.src = searchIconPng;
     gifDisplay.src = thinkingVideo;
     resultsDisplay.innerHTML = '';
     const loadingP = document.createElement('p');
@@ -1430,7 +1567,7 @@ async function performWebSearch(query) {
     resultsDisplay.appendChild(loadingP);
     searchBar.disabled = false;
     searchBar.value = '';
-    searchBar.placeholder = 'Press Escape to go back';
+    searchBar.placeholder = 'Type here to search';
 
     const result = await ipcRenderer.invoke('search-web', query);
     if (!searchResultsActive) return;
@@ -1483,6 +1620,7 @@ function hideSearchResults() {
     searchResultsActive = false;
     searchBar.placeholder = 'Type here to search';
     searchBar.value = '';
+    searchIcon.src = cortanaIcon;
     setStateIdle();
 }
 
@@ -1883,7 +2021,7 @@ function onSaveReminder() {
 }
 
 
-async function handleOpenApplication(appName) {
+async function handleOpenApplication(appName, silent = false) {
     // Handle special Windows commands
     const specialCommands = {
         'settings': 'ms-settings:',
@@ -1905,27 +2043,38 @@ async function handleOpenApplication(appName) {
     if (specialCommands[appNameLower]) {
         const command = specialCommands[appNameLower];
         ipcRenderer.send('run-special-command', command);
-        displayAndSpeak(`Opening ${appName}...`, onActionFinished, {}, false);
+        if (!silent) displayAndSpeak(`Opening ${appName}...`, onActionFinished, {}, false);
+        else { isBusy = false; setStateIdle(); }
         return;
     }
     
-    displayAndSpeak(`Looking for ${appName}...`, onActionFinished, {}, false);
+    if (!silent) displayAndSpeak(`Looking for ${appName}...`, onActionFinished, {}, false);
 
     const apps = await ipcRenderer.invoke('find-application', appName);
 
     if (apps.length === 0) {
         const fallbackSuccess = await ipcRenderer.invoke('open-application-fallback', appName);
         if (fallbackSuccess) {
-            const responseText = `I couldn't find "${appName}" in your Start Menu, but I'm opening it directly.`;
-            displayAndSpeak(responseText, onActionFinished, {}, false);
+            if (!silent) {
+                const responseText = `I couldn't find "${appName}" in your Start Menu, but I'm opening it directly.`;
+                displayAndSpeak(responseText, onActionFinished, {}, false);
+            } else { isBusy = false; setStateIdle(); }
         } else {
-            const responseText = `I couldn't find "${appName}" and couldn't open it directly.`;
-            displayAndSpeak(responseText, onActionFinished, {}, true);
+            if (!silent) {
+                const responseText = `I couldn't find "${appName}" and couldn't open it directly.`;
+                displayAndSpeak(responseText, onActionFinished, {}, true);
+            } else { isBusy = false; setStateIdle(); }
         }
     } else if (apps.length === 1) {
         ipcRenderer.send('open-path', apps[0].path);
-        const responseText = `Opening ${apps[0].name}...`;
-        displayAndSpeak(responseText, onActionFinished, {}, false);
+        if (!silent) {
+            const responseText = `Opening ${apps[0].name}...`;
+            displayAndSpeak(responseText, onActionFinished, {}, false);
+        } else { isBusy = false; setStateIdle(); }
+    } else if (silent) {
+        ipcRenderer.send('open-path', apps[0].path);
+        isBusy = false;
+        setStateIdle();
     } else {
         let responseText = "I found a few options. Which one did you mean?";
         
@@ -2260,16 +2409,6 @@ function processQuery(query) {
     resultsDisplay.innerHTML = '';
     const lowerCaseQuery = query.toLowerCase();
 
-    if (webSearchEnabled) {
-        if (navigator.onLine) {
-            performWebSearch(query);
-        } else {
-            const errorText = "Sorry, I can't connect to the internet right now. Please check your connection.";
-            displayAndSpeak(errorText, onActionFinished, {}, true);
-        }
-        return;
-    }
-
     // Check for custom actions with exact match or word boundary matching
     // This prevents false triggers (e.g., "open chrome" won't trigger a "chrome" custom action)
     const customAction = customActions.find(a => {
@@ -2311,7 +2450,7 @@ function processQuery(query) {
         return;
     }
 
-    displayAndSpeak("I'm sorry, I don't understand that command.", onActionFinished, {}, true);
+    performWebSearch(query);
 }
 
 function onSearch() {
@@ -2325,6 +2464,7 @@ function onSearch() {
 
     setStateActive();
     searchBar.blur();
+    clearTimeout(blurCleanupTimer);
     searchBar.value = '';
     gifDisplay.src = thinkingVideo;
     
