@@ -1,5 +1,6 @@
 node_modules
 package-lock.json
 dist
-CHANGELOG.mderr.log
+CHANGELOG.md
+err.log
 out.log
