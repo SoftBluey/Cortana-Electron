@@ -8,6 +8,7 @@ const {
   Tray,
   Menu,
   dialog,
+  systemPreferences,
 } = require("electron");
 const path = require("path");
 const https = require("https");

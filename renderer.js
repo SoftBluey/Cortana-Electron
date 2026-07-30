@@ -1437,7 +1437,8 @@ async function loadAndApplySettings() {
         themeColorPicker.disabled = true;
         const result = await ipcRenderer.invoke('get-accent-color');
         if (result.success) {
-            applyThemeColor('#' + result.color.slice(4, 6) + result.color.slice(2, 4) + result.color.slice(0, 2));
+            const accentHex = result.color.replace('#', '');
+            applyThemeColor('#' + accentHex.slice(-6));
         } else {
             themeColorPicker.disabled = false;
             useAccentToggle.checked = false;
@@ -1630,7 +1631,8 @@ function applyThemeColor(color) {
 async function fetchAndApplyAccentColor() {
     const result = await ipcRenderer.invoke('get-accent-color');
     if (result.success) {
-        applyThemeColor('#' + result.color.slice(4, 6) + result.color.slice(2, 4) + result.color.slice(0, 2));
+        const accentHex = result.color.replace('#', '');
+        applyThemeColor('#' + accentHex.slice(-6));
     }
 }
 
