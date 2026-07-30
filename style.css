@@ -266,6 +266,7 @@ body.movable-mode #app-container {
 
 #animation-container.active #content-wrapper::-webkit-scrollbar-thumb {
     background-color: #555;
+    border-radius: 0;
 }
 
 #web-link-container {
@@ -465,6 +466,7 @@ body.movable-mode #app-container {
 
 .search-panel::-webkit-scrollbar-thumb {
     background: #ccc;
+    border-radius: 0;
 }
 
 .search-panel-category {
@@ -851,6 +853,7 @@ body.movable-mode #app-container {
 .settings-content::-webkit-scrollbar-thumb,
 #action-sequence-list::-webkit-scrollbar-thumb {
     background: #555;
+    border-radius: 0;
 }
 
 .settings-content::-webkit-scrollbar-thumb:hover,
@@ -1062,6 +1065,7 @@ textarea.settings-text-input::-webkit-scrollbar-track {
 
 textarea.settings-text-input::-webkit-scrollbar-thumb {
     background: #555;
+    border-radius: 0;
 }
 
 textarea.settings-text-input::-webkit-scrollbar-thumb:hover {

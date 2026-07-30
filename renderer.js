@@ -1,5 +1,6 @@
 const { ipcRenderer } = require('electron');
 const path = require('path');
+const https = require('https');
 
 let searchBar, searchIcon, searchPanel;
 let animationContainer, gifDisplay, resultsDisplay, contentWrapper;
@@ -342,6 +343,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchBar.addEventListener('input', onSearchInput);
     searchBar.addEventListener('keydown', onSearchKeyDown);
     searchBar.addEventListener('blur', () => {
+        searchIcon.src = cortanaIcon;
         blurCleanupTimer = setTimeout(() => {
             hideSearchPanel();
             searchBar.value = '';
@@ -352,17 +354,16 @@ window.addEventListener('DOMContentLoaded', async () => {
             gifDisplay.src = idleVideo;
         }
         offSound.play();
-        searchIcon.src = cortanaIcon;
     });
 
     searchBar.addEventListener('focus', () => {
+        searchIcon.src = searchIconPng;
         if (animationContainer.className === 'active') {
             setStateIdle();
             return;
         }
         gifDisplay.src = listeningVideo;
         onSound.play();
-        searchIcon.src = searchIconPng;
     });
 
 
@@ -675,7 +676,54 @@ async function generateCategorizedResults(query) {
         }
     } catch (_) {}
 
+    const webSuggestions = await generateWebSuggestions(query);
+    if (webSuggestions.length > 0) {
+        categories.push({
+            name: 'Web',
+            items: webSuggestions.slice(0, 4).map(s => ({
+                type: 'web',
+                title: s,
+                subtitle: 'Search with Cortana',
+                icon: PANEL_ICONS.web,
+                action: () => {
+                    lastQuery = s;
+                    isBusy = true;
+                    setStateActive();
+                    requestSound.currentTime = 0;
+                    requestSound.play();
+                    performWebSearch(s);
+                }
+            }))
+        });
+    }
+
     return categories;
+}
+
+function generateWebSuggestions(query) {
+    return new Promise((resolve) => {
+        const url = `https://suggestqueries.google.com/complete/search?client=chrome&q=${encodeURIComponent(query)}`;
+        const options = {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        };
+        const req = https.get(url, options, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try {
+                    const json = JSON.parse(data);
+                    const suggestions = json[1] || [];
+                    resolve(suggestions.slice(0, 4));
+                } catch {
+                    resolve([]);
+                }
+            });
+        });
+        req.on('error', () => resolve([]));
+        req.setTimeout(3000, () => { req.destroy(); resolve([]); });
+    });
 }
 
 function showSearchPanel(categories) {
@@ -697,7 +745,7 @@ function showSearchPanel(categories) {
 
             const icon = document.createElement('div');
             icon.className = 'search-panel-item-icon';
-            if (item.icon === 'cortana') {
+            if (item.icon === 'cortana' || item.icon === 'web') {
                 const img = document.createElement('img');
                 img.src = searchIconPng;
                 img.style.cssText = 'width:24px;height:24px;';
@@ -729,6 +777,7 @@ function showSearchPanel(categories) {
                 hideSearchPanel();
                 searchBar.value = '';
                 item.action();
+                searchIcon.src = cortanaIcon;
             });
 
             allPanelItems.push({ el, action: item.action });
