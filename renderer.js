@@ -1,6 +1,7 @@
 const { ipcRenderer } = require('electron');
 const path = require('path');
 const https = require('https');
+const { parseGIF, decompressFrames } = require('gifuct-js');
 
 let searchBar, searchIcon, searchPanel;
 let animationContainer, gifDisplay, resultsDisplay, contentWrapper;
@@ -21,6 +22,7 @@ let idleGreetingModeSelect, specificGreetingContainer, specificGreetingSelect, c
 let customActionFormContainer, customActionTriggerInput, customActionSaveBtn, customActionCancelBtn, customActionsList, addCustomActionBtn, actionSequenceList, actionSequenceWarning;
 let aiToggle, openaiApiKeyInput, openaiApiKeyContainer;
 let aiModelInput, aiApiUrlInput, aiSystemPromptInput, aiPresetSelect, aiCustomFields, aiModelItem, aiApiUrlItem;
+let useAccentToggle;
 
 let availableVoices = [];
 let customActions = [];
@@ -30,6 +32,7 @@ let preferredVoiceName = "Microsoft Zira Desktop";
 let currentSearchEngine = "bing";
 let isMovableMode = false;
 let themeColor = "#0078d7";
+let useWindowsAccent = false;
 let pitch = 1;
 let rate = 1;
 let ttsEngine = "edge";
@@ -72,6 +75,402 @@ const drumrollSound = new Audio(path.join(appRoot, 'drumroll.mp3'));
 
 let isBusy = false;
 let lastQuery = '';
+let anim = null;
+
+// ===================== ANIMATION STATE MACHINE =====================
+const AnimationState = Object.freeze({
+  IDLE: 'idle',
+  ENTRANCE: 'entrance',
+  RESUME: 'resume',
+  TRANSITION_TO_IDLE: 'transition_to_idle',
+  LISTENING_BEGIN: 'listening_begin',
+  LISTENING: 'listening',
+  LISTENING_END: 'listening_end',
+  SPEAKING_BEGIN: 'speaking_begin',
+  SPEAKING: 'speaking',
+  SPEAKING_END: 'speaking_end',
+  THINKING: 'thinking',
+  ERROR: 'error',
+  HOP: 'hop',
+  BOW: 'bow',
+  SPIN: 'spin',
+  STATIC: 'static',
+});
+
+const ANIMATION_FILES = {
+  [AnimationState.ENTRANCE]: 'circle_entrance.gif',
+  [AnimationState.RESUME]: 'cortana_resume.gif',
+  [AnimationState.TRANSITION_TO_IDLE]: 'circle_transition_idle.gif',
+  [AnimationState.LISTENING_BEGIN]: 'circle_begin_listen.gif',
+  [AnimationState.LISTENING]: 'circle_listening.gif',
+  [AnimationState.LISTENING_END]: 'circle_listen_end.gif',
+  [AnimationState.SPEAKING_BEGIN]: 'circle_begin_speaking.gif',
+  [AnimationState.SPEAKING]: 'circle_speaking.gif',
+  [AnimationState.SPEAKING_END]: 'circle_speaking_end.gif',
+  [AnimationState.THINKING]: 'circle_spin.gif',
+  [AnimationState.ERROR]: 'circle_error.gif',
+  [AnimationState.HOP]: 'circle_hop.gif',
+  [AnimationState.BOW]: 'circle_bow.gif',
+  [AnimationState.SPIN]: 'circle_spin.gif',
+  [AnimationState.STATIC]: 'circle_static.gif',
+  idle_start: 'circle_idle_start.gif',
+  idle_mid: 'circle_idle_mid.gif',
+  idle_end: 'circle_idle_end.gif',
+};
+
+const CHROMA_KEY_THRESHOLD = 10;
+
+function parseHexColor(hex) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return { r, g, b };
+}
+
+function getLuminance(r, g, b) {
+  return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+function getReadableTextColor(hex) {
+  const { r, g, b } = parseHexColor(hex);
+  const lum = getLuminance(r, g, b);
+  const MIN_LUM = 130;
+
+  if (lum >= MIN_LUM) return hex;
+
+  const alpha = (255 - MIN_LUM) / (255 - lum);
+  const nr = Math.round(r * alpha + 255 * (1 - alpha));
+  const ng = Math.round(g * alpha + 255 * (1 - alpha));
+  const nb = Math.round(b * alpha + 255 * (1 - alpha));
+  return `#${nr.toString(16).padStart(2, '0')}${ng.toString(16).padStart(2, '0')}${nb.toString(16).padStart(2, '0')}`;
+}
+
+class GifRenderer {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.frames = [];
+    this.currentIndex = 0;
+    this.timer = null;
+    this.running = false;
+    this.loops = 0;
+    this.maxLoops = 0;
+    this.onComplete = null;
+    this.onLoop = null;
+    this.themeColor = { r: 0, g: 120, b: 215 };
+    this.gifWidth = 0;
+    this.gifHeight = 0;
+  }
+
+  loadSync(path) {
+    this.stop();
+    const buffer = require('fs').readFileSync(path);
+    const gif = parseGIF(buffer);
+    const rawFrames = decompressFrames(gif);
+
+    this.gifWidth = gif.lsd.width;
+    this.gifHeight = gif.lsd.height;
+    this.canvas.width = this.gifWidth;
+    this.canvas.height = this.gifHeight;
+
+    this.frames = [];
+    let prevData = new Uint8ClampedArray(this.gifWidth * this.gifHeight * 4);
+    let prevDisposal = 0;
+
+    for (const raw of rawFrames) {
+      const { left, top, width, height } = raw.dims;
+      const pixels = raw.pixels;
+      const colorTable = raw.colorTable;
+      const frameData = new Uint8ClampedArray(this.gifWidth * this.gifHeight * 4);
+
+      if (prevDisposal === 0 || prevDisposal === 1) {
+        frameData.set(prevData);
+      }
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const si = y * width + x;
+          const di = ((top + y) * this.gifWidth + (left + x)) * 4;
+
+          const index = pixels[si];
+          const color = colorTable[index];
+          if (!color) continue;
+
+          const pr = color[0];
+          const pg = color[1];
+          const pb = color[2];
+
+          const lum = getLuminance(pr, pg, pb);
+
+          if (lum < CHROMA_KEY_THRESHOLD) {
+            frameData[di] = 0;
+            frameData[di + 1] = 0;
+            frameData[di + 2] = 0;
+            frameData[di + 3] = 0;
+          } else {
+            frameData[di] = pr;
+            frameData[di + 1] = pg;
+            frameData[di + 2] = pb;
+            frameData[di + 3] = 255;
+          }
+        }
+      }
+
+      this.frames.push({
+        data: frameData,
+        delay: Math.max(raw.delay, 20),
+      });
+
+      prevData = raw.disposalType === 2
+        ? new Uint8ClampedArray(this.gifWidth * this.gifHeight * 4)
+        : new Uint8ClampedArray(frameData);
+      prevDisposal = raw.disposalType;
+    }
+
+    this.currentIndex = 0;
+    this.loops = 0;
+  }
+
+  start(loop = true) {
+    this.stop();
+    this.running = true;
+    this.currentIndex = 0;
+    this.loops = 0;
+    this.maxLoops = loop ? Infinity : 1;
+    this._tick();
+  }
+
+  playOneShot(onComplete) {
+    this.start(false);
+    this.onComplete = onComplete;
+  }
+
+  stop() {
+    this.running = false;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.onComplete = null;
+  }
+
+  _tick() {
+    if (!this.running) return;
+
+    this._renderFrame(this.currentIndex);
+
+    this.currentIndex++;
+
+    if (this.currentIndex >= this.frames.length) {
+      this.loops++;
+      if (this.loops >= this.maxLoops) {
+        this.running = false;
+        if (this.onComplete) {
+          const cb = this.onComplete;
+          this.onComplete = null;
+          cb();
+        }
+        return;
+      }
+      this.currentIndex = 0;
+      if (this.onLoop) this.onLoop();
+    }
+
+    const delay = this.frames[this.currentIndex].delay;
+    this.timer = setTimeout(() => this._tick(), delay);
+  }
+
+  _renderFrame(index) {
+    const frame = this.frames[index];
+    if (!frame) return;
+
+    const imageData = this.ctx.createImageData(this.gifWidth, this.gifHeight);
+    const pxData = frame.data;
+    const { r, g, b } = this.themeColor;
+
+    for (let i = 0; i < pxData.length; i += 4) {
+      const pr = pxData[i];
+      const pg = pxData[i + 1];
+      const pb = pxData[i + 2];
+      const pa = pxData[i + 3];
+
+      if (pa === 0 || (pr === 0 && pg === 0 && pb === 0)) {
+        imageData.data[i] = 0;
+        imageData.data[i + 1] = 0;
+        imageData.data[i + 2] = 0;
+        imageData.data[i + 3] = 0;
+        continue;
+      }
+
+      const lum = getLuminance(pr, pg, pb);
+      const intensity = lum / 255;
+      imageData.data[i] = Math.round(r * intensity);
+      imageData.data[i + 1] = Math.round(g * intensity);
+      imageData.data[i + 2] = Math.round(b * intensity);
+      imageData.data[i + 3] = pa;
+    }
+
+    this.ctx.putImageData(imageData, 0, 0);
+  }
+
+  setThemeColor(hex) {
+    this.themeColor = parseHexColor(hex);
+    if (this.frames.length > 0) {
+      this._renderFrame(this.currentIndex % this.frames.length);
+    }
+  }
+
+  get loaded() {
+    return this.frames.length > 0;
+  }
+}
+
+class AnimationManager {
+  constructor(canvasElement) {
+    this.renderer = new GifRenderer(canvasElement);
+    this.state = null;
+    this.queue = [];
+    this._pendingNext = null;
+    this._idleCycleIndex = 0;
+    this._idlePlaying = false;
+    this._destroyed = false;
+
+    this.renderer.onComplete = () => this._onAnimationEnd();
+  }
+
+  init() {
+    this.renderer.loadSync(path.join(appRoot, ANIMATION_FILES[AnimationState.STATIC]));
+    this.state = AnimationState.STATIC;
+    this.renderer.start(true);
+  }
+
+  goToState(state, options = {}) {
+    if (this._destroyed) return;
+
+    this.queue = [];
+    this._stopIdleCycle();
+    this._playState(state, options);
+  }
+
+  queueAnimation(state) {
+    if (this._destroyed) return;
+    this.queue.push(state);
+  }
+
+  setThemeColor(hex) {
+    this.renderer.setThemeColor(hex);
+
+    const textColor = getReadableTextColor(hex);
+    document.documentElement.style.setProperty('--text-color', textColor);
+  }
+
+  destroy() {
+    this._destroyed = true;
+    this.renderer.stop();
+    this._stopIdleCycle();
+    this.queue = [];
+  }
+
+  _playState(state, options = {}) {
+    if (this._destroyed) return;
+
+    this.state = state;
+    this._pendingNext = options.nextState || null;
+
+    if (state === AnimationState.IDLE) {
+      this._startIdleCycle();
+      return;
+    }
+
+    const file = ANIMATION_FILES[state];
+    if (!file) {
+      console.warn(`No animation file for state: ${state}`);
+      return;
+    }
+
+    this.renderer.loadSync(path.join(appRoot, file));
+
+    const isLooping = (
+      state === AnimationState.LISTENING ||
+      state === AnimationState.SPEAKING ||
+      state === AnimationState.THINKING
+    );
+
+    if (state === AnimationState.STATIC || isLooping) {
+      this.renderer.start(true);
+    } else {
+      this.renderer.playOneShot(() => this._onAnimationEnd());
+    }
+  }
+
+  _onAnimationEnd() {
+    if (this._destroyed) return;
+
+    if (this.queue.length > 0) {
+      const next = this.queue.shift();
+      this._playState(next);
+      return;
+    }
+
+    if (this._pendingNext) {
+      const next = this._pendingNext;
+      this._pendingNext = null;
+      this._playState(next);
+      return;
+    }
+
+    const autoNext = {
+      [AnimationState.ENTRANCE]: AnimationState.TRANSITION_TO_IDLE,
+      [AnimationState.RESUME]: AnimationState.TRANSITION_TO_IDLE,
+      [AnimationState.TRANSITION_TO_IDLE]: AnimationState.IDLE,
+      [AnimationState.LISTENING_BEGIN]: AnimationState.LISTENING,
+      [AnimationState.LISTENING_END]: AnimationState.TRANSITION_TO_IDLE,
+      [AnimationState.SPEAKING_BEGIN]: AnimationState.SPEAKING,
+      [AnimationState.SPEAKING_END]: AnimationState.TRANSITION_TO_IDLE,
+      [AnimationState.ERROR]: AnimationState.TRANSITION_TO_IDLE,
+      [AnimationState.HOP]: AnimationState.TRANSITION_TO_IDLE,
+      [AnimationState.BOW]: AnimationState.TRANSITION_TO_IDLE,
+      [AnimationState.SPIN]: AnimationState.TRANSITION_TO_IDLE,
+    };
+
+    const next = autoNext[this.state];
+    if (next) {
+      this._playState(next);
+    }
+  }
+
+  _startIdleCycle() {
+    this._idlePlaying = true;
+    this._idleCycleIndex = 1;
+    this._playIdleFrame();
+  }
+
+  _playIdleFrame() {
+    if (this._destroyed || !this._idlePlaying) return;
+
+    const files = ['idle_start', 'idle_mid', 'idle_end'];
+    const key = files[this._idleCycleIndex];
+    const file = ANIMATION_FILES[key];
+
+    if (!file) {
+      this._idleCycleIndex = (this._idleCycleIndex + 1) % files.length;
+      this._playIdleFrame();
+      return;
+    }
+
+    this.renderer.loadSync(path.join(appRoot, file));
+    this.renderer.playOneShot(() => {
+      if (this._destroyed || !this._idlePlaying) return;
+      this._idleCycleIndex = (this._idleCycleIndex + 1) % files.length;
+      this._playIdleFrame();
+    });
+  }
+
+  _stopIdleCycle() {
+    this._idlePlaying = false;
+  }
+}
+// ===================== END ANIMATION STATE MACHINE =====================
 
 const WINDOWS_SETTINGS = [
   { name: 'Display', uri: 'ms-settings:display' },
@@ -232,9 +631,13 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchIcon = document.getElementById('search-icon');
     searchPanel = document.getElementById('search-panel');
     animationContainer = document.getElementById('animation-container');
-    gifDisplay = document.getElementById('gif-display');
+    gifDisplay = document.getElementById('circle-canvas');
     resultsDisplay = document.getElementById('results-display');
     contentWrapper = document.getElementById('content-wrapper');
+    
+    const circleCanvas = document.getElementById('circle-canvas');
+    anim = new AnimationManager(circleCanvas);
+    anim.init();
     
     const updateAvailableDiv = document.getElementById('update-available');
     const updateButton = document.getElementById('update-button');
@@ -285,6 +688,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     voiceWarning = document.getElementById('voice-warning');
     searchEngineSelect = document.getElementById('search-engine-select');
     themeColorPicker = document.getElementById('theme-color-picker');
+    useAccentToggle = document.getElementById('use-accent-toggle');
     movableToggle = document.getElementById('movable-toggle');
     pitchSlider = document.getElementById('pitch-slider');
     rateSlider = document.getElementById('rate-slider');
@@ -351,7 +755,7 @@ window.addEventListener('DOMContentLoaded', async () => {
             setStateIdle();
         }, 200);
         if (animationContainer.className === 'idle') {
-            gifDisplay.src = idleVideo;
+            anim.goToState(AnimationState.IDLE);
         }
         offSound.play();
     });
@@ -362,7 +766,9 @@ window.addEventListener('DOMContentLoaded', async () => {
             setStateIdle();
             return;
         }
-        gifDisplay.src = listeningVideo;
+        const skipStates = [AnimationState.ENTRANCE, AnimationState.RESUME, AnimationState.TRANSITION_TO_IDLE];
+        if (skipStates.includes(anim.state)) return;
+        anim.goToState(AnimationState.LISTENING_BEGIN);
         onSound.play();
     });
 
@@ -397,6 +803,18 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchEngineSelect.addEventListener('change', onSearchEngineChanged);
 
     themeColorPicker.addEventListener('input', onThemeColorChanged, false);
+    useAccentToggle.addEventListener('change', async () => {
+        useWindowsAccent = useAccentToggle.checked;
+        ipcRenderer.send('set-setting', { key: 'useWindowsAccent', value: useWindowsAccent });
+        if (useWindowsAccent) {
+            themeColorPicker.disabled = true;
+            await fetchAndApplyAccentColor();
+        } else {
+            themeColorPicker.disabled = false;
+            applyThemeColor(themeColor);
+        }
+        showSavedToast();
+    });
     movableToggle.addEventListener('change', onMovableToggleChanged);
     pitchSlider.addEventListener('input', onPitchChanged);
     rateSlider.addEventListener('input', onRateChanged);
@@ -526,24 +944,14 @@ window.addEventListener('DOMContentLoaded', async () => {
         appContainer.classList.remove('visible');
     });
 
-    ipcRenderer.on('trigger-enter-animation', () => {
-        gifDisplay.style.transition = 'none';
-        gifDisplay.style.opacity = '0';
-        gifDisplay.style.transform = 'translateX(-50%) translateY(30px)';
-        requestAnimationFrame(() => {
-            appContainer.classList.add('visible');
-            requestAnimationFrame(() => {
-                gifDisplay.style.transition = '';
-                gifDisplay.style.opacity = '';
-                gifDisplay.style.transform = '';
-                const idleText = resultsDisplay.querySelector('.fade-in-item');
-                if (idleText) {
-                    idleText.style.animation = 'none';
-                    void idleText.offsetHeight;
-                    idleText.style.animation = '';
-                }
-            });
-        });
+    let entranceReceived = false;
+    ipcRenderer.on('trigger-enter-animation', (event, { timeSinceHidden }) => {
+        entranceReceived = true;
+        appContainer.classList.add('visible');
+        const state = timeSinceHidden > 5000
+            ? AnimationState.ENTRANCE
+            : AnimationState.RESUME;
+        anim.goToState(state);
     });
 
     ipcRenderer.on('command-failed', (event, { command }) => {
@@ -564,9 +972,11 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     await loadAndApplySettings();
     setupTTS();
-    
+
     animationContainer.className = 'idle';
-    gifDisplay.src = idleVideo;
+    if (!entranceReceived) {
+        anim.goToState(AnimationState.IDLE);
+    }
 
     const p = document.createElement('p');
     p.className = 'fade-in-item';
@@ -604,7 +1014,49 @@ async function generateCategorizedResults(query) {
     const categories = [];
     const lowerQuery = query.toLowerCase();
 
-    const cortanaItems = [{
+    const customActionItems = [];
+    for (const a of customActions) {
+        if (!a.trigger) continue;
+        const triggerLower = a.trigger.toLowerCase();
+        const matches = lowerQuery === triggerLower || new RegExp(`\\b${triggerLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(lowerQuery);
+        if (matches && a.actions.length > 0) {
+            customActionItems.push({
+                type: 'cortana',
+                title: a.trigger,
+                subtitle: `${a.actions.length} action${a.actions.length > 1 ? 's' : ''}`,
+                icon: PANEL_ICONS.cortana,
+                action: () => {
+                    lastQuery = query;
+                    executeActionSequence(a.actions);
+                }
+            });
+        }
+    }
+    if (customActionItems.length > 0) {
+        categories.push({ name: 'Custom Actions', items: customActionItems });
+    }
+
+    const cortanaItems = [];
+
+    const matchedCommand = commands.find(c => lowerQuery.match(c.regex));
+
+    if (matchedCommand) {
+        cortanaItems.push({
+            type: 'cortana',
+            title: `Execute "${query}"`,
+            subtitle: 'Run this Cortana function',
+            icon: PANEL_ICONS.cortana,
+            action: () => {
+                lastQuery = query;
+                isBusy = true;
+                setStateActive();
+                resultsDisplay.innerHTML = '';
+                matchedCommand.handler(lowerQuery.match(matchedCommand.regex));
+            }
+        });
+    }
+
+    cortanaItems.push({
         type: 'cortana',
         title: `Search for "${query}"`,
         subtitle: 'Continue with Cortana regular',
@@ -613,13 +1065,13 @@ async function generateCategorizedResults(query) {
             lastQuery = query;
             isBusy = true;
             setStateActive();
-            gifDisplay.src = thinkingVideo;
+            anim.goToState(AnimationState.THINKING);
             resultsDisplay.innerHTML = '';
             requestSound.currentTime = 0;
             requestSound.play();
             performWebSearch(query);
         }
-    }];
+    });
 
     if (aiEnabled) {
         cortanaItems.push({
@@ -631,7 +1083,7 @@ async function generateCategorizedResults(query) {
                 lastQuery = query;
                 isBusy = true;
                 setStateActive();
-                gifDisplay.src = thinkingVideo;
+                anim.goToState(AnimationState.THINKING);
                 resultsDisplay.innerHTML = '';
                 const p = document.createElement('p');
                 p.className = 'fade-in-item';
@@ -863,6 +1315,8 @@ function onSearchKeyDown(event) {
 
         case 'Enter':
             event.preventDefault();
+            searchBar.blur();
+            clearTimeout(blurCleanupTimer);
             const enterIndex = selectedPanelIndex;
             const enterItems = allPanelItems;
             hideSearchPanel();
@@ -976,13 +1430,24 @@ async function loadAndApplySettings() {
     applyMovableModeStyles(settings.isMovable);
     
     themeColor = settings.themeColor || "#0078d7";
-    themeColorPicker.value = themeColor;
-    document.documentElement.style.setProperty('--primary-color', themeColor);
-    
-    const defaultHue = 207;
-    const newHsl = hexToHsl(themeColor);
-    const hueDifference = newHsl.h - defaultHue;
-    document.documentElement.style.setProperty('--hue-rotate-deg', `${hueDifference}deg`);
+    useWindowsAccent = settings.useWindowsAccent === true;
+    useAccentToggle.checked = useWindowsAccent;
+
+    if (useWindowsAccent) {
+        themeColorPicker.disabled = true;
+        const result = await ipcRenderer.invoke('get-accent-color');
+        if (result.success) {
+            applyThemeColor('#' + result.color.slice(4, 6) + result.color.slice(2, 4) + result.color.slice(0, 2));
+        } else {
+            themeColorPicker.disabled = false;
+            useAccentToggle.checked = false;
+            useWindowsAccent = false;
+            applyThemeColor(themeColor);
+        }
+    } else {
+        themeColorPicker.disabled = false;
+        applyThemeColor(themeColor);
+    }
 
     pitch = settings.pitch || 1;
     pitchSlider.value = pitch;
@@ -1150,15 +1615,32 @@ function showSavedToast() {
     }, 1200);
 }
 
-function onThemeColorChanged(event) {
-    themeColor = event.target.value;
-    document.documentElement.style.setProperty('--primary-color', themeColor);
-    ipcRenderer.send('set-setting', { key: 'themeColor', value: themeColor });
+function applyThemeColor(color) {
+    themeColor = color;
+    themeColorPicker.value = color;
+    document.documentElement.style.setProperty('--primary-color', color);
+    anim.setThemeColor(color);
 
     const defaultHue = 207;
-    const newHsl = hexToHsl(themeColor);
+    const newHsl = hexToHsl(color);
     const hueDifference = newHsl.h - defaultHue;
     document.documentElement.style.setProperty('--hue-rotate-deg', `${hueDifference}deg`);
+}
+
+async function fetchAndApplyAccentColor() {
+    const result = await ipcRenderer.invoke('get-accent-color');
+    if (result.success) {
+        applyThemeColor('#' + result.color.slice(4, 6) + result.color.slice(2, 4) + result.color.slice(0, 2));
+    }
+}
+
+function onThemeColorChanged(event) {
+    themeColor = event.target.value;
+    useAccentToggle.checked = false;
+    useWindowsAccent = false;
+    ipcRenderer.send('set-setting', { key: 'useWindowsAccent', value: false });
+    applyThemeColor(themeColor);
+    ipcRenderer.send('set-setting', { key: 'themeColor', value: themeColor });
     showSavedToast();
 }
 
@@ -1411,25 +1893,29 @@ function displayAndSpeak(text, callback, options = {}, isError = false) {
         showWebLink();
     }
 
-    const onSpeechEndCallback = isError ? () => {
-        gifDisplay.src = errorVideo;
-        setTimeout(() => {
-            isBusy = false;
-            searchBar.disabled = false;
-            searchBar.placeholder = 'Type here to search';
-            gifDisplay.src = idleVideo;
-        }, 3800);
-    } : callback;
-
     if (isError) {
         errorSound.play();
+        anim.goToState(AnimationState.ERROR);
+
         errorSound.onended = () => {
-            gifDisplay.src = speakingVideo;
-            speak(text, onSpeechEndCallback);
+            anim.goToState(AnimationState.SPEAKING_BEGIN);
+            speak(text, () => {
+                anim.goToState(AnimationState.ERROR);
+                setTimeout(() => {
+                    isBusy = false;
+                    searchBar.disabled = false;
+                    searchBar.placeholder = 'Type here to search';
+                    if (document.activeElement === searchBar) {
+                        anim.goToState(AnimationState.LISTENING);
+                    } else {
+                        anim.goToState(AnimationState.TRANSITION_TO_IDLE);
+                    }
+                }, 3800);
+            });
         };
     } else {
-        gifDisplay.src = speakingVideo;
-        speak(text, onSpeechEndCallback);
+        anim.goToState(AnimationState.SPEAKING_BEGIN);
+        speak(text, callback);
     }
 }
 
@@ -1549,19 +2035,12 @@ function onActionFinished() {
     }
 
     isBusy = false;
-    gifDisplay.src = speakingEndVideo;
 
-    finishSpeakingTimeout = setTimeout(() => {
-        if (animationContainer.className === 'active') {
-            if (document.activeElement === searchBar) {
-                gifDisplay.src = listeningVideo;
-                searchIcon.src = searchIconPng;
-            } else {
-                gifDisplay.src = idleVideo;
-                searchIcon.src = cortanaIcon;
-            }
-        }
-    }, 1000);
+    const nextState = (document.activeElement === searchBar)
+        ? AnimationState.LISTENING
+        : AnimationState.TRANSITION_TO_IDLE;
+
+    anim.goToState(AnimationState.SPEAKING_END, { nextState });
 }
 
 function setStateIdle() {
@@ -1593,10 +2072,10 @@ function setStateIdle() {
     animationContainer.className = 'idle';
     if (document.activeElement === searchBar) {
         searchIcon.src = searchIconPng;
-        gifDisplay.src = listeningVideo;
+        anim.goToState(AnimationState.LISTENING_BEGIN);
     } else {
         searchIcon.src = cortanaIcon;
-        gifDisplay.src = idleVideo;
+        anim.goToState(AnimationState.IDLE);
     }
 
     if (!isBusy) {
@@ -1615,7 +2094,6 @@ function setStateIdle() {
 }
 
 function setStateActive() {
-    clearTimeout(finishSpeakingTimeout);
     animationContainer.className = 'active';
 }
 
@@ -1639,7 +2117,7 @@ function getSearchUrl(query) {
 async function performWebSearch(query) {
     searchResultsActive = true;
     searchIcon.src = searchIconPng;
-    gifDisplay.src = thinkingVideo;
+    anim.goToState(AnimationState.THINKING);
     resultsDisplay.innerHTML = '';
     const loadingP = document.createElement('p');
     loadingP.className = 'fade-in-item';
@@ -1679,7 +2157,7 @@ async function performWebSearch(query) {
 
         showWebLink();
 
-        gifDisplay.src = speakingVideo;
+        anim.goToState(AnimationState.SPEAKING_BEGIN);
         requestSound.pause();
         requestSound.currentTime = 0;
         speak(`I found results for ${query}.`, () => {
@@ -1690,8 +2168,11 @@ async function performWebSearch(query) {
         p.className = 'fade-in-item';
         p.textContent = 'No results found.';
         resultsDisplay.appendChild(p);
-        gifDisplay.src = speakingVideo;
-        onActionFinished();
+        anim.goToState(AnimationState.SPEAKING_BEGIN);
+        setTimeout(() => {
+            isBusy = false;
+            anim.goToState(AnimationState.TRANSITION_TO_IDLE);
+        }, 1000);
     }
 }
 
@@ -1946,7 +2427,7 @@ async function getTimeForLocation(rawInput) {
                 resultsDisplay.appendChild(btn);
             });
 
-            gifDisplay.src = speakingVideo;
+            anim.goToState(AnimationState.SPEAKING_BEGIN);
             speak(text, onActionFinished);
             showWebLink();
 
@@ -2136,7 +2617,7 @@ function onSaveReminder() {
         reminderContainer.classList.remove('visible');
         animationContainer.style.display = 'block';
         setStateActive();
-        gifDisplay.src = speakingVideo;
+        anim.goToState(AnimationState.SPEAKING_BEGIN);
 
         displayAndSpeak(text, onActionFinished, {}, false);
     } else {
@@ -2570,7 +3051,7 @@ function processQuery(query) {
     }
 
     if (aiEnabled && navigator.onLine) {
-        gifDisplay.src = thinkingVideo;
+        anim.goToState(AnimationState.THINKING);
         resultsDisplay.innerHTML = '';
         const p = document.createElement('p');
         p.className = 'fade-in-item';
@@ -2602,7 +3083,7 @@ function onSearch() {
     searchBar.blur();
     clearTimeout(blurCleanupTimer);
     searchBar.value = '';
-    gifDisplay.src = thinkingVideo;
+    anim.goToState(AnimationState.THINKING);
     
     resultsDisplay.innerHTML = '';
 

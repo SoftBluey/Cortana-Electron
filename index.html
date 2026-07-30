@@ -17,7 +17,7 @@
         </div>
         <div id="cortana-container" class="content-pane">
           <div id="animation-container">
-            <img id="gif-display" />
+            <canvas id="circle-canvas"></canvas>
             <div id="content-wrapper">
               <div id="results-display"></div>
               <div id="web-link-container">
@@ -109,6 +109,13 @@
                       id="theme-color-picker"
                       value="#0078d7"
                     />
+                  </div>
+                  <div class="setting-item">
+                    <label for="use-accent-toggle">Use Windows accent colour</label>
+                    <label class="toggle-switch">
+                      <input type="checkbox" id="use-accent-toggle" />
+                      <span class="slider"></span>
+                    </label>
                   </div>
                   <div class="setting-item">
                     <label for="time-format-select">Time Format</label>

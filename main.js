@@ -32,6 +32,7 @@ const winHeight = 640;
 let isSettingsVisible = false;
 let tray = null;
 let isClosing = false;
+let lastHiddenTime = 0;
 
 let applicationCache = new Map();
 
@@ -311,7 +312,9 @@ function showWindow() {
     mainWindow.show();
     mainWindow.focus();
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("trigger-enter-animation");
+      mainWindow.webContents.send("trigger-enter-animation", {
+        timeSinceHidden: Date.now() - lastHiddenTime
+      });
     }
   }
 }
@@ -462,6 +465,7 @@ function closeApp() {
     return;
   }
   isClosing = true;
+  lastHiddenTime = Date.now();
   mainWindow.webContents.send("go-idle-and-close");
 }
 
@@ -476,6 +480,15 @@ function registerIpcHandlers() {
   ipcMain.on("close-app", closeApp);
   ipcMain.on("open-external-link", (event, url) => {
     shell.openExternal(url);
+  });
+
+  ipcMain.handle("get-accent-color", () => {
+    try {
+      const accent = systemPreferences.getAccentColor();
+      return { success: true, color: accent };
+    } catch (e) {
+      return { success: false };
+    }
   });
 
   ipcMain.handle("search-web", async (event, query) => {

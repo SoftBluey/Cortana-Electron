@@ -2,6 +2,7 @@
     --primary-color: #0078d7;
     --primary-text-color: white;
     --hue-rotate-deg: 0deg;
+    --text-color: #ffffff;
 }
 
 * {
@@ -17,6 +18,7 @@ body {
     overflow: hidden;
     height: 100vh;
     width: 100vw;
+    color: var(--text-color);
 }
 
 body.movable-mode {
@@ -147,12 +149,11 @@ body.movable-mode #app-container {
     transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
-#gif-display {
+#circle-canvas {
     position: absolute;
     left: 50%;
     transform: translateX(-50%);
     transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-    filter: hue-rotate(var(--hue-rotate-deg));
 }
 
 #content-wrapper {
@@ -166,7 +167,7 @@ body.movable-mode #app-container {
 }
 
 #results-display {
-    color: var(--primary-color);
+    color: var(--text-color);
     font-size: 22px;
     display: flex;
     flex-direction: column;
@@ -230,25 +231,25 @@ body.movable-mode #app-container {
     color: var(--primary-text-color);
 }
 
-#animation-container.idle #gif-display {
-    top: 240px;
-    width: 120px;
-    height: 120px;
+#animation-container.idle #circle-canvas {
+    top: 197px;
+    height: 200px;
+    width: auto;
 }
 
 #animation-container.idle #content-wrapper {
-    top: 370px;
+    top: 405px;
 }
 
-#animation-container.active #gif-display {
+#animation-container.active #circle-canvas {
     top: 60px;
-    width: 60px;
-    height: 60px;
+    height: 110px;
+    width: auto;
 }
 
 #animation-container.active #content-wrapper {
-    top: 130px;
-    height: calc(100% - 130px);
+    top: 175px;
+    height: calc(100% - 175px);
     overflow-y: auto;
     overflow-x: hidden;
     padding-bottom: 20px;
