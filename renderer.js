@@ -3187,7 +3187,7 @@ const commands = [
         }
     },
     {
-        regex: /^(?:play|pause|resume)(?: music| media| audio| song| track)?$/i,
+        regex: /^(?:play|pause|unpause|resume)(?: music| media| audio| song| track)?$/i,
         handler: () => {
             ipcRenderer.invoke('media-control', 'playpause');
             displayAndSpeak("There you go.", onActionFinished, {}, false);
