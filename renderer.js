@@ -389,7 +389,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         if (customActionFormContainer.classList.contains('visible')) {
             hideCustomActionForm();
         } else {
-            setStateIdle();
+            closeSettings();
         }
     });
     voiceSelect.addEventListener('change', onVoiceChanged);
@@ -910,6 +910,13 @@ async function showSettingsUI() {
     searchBar.disabled = true;
     searchBar.placeholder = 'Unavailable...';
     isBusy = false;
+}
+
+function closeSettings() {
+    ipcRenderer.send('set-settings-visibility', false);
+    settingsContainer.classList.remove('visible');
+    animationContainer.style.display = 'block';
+    setStateIdle();
 }
 
 function hexToHsl(H) {
@@ -1558,15 +1565,11 @@ function onActionFinished() {
 }
 
 function setStateIdle() {
+    if (settingsContainer.classList.contains('visible')) return;
     if (animationContainer.className === 'idle' && document.activeElement === searchBar) return;
     
     if (searchResultsActive) {
         searchResultsActive = false;
-    }
-
-    if (settingsContainer.classList.contains('visible')) {
-        ipcRenderer.send('set-settings-visibility', false);
-        settingsContainer.classList.remove('visible');
     }
 
     editingReminderId = null;
