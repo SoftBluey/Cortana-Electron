@@ -1760,11 +1760,17 @@ function calculate(query) {
         }
         
         function parseFactor() {
+            if (cleanQuery[index] === '+' || cleanQuery[index] === '-') {
+                const op = cleanQuery[index];
+                index++;
+                const result = parseFactor();
+                return op === '-' ? -result : result;
+            }
             if (cleanQuery[index] === '(') {
-                index++; // consume '('
+                index++;
                 const result = parseExpression();
                 if (cleanQuery[index] !== ')') throw new Error('Mismatched parentheses');
-                index++; // consume ')'
+                index++;
                 return result;
             } else {
                 return parseNumber();
@@ -1824,25 +1830,62 @@ async function getWeather(location) {
 
         const { name, admin1, country, latitude, longitude } = geoData.results[0];
         const locationNameForSpeech = (admin1 && admin1.toLowerCase() !== name.toLowerCase()) ? `${name}, ${admin1}` : `${name}, ${country}`;
-        const locationForUrl = admin1 ? `${name},${admin1}` : name;
-        const weatherUrl = `https://www.msn.com/en-us/weather/forecast/in-${locationForUrl}?lat=${latitude}&lon=${longitude}&ocid=ansmsnweather`;
+
+        const weatherResponse = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current_weather=true`);
+        if (!weatherResponse.ok) {
+            responseText = `Sorry, I couldn't get the weather for ${locationNameForSpeech}.`;
+            displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, true);
+            return;
+        }
+
+        const weatherData = await weatherResponse.json();
+        const { temperature, windspeed, weathercode } = weatherData.current_weather;
+        const tempUnit = weatherData.current_weather_units?.temperature || '°C';
+        const conditions = getWeatherDescription(weathercode);
 
         lastQuery = `weather in ${location}`;
-        responseText = `Here's the weather from MSN for ${locationNameForSpeech}.`;
+        responseText = `Currently in ${locationNameForSpeech}: ${temperature}${tempUnit}, ${conditions}. Wind speed is ${windspeed} kilometers per hour.`;
 
-        displayAndSpeak(responseText, () => {
-            ipcRenderer.send('open-external-link', weatherUrl);
-            if (!isMovableMode) {
-                ipcRenderer.send('close-app');
-            } else {
-                onActionFinished();
-            }
-        }, {}, false);
+        displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, false);
 
     } catch (error) {
         responseText = `Sorry, an unexpected error occurred while getting the weather.`;
         displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, true);
     }
+}
+
+function getWeatherDescription(code) {
+    const descriptions = {
+        0: 'clear sky',
+        1: 'mainly clear',
+        2: 'partly cloudy',
+        3: 'overcast',
+        45: 'foggy',
+        48: 'depositing rime fog',
+        51: 'light drizzle',
+        53: 'moderate drizzle',
+        55: 'dense drizzle',
+        56: 'light freezing drizzle',
+        57: 'dense freezing drizzle',
+        61: 'slight rain',
+        63: 'moderate rain',
+        65: 'heavy rain',
+        66: 'light freezing rain',
+        67: 'heavy freezing rain',
+        71: 'slight snow',
+        73: 'moderate snow',
+        75: 'heavy snow',
+        77: 'snow grains',
+        80: 'slight rain showers',
+        81: 'moderate rain showers',
+        82: 'violent rain showers',
+        85: 'slight snow showers',
+        86: 'heavy snow showers',
+        95: 'thunderstorm',
+        96: 'thunderstorm with slight hail',
+        99: 'thunderstorm with heavy hail'
+    };
+    return descriptions[code] || 'unknown conditions';
 }
 
 async function getTimeForLocation(rawInput) {
@@ -1861,8 +1904,9 @@ async function getTimeForLocation(rawInput) {
             resultsDisplay.appendChild(p);
 
             result.options.forEach((option, index) => {
+                const label = option.province ? `${option.city}, ${option.province}, ${option.country}` : `${option.city}, ${option.country}`;
                 const btn = document.createElement('button');
-                btn.textContent = `${option.city}, ${option.region}`;
+                btn.textContent = label;
                 btn.className = 'choice-button fade-in-item';
                 btn.style.animationDelay = `${index * 100}ms`;
                 btn.onclick = () => {
@@ -1871,6 +1915,7 @@ async function getTimeForLocation(rawInput) {
                 resultsDisplay.appendChild(btn);
             });
 
+            gifDisplay.src = speakingVideo;
             speak(text, onActionFinished);
             showWebLink();
 
@@ -2303,6 +2348,18 @@ const commands = [
         }
     },
     {
+        regex: /^(?:weather|forecast) (?:in|for|of) (.+)/i,
+        handler: (match) => {
+            getWeather(match[1].trim());
+        }
+    },
+    {
+        regex: /^(.+) (?:weather|forecast)$/i,
+        handler: (match) => {
+            getWeather(match[1].trim());
+        }
+    },
+    {
         regex: /(?:what's|what is) the time (?:in|for|at) (.+)/i,
         handler: (match) => {
             getTimeForLocation(match[1]);
@@ -2454,7 +2511,6 @@ function wouldCommandMatch(text) {
 function processQuery(query) {
     webLinkContainer.style.display = 'none';
     webLinkContainer.style.opacity = '0';
-    gifDisplay.src = speakingVideo;
     resultsDisplay.innerHTML = '';
     const lowerCaseQuery = query.toLowerCase();
 

@@ -833,79 +833,100 @@ function registerIpcHandlers() {
     isSettingsVisible = visible;
   });
 
+  const regionAliases = {
+    // US states
+    al: "Alabama", ak: "Alaska", az: "Arizona", ar: "Arkansas",
+    ca: "California", co: "Colorado", ct: "Connecticut", de: "Delaware",
+    fl: "Florida", ga: "Georgia", hi: "Hawaii", id: "Idaho",
+    il: "Illinois", in: "Indiana", ia: "Iowa", ks: "Kansas",
+    ky: "Kentucky", la: "Louisiana", me: "Maine", md: "Maryland",
+    ma: "Massachusetts", mi: "Michigan", mn: "Minnesota", ms: "Mississippi",
+    mo: "Missouri", mt: "Montana", ne: "Nebraska", nv: "Nevada",
+    nh: "New Hampshire", nj: "New Jersey", nm: "New Mexico",
+    ny: "New York", nc: "North Carolina", nd: "North Dakota",
+    oh: "Ohio", ok: "Oklahoma", or: "Oregon", pa: "Pennsylvania",
+    ri: "Rhode Island", sc: "South Carolina", sd: "South Dakota",
+    tn: "Tennessee", tx: "Texas", ut: "Utah", vt: "Vermont",
+    va: "Virginia", wa: "Washington", wv: "West Virginia",
+    wi: "Wisconsin", wy: "Wyoming",
+    // Canadian provinces
+    ab: "Alberta", bc: "British Columbia", mb: "Manitoba",
+    nb: "New Brunswick", nl: "Newfoundland and Labrador",
+    ns: "Nova Scotia", nt: "Northwest Territories", nu: "Nunavut",
+    on: "Ontario", pe: "Prince Edward Island", qc: "Quebec",
+    sk: "Saskatchewan", yt: "Yukon",
+    // Country aliases
+    uk: "United Kingdom", usa: "United States of America",
+    "us": "United States of America",
+  };
+
   ipcMain.handle("get-time-for-location", async (event, cityInput, format) => {
-    return new Promise((resolve, reject) => {
-      try {
-        const matches = cityTimezones.lookupViaCity(cityInput.trim());
-        if (!matches || matches.length === 0) {
-          return reject(
-            new Error(`Could not find timezone for city: ${cityInput}`)
-          );
-        }
+    try {
+      const parts = cityInput
+        .trim()
+        .split(",")
+        .map((s) => s.trim());
+      const cityName = parts[0];
+      let regionFilter = parts.length > 1 ? parts.slice(1).join(", ") : null;
 
-        const timezone = matches[0].timezone;
-        const url = `https://timeapi.io/api/Time/current/zone?timeZone=${encodeURIComponent(
-          timezone
-        )}`;
-
-        const request = https
-          .get(url, (res) => {
-            if (res.statusCode !== 200) {
-              res.resume();
-              return reject(
-                new Error(`Time API returned status ${res.statusCode}`)
-              );
-            }
-
-            let data = "";
-            res.on("data", (chunk) => {
-              data += chunk;
-            });
-            res.on("end", () => {
-              try {
-                const jsonData = JSON.parse(data);
-                if (!jsonData.dateTime) {
-                  return reject(new Error("Missing dateTime in API response"));
-                }
-                const dateTime = new Date(jsonData.dateTime);
-                const formattedTime = dateTime.toLocaleTimeString([], {
-                  hour: "numeric",
-                  minute: "2-digit",
-                  hour12: format !== "24",
-                });
-
-                resolve({
-                  city: matches[0].city,
-                  country: matches[0].country,
-                  timeZone: timezone,
-                  time: formattedTime,
-                });
-              } catch (parseError) {
-                console.error(
-                  `Time lookup failed for "${cityInput}" (parsing):`,
-                  parseError
-                );
-                reject(new Error(`Failed to parse time data for ${cityInput}`));
-              }
-            });
-          })
-          .on("error", (err) => {
-            console.error(
-              `Time lookup failed for "${cityInput}" (network):`,
-              err
-            );
-            reject(new Error(`Failed to get time for ${cityInput}`));
-          });
-          
-        request.setTimeout(10000, () => {
-          request.destroy();
-          reject(new Error(`Request timeout for ${cityInput}`));
-        });
-      } catch (error) {
-        console.error(`Time lookup failed for "${cityInput}" (setup):`, error);
-        reject(new Error(`Failed to get time for ${cityInput}`));
+      // Expand abbreviations
+      if (regionFilter) {
+        const expanded = regionAliases[regionFilter.toLowerCase()];
+        if (expanded) regionFilter = expanded;
       }
-    });
+
+      const matches = cityTimezones.lookupViaCity(cityName);
+      if (!matches || matches.length === 0) {
+        throw new Error(`Could not find timezone for city: ${cityInput}`);
+      }
+
+      let filtered = matches;
+      if (regionFilter) {
+        const lowerRegion = regionFilter.toLowerCase();
+        filtered = matches.filter(
+          (m) =>
+            (m.province && m.province.toLowerCase().includes(lowerRegion)) ||
+            m.country.toLowerCase().includes(lowerRegion)
+        );
+        if (filtered.length === 0) {
+          filtered = matches;
+        }
+      }
+
+      if (filtered.length > 1) {
+        return {
+          ambiguous: true,
+          options: filtered.map((m) => ({
+            city: m.city,
+            province: m.province || "",
+            country: m.country,
+            timezone: m.timezone,
+            fullQuery: m.province
+              ? `${m.city}, ${m.province}`
+              : `${m.city}, ${m.country}`,
+          })),
+        };
+      }
+
+      const match = filtered[0];
+      const now = new Date();
+      const formattedTime = now.toLocaleTimeString("en-US", {
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: format !== "24",
+        timeZone: match.timezone,
+      });
+
+      return {
+        city: match.city,
+        country: match.country,
+        timeZone: match.timezone,
+        time: formattedTime,
+      };
+    } catch (error) {
+      console.error(`Time lookup failed for "${cityInput}":`, error);
+      throw new Error(`Failed to get time for ${cityInput}`);
+    }
   });
 
   ipcMain.handle("get-edge-voices", async () => {
