@@ -3169,42 +3169,42 @@ const commands = [
         regex: /^(mute|unmute)( volume| sound| system)?(!|\.)?$/i,
         handler: () => {
             ipcRenderer.invoke('media-control', 'mute');
-            displayAndSpeak("Toggled mute.", onActionFinished, {}, false);
+            displayAndSpeak("OK.", onActionFinished, {}, false);
         }
     },
     {
         regex: /^(volume|turn(?: the)? volume) (up|increase|raise|louder)( please)?(!|\.)?$/i,
         handler: () => {
             ipcRenderer.invoke('media-control', 'volup');
-            displayAndSpeak("Volume increased.", onActionFinished, {}, false);
+            displayAndSpeak("Got it.", onActionFinished, {}, false);
         }
     },
     {
         regex: /^(volume|turn(?: the)? volume) (down|decrease|lower|quieter)( please)?(!|\.)?$/i,
         handler: () => {
             ipcRenderer.invoke('media-control', 'voldown');
-            displayAndSpeak("Volume decreased.", onActionFinished, {}, false);
+            displayAndSpeak("Sure thing.", onActionFinished, {}, false);
         }
     },
     {
         regex: /^(?:play|pause|resume)(?: music| media| audio| song| track)?$/i,
         handler: () => {
             ipcRenderer.invoke('media-control', 'playpause');
-            displayAndSpeak("Play/pause.", onActionFinished, {}, false);
+            displayAndSpeak("There you go.", onActionFinished, {}, false);
         }
     },
     {
         regex: /^(?:next|skip)(?: track| song| music)?$/i,
         handler: () => {
             ipcRenderer.invoke('media-control', 'next');
-            displayAndSpeak("Next track.", onActionFinished, {}, false);
+            displayAndSpeak("Skipping ahead.", onActionFinished, {}, false);
         }
     },
     {
         regex: /^(?:previous|prev)(?: track| song| music)?$/i,
         handler: () => {
             ipcRenderer.invoke('media-control', 'prev');
-            displayAndSpeak("Previous track.", onActionFinished, {}, false);
+            displayAndSpeak("Going back.", onActionFinished, {}, false);
         }
     },
     {
