@@ -53,6 +53,11 @@ let everythingPort = 80;
 let blurCleanupTimer = null;
 let suppressThemeInput = false;
 
+let timerId = null;
+let timerInterval = null;
+let timerEndTime = null;
+let timerDuration = null;
+
 
 const appRoot = path.resolve(__dirname, __dirname.includes('app.asar') ? '../assets' : 'assets');
 
@@ -2010,7 +2015,11 @@ function displayAndSpeak(text, callback, options = {}, isError = false) {
         errorSound.play();
         anim.goToState(AnimationState.ERROR);
 
-        errorSound.onended = () => {
+        let errorHandled = false;
+        const handleErrorEnd = () => {
+            if (errorHandled) return;
+            errorHandled = true;
+            errorSound.onended = null;
             anim.goToState(AnimationState.SPEAKING_BEGIN);
             speak(text, () => {
                 anim.goToState(AnimationState.ERROR);
@@ -2026,6 +2035,9 @@ function displayAndSpeak(text, callback, options = {}, isError = false) {
                 }, 3800);
             });
         };
+
+        errorSound.onended = handleErrorEnd;
+        setTimeout(handleErrorEnd, 2500);
     } else {
         anim.goToState(AnimationState.SPEAKING_BEGIN);
         speak(text, callback);
@@ -2193,10 +2205,24 @@ function setStateIdle() {
 
     if (!isBusy) {
         resultsDisplay.innerHTML = '';
-        const p = document.createElement('p');
-        p.className = 'fade-in-item';
-        p.textContent = getIdleMessage();
-        resultsDisplay.appendChild(p);
+        if (timerEndTime) {
+            const timerDisplay = document.createElement('p');
+            timerDisplay.className = 'fade-in-item';
+            timerDisplay.id = 'timer-display';
+            timerDisplay.style.fontSize = '24px';
+            timerDisplay.style.textAlign = 'center';
+            timerDisplay.style.fontWeight = 'bold';
+            const remaining = Math.max(0, timerEndTime - Date.now());
+            const mins = Math.floor(remaining / 60000);
+            const secs = Math.floor((remaining % 60000) / 1000);
+            timerDisplay.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+            resultsDisplay.appendChild(timerDisplay);
+        } else {
+            const p = document.createElement('p');
+            p.className = 'fade-in-item';
+            p.textContent = getIdleMessage();
+            resultsDisplay.appendChild(p);
+        }
     }
     
     webLinkContainer.style.display = 'none';
@@ -2613,10 +2639,12 @@ function parseDateTime(text) {
     let date = new Date(now);
     text = text.toLowerCase();
     let timeFound = false;
+    let hasSpecificHour = false;
 
     if (text.includes('tonight')) {
         date.setHours(21, 0, 0, 0);
         timeFound = true;
+        hasSpecificHour = true;
     }
     else if (text.includes('tomorrow')) {
         date.setDate(now.getDate() + 1);
@@ -2656,9 +2684,10 @@ function parseDateTime(text) {
             date.setDate(date.getDate() + 1);
         }
         timeFound = true;
+        hasSpecificHour = true;
     }
 
-    const relativeTimeMatch = text.match(/(\d+)\s*(minute|second)s?/);
+    const relativeTimeMatch = text.match(/(\d+)\s*(minute|second|hour)s?/);
     if (relativeTimeMatch) {
         const timeValue = parseInt(relativeTimeMatch[1]);
         const unit = relativeTimeMatch[2];
@@ -2667,16 +2696,19 @@ function parseDateTime(text) {
             newDate = new Date(now.getTime() + timeValue * 60000);
         } else if (unit === 'second') {
             newDate = new Date(now.getTime() + timeValue * 1000);
+        } else if (unit === 'hour') {
+            newDate = new Date(now.getTime() + timeValue * 3600000);
         }
         if (newDate) {
             date = newDate;
             timeFound = true;
+            hasSpecificHour = true;
         }
     }
     
     if (!timeFound) return null;
 
-    if (timeFound && !timeMatch && !relativeTimeMatch) {
+    if (!hasSpecificHour) {
         date.setHours(9, 0, 0, 0);
     }
 
@@ -2818,6 +2850,7 @@ async function handleOpenApplication(appName, silent = false) {
             resultsDisplay.appendChild(btn);
         });
 
+        anim.goToState(AnimationState.SPEAKING_BEGIN);
         speak(responseText, onActionFinished);
         showWebLink();
     }
@@ -2902,11 +2935,12 @@ async function showReminders() {
     }
 
     // For interactive lists like reminders, speak but keep the UI active for interaction
+    anim.goToState(AnimationState.SPEAKING_BEGIN);
     speak(responseText, () => {
-        // Keep the active state for interaction instead of transitioning
         isBusy = false;
         searchBar.disabled = false;
-        searchBar.placeholder = 'Type here to search'; 
+        searchBar.placeholder = 'Type here to search';
+        anim.goToState(AnimationState.TRANSITION_TO_IDLE);
     });
 }
 
@@ -3053,7 +3087,7 @@ const commands = [
     {
         regex: /what can you do|what are your skills|help|what can i ask you\??/i,
         handler: () => {
-            const response = "I can get the time, date, and weather. I can also do math, set reminders, open apps, tell jokes, and search the web.";
+            const response = "I can get the time, date, and weather. I can also do math and unit conversions, set reminders, timers, and alarms, control volume, open apps, create calendar events, look up information, tell jokes, and search the web.";
             displayAndSpeak(response, onActionFinished, {}, false);
         }
     },
@@ -3069,6 +3103,262 @@ const commands = [
         handler: () => {
             const response = "What kind of assistant do you think I am??";
             displayAndSpeak(response, onActionFinished, {}, true);
+        }
+    },
+    {
+        regex: /^(?:set|start) a timer (?:for )?(?:about )?(\d+)\s*(minute|min|second|sec|hour|hr)s?\s*$/i,
+        handler: (match) => {
+            const value = parseInt(match[1]);
+            const unit = match[2].toLowerCase();
+            let ms;
+            if (unit.startsWith('min')) ms = value * 60000;
+            else if (unit.startsWith('sec')) ms = value * 1000;
+            else if (unit.startsWith('hour') || unit.startsWith('hr')) ms = value * 3600000;
+            else { displayAndSpeak("Sorry, I didn't understand that time unit.", onActionFinished, {}, true); return; }
+            startTimer(value, unit, ms);
+        }
+    },
+    {
+        regex: /^(?:cancel|stop) (?:the )?timer$/i,
+        handler: () => {
+            if (timerId) {
+                clearTimeout(timerId);
+                timerId = null;
+                if (timerInterval) clearInterval(timerInterval);
+                timerInterval = null;
+                timerEndTime = null;
+                timerDuration = null;
+                displayAndSpeak("Timer cancelled.", onActionFinished, {}, false);
+            } else {
+                displayAndSpeak("There's no timer running.", onActionFinished, {}, false);
+            }
+        }
+    },
+    {
+        regex: /^how much time (?:is )?left(?: on the timer)?\??$/i,
+        handler: () => {
+            if (!timerEndTime) {
+                displayAndSpeak("There's no timer running.", onActionFinished, {}, false);
+                return;
+            }
+            const remaining = Math.max(0, timerEndTime - Date.now());
+            const mins = Math.floor(remaining / 60000);
+            const secs = Math.floor((remaining % 60000) / 1000);
+            displayAndSpeak(`${mins} minute${mins !== 1 ? 's' : ''} and ${secs} second${secs !== 1 ? 's' : ''} remaining.`, onActionFinished, {}, false);
+        }
+    },
+    {
+        regex: /^(?:set|create) an? alarm (?:for |at )?(.+)/i,
+        handler: (match) => {
+            const alarmText = match[1].trim().replace(/[!.?]+$/, '');
+            const parsedDate = parseDateTime(alarmText);
+            if (!parsedDate) {
+                displayAndSpeak(`Sorry, I couldn't understand "${alarmText}". Try something like "set an alarm for 7 am".`, onActionFinished, {}, true);
+                return;
+            }
+            const friendlyTime = parsedDate.toLocaleString([], formatDateTimeOptions());
+            ipcRenderer.send('set-reminder', {
+                reminder: 'Alarm',
+                reminderTime: parsedDate.toISOString(),
+                sound: 'notify.wav'
+            });
+            displayAndSpeak(`Alarm set for ${friendlyTime}.`, onActionFinished, {}, false);
+        }
+    },
+    {
+        regex: /^(mute|unmute)( volume| sound| system)?(!|\.)?$/i,
+        handler: () => {
+            ipcRenderer.invoke('media-control', 'mute');
+            displayAndSpeak("Toggled mute.", onActionFinished, {}, false);
+        }
+    },
+    {
+        regex: /^(volume|turn(?: the)? volume) (up|increase|raise|louder)( please)?(!|\.)?$/i,
+        handler: () => {
+            ipcRenderer.invoke('media-control', 'volup');
+            displayAndSpeak("Volume increased.", onActionFinished, {}, false);
+        }
+    },
+    {
+        regex: /^(volume|turn(?: the)? volume) (down|decrease|lower|quieter)( please)?(!|\.)?$/i,
+        handler: () => {
+            ipcRenderer.invoke('media-control', 'voldown');
+            displayAndSpeak("Volume decreased.", onActionFinished, {}, false);
+        }
+    },
+    {
+        regex: /^(?:play|pause|resume)(?: music| media| audio| song| track)?$/i,
+        handler: () => {
+            ipcRenderer.invoke('media-control', 'playpause');
+            displayAndSpeak("Play/pause.", onActionFinished, {}, false);
+        }
+    },
+    {
+        regex: /^(?:next|skip)(?: track| song| music)?$/i,
+        handler: () => {
+            ipcRenderer.invoke('media-control', 'next');
+            displayAndSpeak("Next track.", onActionFinished, {}, false);
+        }
+    },
+    {
+        regex: /^(?:previous|prev)(?: track| song| music)?$/i,
+        handler: () => {
+            ipcRenderer.invoke('media-control', 'prev');
+            displayAndSpeak("Previous track.", onActionFinished, {}, false);
+        }
+    },
+    {
+        regex: /^stop(?: media| music| audio| track| song)?$/i,
+        handler: () => {
+            ipcRenderer.invoke('media-control', 'stop');
+            displayAndSpeak("Stopped.", onActionFinished, {}, false);
+        }
+    },
+    {
+        regex: /^(?:lock|lock my|lock the) (?:computer|pc|screen|laptop|device)$/i,
+        handler: () => {
+            ipcRenderer.send('run-command', 'rundll32.exe user32.dll,LockWorkStation');
+            displayAndSpeak("Locking your PC.", onActionFinished, {}, false);
+        }
+    },
+    {
+        regex: /^(?:shut ?down|turn off)(?: my| the)? (?:computer|pc|laptop|device)$/i,
+        handler: () => {
+            displayAndSpeak("Are you sure you want to shut down? Say 'yes, shut down' to confirm.", onActionFinished, {}, false);
+        }
+    },
+    {
+        regex: /^yes[,.]?\s+shut\s*down$/i,
+        handler: () => {
+            ipcRenderer.send('run-command', 'shutdown /s /t 10');
+            displayAndSpeak("Shutting down in 10 seconds.", onActionFinished, {}, false);
+        }
+    },
+    {
+        regex: /^(?:restart|reboot)(?: my| the)? (?:computer|pc|laptop|device)$/i,
+        handler: () => {
+            displayAndSpeak("Are you sure you want to restart? Say 'yes, restart' to confirm.", onActionFinished, {}, false);
+        }
+    },
+    {
+        regex: /^yes[,.]?\s+restart$/i,
+        handler: () => {
+            ipcRenderer.send('run-command', 'shutdown /r /t 10');
+            displayAndSpeak("Restarting in 10 seconds.", onActionFinished, {}, false);
+        }
+    },
+    {
+        regex: /^(?:sign|log) ?out$/i,
+        handler: () => {
+            ipcRenderer.send('run-command', 'shutdown /l');
+            displayAndSpeak("Signing out.", onActionFinished, {}, false);
+        }
+    },
+    {
+        regex: /^(\d+(?:\.\d+)?)\s*(celsius|c|fahrenheit|f|kelvin|k)\s+(?:to|in)\s+(celsius|c|fahrenheit|f|kelvin|k)\s*$/i,
+        handler: (match) => {
+            const value = parseFloat(match[1]);
+            const from = match[2].toLowerCase();
+            const to = match[3].toLowerCase();
+            let result;
+            const f = from[0];
+            const t = to[0];
+            if (f === t) { result = value; }
+            else if (f === 'c' && t === 'f') { result = value * 9/5 + 32; }
+            else if (f === 'f' && t === 'c') { result = (value - 32) * 5/9; }
+            else if (f === 'c' && t === 'k') { result = value + 273.15; }
+            else if (f === 'k' && t === 'c') { result = value - 273.15; }
+            else if (f === 'f' && t === 'k') { result = (value - 32) * 5/9 + 273.15; }
+            else if (f === 'k' && t === 'f') { result = (value - 273.15) * 9/5 + 32; }
+            else { displayAndSpeak("Sorry, I can't convert between those units.", onActionFinished, {}, true); return; }
+            const fromLabel = from[0].toUpperCase();
+            const toLabel = to[0].toUpperCase();
+            displayAndSpeak(`${value}${String.fromCharCode(176)}${fromLabel} is ${result.toFixed(1)}${String.fromCharCode(176)}${toLabel}.`, onActionFinished, { showWebLink: true }, false);
+        }
+    },
+    {
+        regex: /^(?:convert |how many )?(\d+(?:\.\d+)?)\s*(millimeters|millimeter|mm|centimeters|centimeter|cm|meters|meter|m|kilometers|kilometer|km|inches|inch|in|feet|foot|ft|yards|yard|yd|miles|mile|mi|milligrams|milligram|mg|grams|gram|g|kilograms|kilogram|kg|ounces|ounce|oz|pounds|pound|lb|lbs|milliliters|milliliter|ml|liters|liter|litre|l|gallons|gallon|gal)\s+(?:to|in|into)\s+(millimeters|millimeter|mm|centimeters|centimeter|cm|meters|meter|m|kilometers|kilometer|km|inches|inch|in|feet|foot|ft|yards|yard|yd|miles|mile|mi|milligrams|milligram|mg|grams|gram|g|kilograms|kilogram|kg|ounces|ounce|oz|pounds|pound|lb|lbs|milliliters|milliliter|ml|liters|liter|litre|l|gallons|gallon|gal)\s*$/i,
+        handler: (match) => {
+            const value = parseFloat(match[1]);
+            const from = normalizeUnit(match[2]);
+            const to = normalizeUnit(match[3]);
+            const result = convertUnit(value, from, to);
+            if (result === null) {
+                displayAndSpeak("Sorry, I can't convert between those units.", onActionFinished, {}, true);
+                return;
+            }
+            displayAndSpeak(`${value} ${from} is ${result.toFixed(2)} ${to}.`, onActionFinished, { showWebLink: true }, false);
+        }
+    },
+    {
+        regex: /^(?:schedule|create|add|make) (?:an? |a )?(?:event|appointment|calendar event|meeting|reminder|call)(?: for| about|:)?\s+(.+)/i,
+        handler: (match) => {
+            const full = match[1].trim();
+            const timeMatch = full.match(/(.+?)\s+(?:for|at|on)\s+(.+)/i);
+            let title, timeText;
+            if (timeMatch) {
+                title = timeMatch[1].trim();
+                timeText = timeMatch[2].trim();
+            } else {
+                title = full;
+                timeText = null;
+            }
+            if (!timeText) {
+                displayAndSpeak("What time should I schedule that for?", onActionFinished, {}, false);
+                return;
+            }
+            const parsedDate = parseDateTime(timeText);
+            if (!parsedDate) {
+                displayAndSpeak(`Sorry, I couldn't understand "${timeText}". Try "schedule meeting for tomorrow at 3 pm".`, onActionFinished, {}, true);
+                return;
+            }
+            ipcRenderer.invoke('create-calendar-event', { title, dateTime: parsedDate.toISOString() }).then(result => {
+                if (result.success) {
+                    const friendlyTime = parsedDate.toLocaleString([], formatDateTimeOptions());
+                    displayAndSpeak(`Added "${title}" to your calendar for ${friendlyTime}.`, onActionFinished, {}, false);
+                } else {
+                    displayAndSpeak("Sorry, I couldn't create that calendar event.", onActionFinished, {}, true);
+                }
+            });
+        }
+    },
+    {
+        regex: /^(?:what is |tell me about |who (?:is|was) |define )(.+)$|^what does (.+) mean\??$/i,
+        handler: (match) => {
+            const topic = (match[1] || match[2] || '').trim().replace(/[?!.]+$/, '');
+            anim.goToState(AnimationState.THINKING);
+            resultsDisplay.innerHTML = '';
+            const p = document.createElement('p');
+            p.className = 'fade-in-item';
+            p.textContent = `Looking up "${topic}"...`;
+            resultsDisplay.appendChild(p);
+            ipcRenderer.invoke('wikipedia-lookup', topic).then(result => {
+                if (result.success) {
+                    resultsDisplay.innerHTML = '';
+                    const header = document.createElement('p');
+                    header.className = 'fade-in-item';
+                    header.style.fontWeight = 'bold';
+                    header.textContent = result.title;
+                    resultsDisplay.appendChild(header);
+                    const body = document.createElement('p');
+                    body.className = 'fade-in-item';
+                    body.textContent = result.extract;
+                    resultsDisplay.appendChild(body);
+                    const link = document.createElement('a');
+                    link.className = 'search-result-title fade-in-item';
+                    link.textContent = 'Read more on Wikipedia';
+                    link.href = '#';
+                    link.addEventListener('click', (e) => { e.preventDefault(); ipcRenderer.send('open-external-link', result.url); });
+                    resultsDisplay.appendChild(link);
+                    showWebLink();
+                    anim.goToState(AnimationState.SPEAKING_BEGIN);
+                    speak(result.extract, onActionFinished);
+                } else {
+                    displayAndSpeak(result.error || "Sorry, I couldn't find information on that.", onActionFinished, {}, true);
+                }
+            }).catch(() => {
+                performWebSearch(topic);
+            });
         }
     },
     {
@@ -3135,6 +3425,129 @@ function wouldCommandMatch(text) {
     return false;
 }
 
+function startTimer(value, unit, ms) {
+    if (timerId) {
+        clearTimeout(timerId);
+        timerId = null;
+    }
+    if (timerInterval) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+    }
+
+    timerEndTime = Date.now() + ms;
+    timerDuration = ms;
+
+    anim.goToState(AnimationState.SPEAKING_BEGIN);
+    speak(`Timer set for ${value} ${unit}${value !== 1 ? 's' : ''}.`, () => {
+        if (!timerEndTime) return;
+        if (document.activeElement === searchBar) {
+            anim.goToState(AnimationState.LISTENING_BEGIN);
+        } else {
+            anim.goToState(AnimationState.TRANSITION_TO_IDLE);
+        }
+    });
+
+    resultsDisplay.innerHTML = '';
+    const timerDisplay = document.createElement('p');
+    timerDisplay.className = 'fade-in-item';
+    timerDisplay.id = 'timer-display';
+    timerDisplay.style.fontSize = '24px';
+    timerDisplay.style.textAlign = 'center';
+    timerDisplay.style.fontWeight = 'bold';
+    resultsDisplay.appendChild(timerDisplay);
+
+    const updateTimer = () => {
+        const remaining = Math.max(0, timerEndTime - Date.now());
+        const mins = Math.floor(remaining / 60000);
+        const secs = Math.floor((remaining % 60000) / 1000);
+        const display = document.getElementById('timer-display');
+        if (display) {
+            display.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+        }
+        if (remaining <= 0 && timerId) {
+            clearInterval(timerInterval);
+            timerInterval = null;
+            timerId = null;
+            timerEndTime = null;
+            timerDuration = null;
+            if (display) display.textContent = 'Time\'s up!';
+            const notifyAudio = new Audio(path.join(appRoot, 'notify.wav'));
+            notifyAudio.play();
+            anim.goToState(AnimationState.SPEAKING_BEGIN);
+            speak('Time\'s up! Your timer has finished.', () => {
+                isBusy = false;
+                searchBar.disabled = false;
+                searchBar.placeholder = 'Type here to search';
+                anim.goToState(AnimationState.TRANSITION_TO_IDLE);
+            });
+        }
+    };
+
+    updateTimer();
+    timerInterval = setInterval(updateTimer, 250);
+    timerId = setTimeout(() => {
+        if (timerInterval) {
+            clearInterval(timerInterval);
+            timerInterval = null;
+        }
+    }, ms + 1000);
+
+    isBusy = false;
+    searchBar.disabled = false;
+    searchBar.placeholder = 'Type here to search';
+}
+
+const UNIT_CONVERSIONS = {
+    mm: 0.001, cm: 0.01, m: 1, km: 1000,
+    inch: 0.0254, foot: 0.3048, yard: 0.9144, mile: 1609.344,
+    mg: 0.001, g: 1, kg: 1000,
+    oz: 28.3495, lb: 453.592,
+    ml: 1, l: 1000, gal: 3785.41,
+};
+
+function normalizeUnit(unit) {
+    const u = unit.toLowerCase();
+    const map = {
+        mm: 'mm', millimeter: 'mm', millimeters: 'mm',
+        cm: 'cm', centimeter: 'cm', centimeters: 'cm',
+        m: 'm', meter: 'm', meters: 'm',
+        km: 'km', kilometer: 'km', kilometers: 'km',
+        in: 'inch', inch: 'inch', inches: 'inch',
+        ft: 'foot', feet: 'foot', foot: 'foot',
+        yd: 'yard', yard: 'yard', yards: 'yard',
+        mi: 'mile', mile: 'mile', miles: 'mile',
+        mg: 'mg', milligram: 'mg', milligrams: 'mg',
+        g: 'g', gram: 'g', grams: 'g',
+        kg: 'kg', kilogram: 'kg', kilograms: 'kg',
+        oz: 'oz', ounce: 'oz', ounces: 'oz',
+        lb: 'lb', lbs: 'lb', pound: 'lb', pounds: 'lb',
+        ml: 'ml', milliliter: 'ml', milliliters: 'ml',
+        l: 'l', liter: 'l', liters: 'l', litre: 'l', litres: 'l',
+        gal: 'gal', gallon: 'gal', gallons: 'gal',
+    };
+    return map[u] || u;
+}
+
+function convertUnit(value, from, to) {
+    const fromBase = UNIT_CONVERSIONS[from];
+    const toBase = UNIT_CONVERSIONS[to];
+    if (fromBase === undefined || toBase === undefined) return null;
+
+    const LENGTH = new Set(['mm', 'cm', 'm', 'km', 'inch', 'foot', 'yard', 'mile']);
+    const WEIGHT = new Set(['mg', 'g', 'kg', 'oz', 'lb']);
+    const VOLUME = new Set(['ml', 'l', 'gal']);
+
+    const sameCategory =
+        (LENGTH.has(from) && LENGTH.has(to)) ||
+        (WEIGHT.has(from) && WEIGHT.has(to)) ||
+        (VOLUME.has(from) && VOLUME.has(to));
+
+    if (!sameCategory) return null;
+
+    return (value * fromBase) / toBase;
+}
+
 function processQuery(query) {
     webLinkContainer.style.display = 'none';
     webLinkContainer.style.opacity = '0';
@@ -3176,8 +3589,10 @@ function processQuery(query) {
             if (result.success) {
                 displayAndSpeak(result.text, onActionFinished, {}, false);
             } else {
-                displayAndSpeak(result.error || "Sorry, I couldn't get an answer from AI.", onActionFinished, {}, true);
+                performWebSearch(query);
             }
+        }).catch(() => {
+            performWebSearch(query);
         });
         return;
     }
@@ -3198,8 +3613,6 @@ function onSearch() {
     searchBar.blur();
     clearTimeout(blurCleanupTimer);
     searchBar.value = '';
-    anim.goToState(AnimationState.THINKING);
-    
     resultsDisplay.innerHTML = '';
 
     requestSound.currentTime = 0;

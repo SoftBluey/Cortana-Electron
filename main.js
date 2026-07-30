@@ -992,6 +992,115 @@ function registerIpcHandlers() {
       return { success: false, error: error.message };
     }
   });
+
+  ipcMain.handle("media-control", async (event, action) => {
+    const vkMap = {
+      volup: 0xAF, voldown: 0xAE, mute: 0xAD,
+      playpause: 0xB3, next: 0xB0, prev: 0xB1, stop: 0xB2,
+    };
+    const vk = vkMap[action];
+    if (!vk) return { success: false, error: "Unknown action" };
+
+    try {
+      const psPath = path.join(os.tmpdir(), `cortana-key-${Date.now()}.ps1`);
+      const psContent = `Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class MediaKey {
+[DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte sc, int fl, int ex);
+public static void Press(byte k) { keybd_event(k,0,0,0); System.Threading.Thread.Sleep(50); keybd_event(k,0,2,0); }
+}
+"@
+[MediaKey]::Press(${vk})
+Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
+`;
+      await fs.writeFile(psPath, psContent);
+      return new Promise((resolve) => {
+        exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psPath}"`, (error, stdout, stderr) => {
+          if (error) console.error("media-control error:", stderr || error.message);
+          resolve({ success: !error });
+        });
+      });
+    } catch (e) {
+      console.error("media-control setup error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle("wikipedia-lookup", async (event, query) => {
+    try {
+      const ua = "Cortana-Electron/5.1 (https://github.com/SoftBluey/Cortana-Electron)";
+      const fetchJson = (url) => new Promise((resolve, reject) => {
+        const req = https.get(url, { headers: { "User-Agent": ua } }, (res) => {
+          if (res.statusCode !== 200) { reject(new Error(`HTTP ${res.statusCode}`)); return; }
+          let data = "";
+          res.on("data", (chunk) => (data += chunk));
+          res.on("end", () => { try { resolve(JSON.parse(data)); } catch(e) { reject(new Error("Invalid JSON response")); } });
+        });
+        req.on("error", reject);
+        req.setTimeout(8000, () => { req.destroy(); reject(new Error("Timeout")); });
+      });
+
+      const searchData = await fetchJson(
+        `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(query)}&limit=1&namespace=0&format=json&redirects=resolve`
+      );
+
+      const pageTitle = Array.isArray(searchData) && searchData[1] && searchData[1][0];
+      if (!pageTitle) return { success: false, error: `No Wikipedia article found for "${query}".` };
+
+      const extractData = await fetchJson(
+        `https://en.wikipedia.org/w/api.php?action=query&format=json&prop=extracts&exintro=1&explaintext=1&titles=${encodeURIComponent(pageTitle)}&redirects=1`
+      );
+
+      if (!extractData || !extractData.query || !extractData.query.pages) {
+        return { success: false, error: "Could not retrieve article content." };
+      }
+
+      const pages = extractData.query.pages;
+      const page = pages[Object.keys(pages)[0]];
+      if (!page || !page.extract) return { success: false, error: "Could not extract article content." };
+
+      let extract = page.extract;
+      if (extract.length > 600) {
+        extract = extract.substring(0, extract.lastIndexOf(" ", 600)) + "...";
+      }
+
+      return { success: true, title: page.title, extract, url: `https://en.wikipedia.org/wiki/${encodeURIComponent(pageTitle)}` };
+    } catch (error) {
+      console.error("Wikipedia lookup failed:", error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle("create-calendar-event", async (event, { title, dateTime }) => {
+    try {
+      const startDate = new Date(dateTime);
+      const endDate = new Date(startDate.getTime() + 60 * 60000);
+      const pad = (n) => n.toString().padStart(2, "0");
+      const fmt = (d) =>
+        `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+
+      const ics = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Cortana-Electron//EN",
+        "BEGIN:VEVENT",
+        `DTSTART:${fmt(startDate)}`,
+        `DTEND:${fmt(endDate)}`,
+        `SUMMARY:${title}`,
+        "END:VEVENT",
+        "END:VCALENDAR",
+      ].join("\r\n");
+
+      const icsPath = path.join(os.tmpdir(), `cortana-event-${Date.now()}.ics`);
+      await fs.writeFile(icsPath, ics);
+      shell.openPath(icsPath);
+      return { success: true };
+    } catch (error) {
+      console.error("Failed to create calendar event:", error);
+      return { success: false, error: error.message };
+    }
+  });
 }
 
 function createWindow() {
