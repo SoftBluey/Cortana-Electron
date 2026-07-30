@@ -51,6 +51,7 @@ let reminderSound = "notify.wav";
 let useEverythingSearch = false;
 let everythingPort = 80;
 let blurCleanupTimer = null;
+let suppressThemeInput = false;
 
 
 const appRoot = path.resolve(__dirname, __dirname.includes('app.asar') ? '../assets' : 'assets');
@@ -694,6 +695,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     rateSlider = document.getElementById('rate-slider');
     resetVoiceBtn = document.getElementById('reset-voice-btn');
     resetReminderSoundBtn = document.getElementById('reset-reminder-sound-btn');
+    resetThemeBtn = document.getElementById('reset-theme-btn');
     resetAllBtn = document.getElementById('reset-all-btn');
 
     ttsEngineSelect = document.getElementById('tts-engine-select');
@@ -823,6 +825,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     timeFormatSelect.addEventListener('change', onTimeFormatChanged);
     resetVoiceBtn.addEventListener('click', onResetVoiceSettings);
     resetReminderSoundBtn.addEventListener('click', onResetReminderSound);
+    resetThemeBtn.addEventListener('click', onResetThemeColors);
     resetAllBtn.addEventListener('click', onResetAllSettings);
     
     aiToggle.addEventListener('change', onAIChanged);
@@ -1430,6 +1433,9 @@ async function loadAndApplySettings() {
     applyMovableModeStyles(settings.isMovable);
     
     themeColor = settings.themeColor || "#0078d7";
+    suppressThemeInput = true;
+    themeColorPicker.value = themeColor;
+    suppressThemeInput = false;
     useWindowsAccent = settings.useWindowsAccent === true;
     useAccentToggle.checked = useWindowsAccent;
 
@@ -1438,7 +1444,10 @@ async function loadAndApplySettings() {
         const result = await ipcRenderer.invoke('get-accent-color');
         if (result.success) {
             const accentHex = result.color.replace('#', '');
-            applyThemeColor('#' + accentHex.slice(-6));
+            applyThemeColor('#' + accentHex.slice(0, 6));
+            suppressThemeInput = true;
+            themeColorPicker.value = themeColor;
+            suppressThemeInput = false;
         } else {
             themeColorPicker.disabled = false;
             useAccentToggle.checked = false;
@@ -1618,7 +1627,6 @@ function showSavedToast() {
 
 function applyThemeColor(color) {
     themeColor = color;
-    themeColorPicker.value = color;
     document.documentElement.style.setProperty('--primary-color', color);
     anim.setThemeColor(color);
 
@@ -1632,11 +1640,15 @@ async function fetchAndApplyAccentColor() {
     const result = await ipcRenderer.invoke('get-accent-color');
     if (result.success) {
         const accentHex = result.color.replace('#', '');
-        applyThemeColor('#' + accentHex.slice(-6));
+        applyThemeColor('#' + accentHex.slice(0, 6));
+        suppressThemeInput = true;
+        themeColorPicker.value = themeColor;
+        suppressThemeInput = false;
     }
 }
 
 function onThemeColorChanged(event) {
+    if (suppressThemeInput) return;
     themeColor = event.target.value;
     useAccentToggle.checked = false;
     useWindowsAccent = false;
@@ -1697,6 +1709,22 @@ function onResetReminderSound() {
         });
         showSavedToast();
     }
+}
+
+function onResetThemeColors() {
+    useAccentToggle.checked = false;
+    useWindowsAccent = false;
+    themeColorPicker.disabled = false;
+    ipcRenderer.send('set-setting', { key: 'useWindowsAccent', value: false });
+
+    const defaultColor = '#0078d7';
+    suppressThemeInput = true;
+    themeColorPicker.value = defaultColor;
+    suppressThemeInput = false;
+    applyThemeColor(defaultColor);
+    ipcRenderer.send('set-setting', { key: 'themeColor', value: defaultColor });
+
+    showSavedToast();
 }
 
 function onResetAllSettings() {

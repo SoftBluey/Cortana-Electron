@@ -44,6 +44,7 @@ let settings = {
   preferredVoice: "Microsoft Zira Desktop",
   searchEngine: "bing",
   themeColor: "#0078d7",
+  useWindowsAccent: false,
   customActions: [],
   isMovable: false,
   pitch: 1,
