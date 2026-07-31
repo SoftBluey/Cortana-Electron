@@ -314,7 +314,6 @@ app.whenReady().then(async () => {
   const {
     SpeechRecognizer,
     SpeechRecognitionTopicConstraint,
-    SpeechRecognitionListConstraint,
     SpeechRecognitionScenario,
   } = require('#winapp/bindings');
 
@@ -421,7 +420,8 @@ app.whenReady().then(async () => {
     while (wakeRunning) {
       try {
         wakeRecognizer = new SpeechRecognizer();
-        const constraint = new SpeechRecognitionListConstraint(["Hey Cortana"]);
+        const constraint = new SpeechRecognitionTopicConstraint(
+          SpeechRecognitionScenario.Dictation, 'dictation');
         wakeRecognizer.constraints.append(constraint);
         await wakeRecognizer.compileConstraintsAsync();
 
