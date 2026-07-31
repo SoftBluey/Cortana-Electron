@@ -3,7 +3,7 @@ const path = require('path');
 const https = require('https');
 const { parseGIF, decompressFrames } = require('gifuct-js');
 
-let searchBar, searchIcon, searchPanel;
+let searchBar, searchIcon, searchPanel, micBtn, micIcon;
 let animationContainer, gifDisplay, resultsDisplay, contentWrapper;
 let webLinkContainer, webLink, webIcon;
 let appContainer;
@@ -74,6 +74,7 @@ const settingsIconPng = path.join(appRoot, 'settings.png');
 const closeIconPng = path.join(appRoot, 'close.png');
 const bingPng = path.join(appRoot, 'bing.png');
 const documentPng = path.join(appRoot, 'document.png');
+const micIconPath = path.join(appRoot, 'Microphone.png');
 const requestSound = new Audio(path.join(appRoot, 'request.wav'));
 const onSound = new Audio(path.join(appRoot, 'on.wav'));
 const offSound = new Audio(path.join(appRoot, 'off.wav'));
@@ -704,6 +705,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchBar = document.getElementById('search-bar');
     searchIcon = document.getElementById('search-icon');
     searchPanel = document.getElementById('search-panel');
+    micBtn = document.getElementById('mic-btn');
+    micIcon = document.getElementById('mic-icon');
     animationContainer = document.getElementById('animation-container');
     gifDisplay = document.getElementById('circle-canvas');
     resultsDisplay = document.getElementById('results-display');
@@ -815,6 +818,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('settings-btn-icon').src = settingsIconPng;
     document.getElementById('close-btn-icon').src = closeIconPng;
     searchIcon.src = cortanaIcon;
+    micIcon.src = micIconPath;
     reminderIcon.src = idleVideo;
 
     const assetsToPreload = [idleVideo, speakingVideo, speakingEndVideo, thinkingVideo, listeningVideo, errorVideo, drumrollSound.src];
@@ -832,29 +836,119 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchBar.addEventListener('input', onSearchInput);
     searchBar.addEventListener('keydown', onSearchKeyDown);
     searchBar.addEventListener('blur', () => {
+        if (speechActive) {
+            stopSpeechRecognition();
+            searchBar.placeholder = 'Type here to search';
+            return;
+        }
         searchIcon.src = cortanaIcon;
+        if (animationContainer.className === 'idle') return;
         blurCleanupTimer = setTimeout(() => {
             hideSearchPanel();
             searchBar.value = '';
             searchBar.placeholder = 'Type here to search';
             setStateIdle();
         }, 200);
-        if (animationContainer.className === 'idle') {
-            anim.goToState(AnimationState.IDLE);
-        }
+        anim.goToState(AnimationState.IDLE);
         offSound.play();
     });
 
     searchBar.addEventListener('focus', () => {
+        if (speechActive) {
+            stopSpeechRecognition();
+        }
         searchIcon.src = searchIconPng;
         if (animationContainer.className === 'active') {
             setStateIdle();
             return;
         }
-        const skipStates = [AnimationState.ENTRANCE, AnimationState.RESUME, AnimationState.TRANSITION_TO_IDLE];
-        if (skipStates.includes(anim.state)) return;
+    });
+
+    let speechActive = false;
+    let speechFinal = '';
+
+    function flashMicError() {
+        micBtn.classList.add('error');
+        setTimeout(() => micBtn.classList.remove('error'), 1200);
+    }
+
+    function startSpeechRecognition() {
+        speechActive = true;
+        speechFinal = '';
+        clearTimeout(blurCleanupTimer);
+        micBtn.classList.add('listening');
         anim.goToState(AnimationState.LISTENING_BEGIN);
         onSound.play();
+        searchBar.placeholder = 'Listening...';
+        ipcRenderer.send('speech-start');
+        setTimeout(() => { searchBar.value = ''; hideSearchPanel(); }, 0);
+    }
+
+    function stopSpeechRecognition() {
+        speechActive = false;
+        micBtn.classList.remove('listening');
+        ipcRenderer.send('speech-stop');
+    }
+
+    async function submitVoiceSearch() {
+        speechActive = false;
+        micBtn.classList.remove('listening');
+        ipcRenderer.send('speech-stop');
+        searchBar.placeholder = 'Type here to search';
+
+        const query = speechFinal.trim();
+        if (!query) {
+            setStateIdle();
+            return;
+        }
+
+        searchBar.value = '';
+        const categories = await generateCategorizedResults(query);
+        let topItem = null;
+        for (const cat of categories) {
+            if (cat.items.length > 0) {
+                topItem = cat.items[0];
+                break;
+            }
+        }
+
+        if (topItem) {
+            topItem.action();
+        } else {
+            searchBar.value = query;
+            onSearch();
+        }
+    }
+
+    ipcRenderer.on('speech-result', (event, data) => {
+        if (!speechActive) return;
+        const text = data.text || '';
+        if (data.final) {
+            speechFinal += text + ' ';
+            searchBar.value = speechFinal.trim();
+            submitVoiceSearch();
+        } else if (text) {
+            searchBar.value = (speechFinal + text).trim();
+        }
+    });
+
+    ipcRenderer.on('speech-error', (event, message) => {
+        if (!speechActive) return;
+        console.error('[speech]', message || 'Speech error');
+        searchBar.placeholder = message || 'Speech error';
+        setTimeout(() => { searchBar.placeholder = 'Type here to search'; }, 5000);
+        flashMicError();
+        stopSpeechRecognition();
+    });
+
+    micBtn.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        if (speechActive) {
+            stopSpeechRecognition();
+        } else {
+            speechActive = true;
+            startSpeechRecognition();
+        }
     });
 
 
@@ -1296,6 +1390,7 @@ function showSearchPanel(categories) {
     selectedPanelIndex = -1;
     allPanelItems = [];
     searchPanel.innerHTML = '';
+    micBtn.style.display = 'none';
 
     let globalIndex = 0;
     categories.forEach((cat, ci) => {
@@ -1381,6 +1476,7 @@ function hideSearchPanel() {
     searchPanel.classList.remove('visible');
     allPanelItems = [];
     selectedPanelIndex = -1;
+    micBtn.style.display = '';
 }
 
 function onSearchKeyDown(event) {
@@ -2027,11 +2123,7 @@ function displayAndSpeak(text, callback, options = {}, isError = false) {
                     isBusy = false;
                     searchBar.disabled = false;
                     searchBar.placeholder = 'Type here to search';
-                    if (document.activeElement === searchBar) {
-                        anim.goToState(AnimationState.LISTENING);
-                    } else {
-                        anim.goToState(AnimationState.TRANSITION_TO_IDLE);
-                    }
+                    anim.goToState(AnimationState.TRANSITION_TO_IDLE);
                 }, 3800);
             });
         };
@@ -2161,11 +2253,7 @@ function onActionFinished() {
 
     isBusy = false;
 
-    const nextState = (document.activeElement === searchBar)
-        ? AnimationState.LISTENING
-        : AnimationState.TRANSITION_TO_IDLE;
-
-    anim.goToState(AnimationState.SPEAKING_END, { nextState });
+    anim.goToState(AnimationState.SPEAKING_END, { nextState: AnimationState.TRANSITION_TO_IDLE });
 }
 
 function setStateIdle() {
@@ -2197,11 +2285,10 @@ function setStateIdle() {
     animationContainer.className = 'idle';
     if (document.activeElement === searchBar) {
         searchIcon.src = searchIconPng;
-        anim.goToState(AnimationState.LISTENING_BEGIN);
     } else {
         searchIcon.src = cortanaIcon;
-        anim.goToState(AnimationState.IDLE);
     }
+    anim.goToState(AnimationState.IDLE);
 
     if (!isBusy) {
         resultsDisplay.innerHTML = '';
@@ -3441,11 +3528,7 @@ function startTimer(value, unit, ms) {
     anim.goToState(AnimationState.SPEAKING_BEGIN);
     speak(`Timer set for ${value} ${unit}${value !== 1 ? 's' : ''}.`, () => {
         if (!timerEndTime) return;
-        if (document.activeElement === searchBar) {
-            anim.goToState(AnimationState.LISTENING_BEGIN);
-        } else {
-            anim.goToState(AnimationState.TRANSITION_TO_IDLE);
-        }
+        anim.goToState(AnimationState.TRANSITION_TO_IDLE);
     });
 
     resultsDisplay.innerHTML = '';

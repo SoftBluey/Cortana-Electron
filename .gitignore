@@ -4,3 +4,9 @@ dist
 CHANGELOG.md
 err.log
 out.log
+
+# Windows SDK packages and generated files
+.winapp
+
+# Stray registry command output
+HKCU

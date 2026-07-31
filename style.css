@@ -413,7 +413,7 @@ body.movable-mode #app-container {
     background-color: #333333;
     color: white;
     font-size: 16px;
-    padding: 0 50px 0 45px;
+    padding: 0 48px 0 45px;
     border: none;
     outline: none;
 }
@@ -434,6 +434,66 @@ body.movable-mode #app-container {
 #search-bar::placeholder {
     color: #a2a2a2;
     opacity: 1;
+}
+
+.mic-btn {
+    position: absolute;
+    right: 0;
+    top: 0;
+    width: 45px;
+    height: 45px;
+    background: #333333;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    border-radius: 0;
+}
+.mic-btn:hover {
+    background: #4c4c4c;
+}
+#search-bar:focus ~ .mic-btn {
+    background: #f3f3f3;
+}
+#search-bar:focus ~ .mic-btn:hover {
+    background: #e0e0e0;
+}
+.mic-btn:active {
+    background: var(--primary-color, #0078d7);
+}
+#mic-icon {
+    width: 22px;
+    height: 22px;
+    opacity: 1;
+    filter: brightness(0) invert(1);
+}
+#search-bar:focus ~ .mic-btn #mic-icon {
+    filter: none;
+}
+.mic-btn.listening {
+    background: var(--primary-color, #0078d7);
+}
+#search-bar:focus ~ .mic-btn.listening {
+    background: var(--primary-color, #0078d7);
+}
+.mic-btn.listening:active {
+    filter: brightness(0.85);
+}
+.mic-btn.listening #mic-icon {
+    filter: brightness(0) invert(1);
+}
+#search-bar:focus ~ .mic-btn.listening #mic-icon {
+    filter: brightness(0) invert(1);
+}
+.mic-btn.error {
+    animation: micErrorPulse 0.3s ease 3;
+}
+@keyframes micErrorPulse {
+    0%, 100% { background: rgba(220, 50, 50, 0); }
+    50% { background: rgba(220, 50, 50, 0.25); }
 }
 
 /* Search panel styling */

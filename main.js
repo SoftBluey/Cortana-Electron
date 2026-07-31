@@ -14,7 +14,7 @@ const path = require("path");
 const https = require("https");
 const http = require("http");
 const crypto = require("crypto");
-const { exec } = require("child_process");
+const { exec, spawn } = require("child_process");
 const fs = require("fs/promises");
 const fssync = require("fs");
 const cityTimezones = require("city-timezones");
@@ -26,6 +26,10 @@ const GITHUB_RAW_URL =
   "https://raw.githubusercontent.com/SoftBluey/Cortana-Electron/refs/heads/main/package.json";
 
 const APP_ID = "com.blueysoft.cortana-electron";
+
+process.stdout.on('error', (err) => {
+  if (err.code === 'EPIPE') { /* ignore broken pipe from WASM debug logs */ }
+});
 
 let mainWindow;
 const winWidth = 360;
@@ -295,7 +299,103 @@ app.whenReady().then(async () => {
     openAtLogin: settings.openAtLogin,
     args: ["--hidden"],
   })
-  
+
+  const { roInitialize } = require('@microsoft/dynwinrt');
+  try { roInitialize(1); } catch (_) {}
+
+  try {
+    const consentKey = 'HKCU\\Software\\Microsoft\\Speech_OneCore\\Settings\\OnlineSpeechPrivacy';
+    require('child_process').execSync(
+      `powershell -NoProfile -Command "New-Item -Path '${consentKey}' -Force | Out-Null; Set-ItemProperty -Path '${consentKey}' -Name HasAccepted -Value 1 -Type DWord -Force"`,
+      { stdio: 'ignore' }
+    );
+  } catch (_) {}
+
+  const {
+    SpeechRecognizer,
+    SpeechRecognitionTopicConstraint,
+    SpeechRecognitionScenario,
+  } = require('#winapp/bindings');
+
+  let speechRecognizer = null;
+  let speechStarting = false;
+  let speechProcess = null;
+
+  function startSapiFallback() {
+    if (speechProcess) return;
+    const scriptPath = app.isPackaged
+      ? path.join(process.resourcesPath, 'speech.ps1')
+      : path.join(__dirname, 'speech.ps1');
+    const ps = spawn('powershell.exe', [
+      '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', scriptPath
+    ]);
+    speechProcess = ps;
+    let buffer = '';
+    ps.stdout.on('data', (d) => {
+      buffer += d.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t) continue;
+        if (t === 'READY') {
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-ready');
+        } else if (t.startsWith('FINAL:')) {
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-result', { final: true, text: t.substring(6).trim() });
+        } else if (t.startsWith('ERROR:')) {
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-error', t.substring(6).trim());
+          stopSapiFallback();
+        } else if (t.startsWith('ENGINE:')) {
+          console.log('[speech]', t.trim());
+        }
+      }
+    });
+    ps.stderr.on('data', (d) => { console.error('[speech:SAPI]', d.toString().trim()); });
+    ps.on('close', () => { speechProcess = null; });
+  }
+
+  function stopSapiFallback() {
+    if (speechProcess) { try { speechProcess.kill(); } catch (_) {} speechProcess = null; }
+  }
+
+  ipcMain.on('speech-start', async () => {
+    if (speechRecognizer || speechStarting || speechProcess) return;
+    speechStarting = true;
+    try {
+      speechRecognizer = new SpeechRecognizer();
+      const constraint = new SpeechRecognitionTopicConstraint(
+        SpeechRecognitionScenario.Dictation, 'dictation');
+      speechRecognizer.constraints.append(constraint);
+      await speechRecognizer.compileConstraintsAsync();
+
+      console.log('[speech] ENGINE:WinRT (dynwinrt)');
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-ready');
+
+      const result = await speechRecognizer.recognizeAsync();
+      const text = result && result.text;
+      if (text && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('speech-result', { final: true, text });
+      }
+
+      try { speechRecognizer.close(); } catch (_) {}
+      speechRecognizer = null;
+    } catch (e) {
+      console.error('[speech] WinRT error:', e.message);
+      if (speechRecognizer) { try { speechRecognizer.close(); } catch (_) {} speechRecognizer = null; }
+      startSapiFallback();
+    } finally {
+      speechStarting = false;
+    }
+  });
+
+  ipcMain.on('speech-stop', async () => {
+    if (speechRecognizer) {
+      try { speechRecognizer.close(); } catch (e) {}
+      speechRecognizer = null;
+    }
+    stopSapiFallback();
+  });
+
   createWindow();
 
   // Check for updates in the background
