@@ -35,6 +35,7 @@ let mainWindow;
 let speechRecognizer = null;
 let wakeEnabled = false;
 let wakeRunning = false;
+let wakeRecognizer = null;
 const winWidth = 360;
 const winHeight = 640;
 let isSettingsVisible = false;
@@ -300,7 +301,6 @@ app.whenReady().then(async () => {
   let speechStarting = false;
   let speechCancelled = false;
   let speechProcess = null;
-  let wakeRecognizer = null;
   let wakeRetries = 0;
   let powerBlocker = null;
 
@@ -444,14 +444,16 @@ app.whenReady().then(async () => {
   async function startWakeLoop() {
     wakeRunning = true;
     while (wakeRunning) {
+      let rec = null;
       try {
-        wakeRecognizer = new SpeechRecognizer();
+        rec = new SpeechRecognizer();
+        wakeRecognizer = rec;
         const constraint = new SpeechRecognitionTopicConstraint(
           SpeechRecognitionScenario.Dictation, 'dictation');
-        wakeRecognizer.constraints.append(constraint);
-        await wakeRecognizer.compileConstraintsAsync();
+        rec.constraints.append(constraint);
+        await rec.compileConstraintsAsync();
 
-        const result = await wakeRecognizer.recognizeAsync();
+        const result = await rec.recognizeAsync();
         wakeRetries = 0;
         if (!wakeRunning) break;
         const text = result && result.text && result.text.toLowerCase();
@@ -466,32 +468,42 @@ app.whenReady().then(async () => {
             }
           }
 
-          if (wakeRecognizer) {
-            const queryResult = await wakeRecognizer.recognizeAsync();
-            const queryText = queryResult && queryResult.text;
-            if (queryText && mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('speech-result', { final: true, text: queryText });
+          try { rec.close(); } catch (_) {}
+          rec = null;
+          wakeRecognizer = null;
+
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            try {
+              const qr = new SpeechRecognizer();
+              const qc = new SpeechRecognitionTopicConstraint(SpeechRecognitionScenario.Dictation, 'dictation');
+              qr.constraints.append(qc);
+              await qr.compileConstraintsAsync();
+              const qres = await qr.recognizeAsync();
+              const qtext = qres && qres.text;
+              if (qtext && mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('speech-result', { final: true, text: qtext });
+              }
+              try { qr.close(); } catch (_) {}
+            } catch (e) {
+              console.error('[speech] Query error:', e.message);
             }
-            try { wakeRecognizer.close(); } catch (_) {}
-            wakeRecognizer = null;
           }
         } else {
-          try { wakeRecognizer.close(); } catch (_) {}
-          wakeRecognizer = null;
+          try { rec.close(); } catch (_) {}
           await new Promise(r => setTimeout(r, 1000));
         }
       } catch (e) {
         if (!wakeRunning) break;
         if (e.message && e.message.includes('0x80000013')) {
-          wakeRecognizer = null;
           await new Promise(r => setTimeout(r, 3000));
           continue;
         }
         wakeRetries++;
         const delay = Math.min(wakeRetries * 3000, 30000);
         console.error('[speech] Wake retry', wakeRetries, 'in', delay + 'ms:', e.message);
-        wakeRecognizer = null;
         await new Promise(r => setTimeout(r, delay));
+      } finally {
+        wakeRecognizer = null;
       }
     }
   }
