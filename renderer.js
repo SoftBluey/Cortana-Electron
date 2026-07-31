@@ -1243,6 +1243,7 @@ const PANEL_ICONS = {
 };
 
 async function onSearchInput(event) {
+    window.speechSynthesis.cancel();
     const query = searchBar.value.trim();
     if (query.length === 0) {
         hideSearchPanel();

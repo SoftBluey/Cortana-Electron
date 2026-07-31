@@ -650,8 +650,7 @@ function closeApp() {
     isClosing ||
     !mainWindow ||
     mainWindow.isDestroyed() ||
-    !mainWindow.isVisible() ||
-    speechRecognizer
+    !mainWindow.isVisible()
   ) {
     return;
   }
@@ -662,7 +661,6 @@ function closeApp() {
 
 function registerIpcHandlers() {
   ipcMain.on("hide-window", () => {
-    if (speechRecognizer) return;
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.hide();
     }
