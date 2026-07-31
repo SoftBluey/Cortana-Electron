@@ -708,7 +708,6 @@ function registerIpcHandlers() {
     if (wakeRecognizer) {
       try { wakeRecognizer.close(); } catch (_) {}
       wakeRecognizer = null;
-      wakeRunning = false;
     }
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.hide();
