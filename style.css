@@ -52,19 +52,35 @@ body.movable-mode #app-container {
 }
 
 body.slim-mode #app-container {
-    height: 120px;
+    height: 220px;
     transition: height 0.3s ease;
+    overflow: visible;
 }
-body.slim-mode .main-container > *:not(#animation-container) {
+body.slim-mode .main-container {
+    overflow: visible;
+}
+body.slim-mode #drag-bar,
+body.slim-mode #settings-btn,
+body.slim-mode #results-display,
+body.slim-mode #web-link-container,
+body.slim-mode #content-wrapper,
+body.slim-mode #reminder-container,
+body.slim-mode #settings-container {
     display: none;
 }
+body.slim-mode #circle-canvas {
+    top: -40px !important;
+    transform: translateX(-50%) scale(0.5) !important;
+    transition: none !important;
+}
 body.slim-mode #animation-container {
-    position: fixed;
-    top: 0;
-    left: 50%;
-    transform: translate(-50%, -20%);
-    z-index: 0;
-    opacity: 0.6;
+    transition: none !important;
+}
+body.slim-mode #close-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 10;
 }
 body.slim-mode #search-bar {
     pointer-events: none;

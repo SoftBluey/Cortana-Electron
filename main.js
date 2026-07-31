@@ -32,6 +32,9 @@ process.stdout.on('error', (err) => {
 });
 
 let mainWindow;
+let speechRecognizer = null;
+let wakeEnabled = false;
+let wakeRunning = false;
 const winWidth = 360;
 const winHeight = 640;
 let isSettingsVisible = false;
@@ -294,15 +297,19 @@ app.whenReady().then(async () => {
   await loadReminders();
   await scanApplications();
 
+  let speechStarting = false;
+  let speechCancelled = false;
+  let speechProcess = null;
+  let wakeRecognizer = null;
+  let wakeRetries = 0;
+  let powerBlocker = null;
+
   registerIpcHandlers();
 
   app.setLoginItemSettings({
     openAtLogin: settings.openAtLogin,
     args: ["--hidden"],
   })
-
-  const { roInitialize } = require('@microsoft/dynwinrt');
-  try { roInitialize(1); } catch (_) {}
 
   try {
     const consentKey = 'HKCU\\Software\\Microsoft\\Speech_OneCore\\Settings\\OnlineSpeechPrivacy';
@@ -317,11 +324,6 @@ app.whenReady().then(async () => {
     SpeechRecognitionTopicConstraint,
     SpeechRecognitionScenario,
   } = require('#winapp/bindings');
-
-  let speechRecognizer = null;
-  let speechStarting = false;
-  let speechCancelled = false;
-  let speechProcess = null;
 
   function startSapiFallback() {
     if (speechProcess) return;
@@ -361,7 +363,16 @@ app.whenReady().then(async () => {
   }
 
   ipcMain.on('speech-start', async () => {
-    if (speechRecognizer || speechStarting || speechProcess) return;
+    if (speechStarting || speechProcess) return;
+    if (wakeRecognizer) {
+      try { wakeRecognizer.close(); } catch (_) {}
+      wakeRecognizer = null;
+      wakeRunning = false;
+    }
+    if (speechRecognizer) {
+      try { speechRecognizer.close(); } catch (_) {}
+      speechRecognizer = null;
+    }
     speechStarting = true;
     speechCancelled = false;
     try {
@@ -394,6 +405,8 @@ app.whenReady().then(async () => {
     }
   });
 
+  let wakeRestartTimer = null;
+
   ipcMain.on('speech-stop', () => {
     speechCancelled = true;
     if (speechRecognizer) {
@@ -401,21 +414,26 @@ app.whenReady().then(async () => {
       speechRecognizer = null;
     }
     stopSapiFallback();
-    if (wakeEnabled && !wakeRunning) {
-      setTimeout(() => startWakeLoop(), 2000);
+    if (wakeEnabled && !wakeRunning && !wakeRestartTimer) {
+      wakeRestartTimer = setTimeout(() => {
+        wakeRestartTimer = null;
+        startWakeLoop();
+      }, 3000);
     }
   });
 
-  let wakeEnabled = false;
-  let wakeRunning = false;
-  let wakeRecognizer = null;
-
   ipcMain.on('hey-cortana-toggle', (event, enabled) => {
     wakeEnabled = enabled;
-    if (enabled && !wakeRunning) startWakeLoop();
-    if (!enabled && wakeRunning) {
+    wakeRetries = 0;
+    if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
+    if (enabled) {
+      if (!powerBlocker) powerBlocker = require('electron').powerSaveBlocker.start('prevent-app-suspension');
+      if (!wakeRunning) startWakeLoop();
+    }
+    if (!enabled) {
       wakeRunning = false;
       if (wakeRecognizer) { try { wakeRecognizer.close(); } catch (_) {} wakeRecognizer = null; }
+      if (powerBlocker) { require('electron').powerSaveBlocker.stop(powerBlocker); powerBlocker = null; }
     }
   });
 
@@ -430,6 +448,7 @@ app.whenReady().then(async () => {
         await wakeRecognizer.compileConstraintsAsync();
 
         const result = await wakeRecognizer.recognizeAsync();
+        wakeRetries = 0;
         if (!wakeRunning) break;
         const text = result && result.text && result.text.toLowerCase();
         if (text && text.includes("hey cortana")) {
@@ -451,8 +470,11 @@ app.whenReady().then(async () => {
         }
       } catch (e) {
         if (!wakeRunning) break;
+        wakeRetries++;
+        const delay = Math.min(wakeRetries * 2000, 30000);
+        console.error('[speech] Wake retry', wakeRetries, 'in', delay + 'ms:', e.message);
         try { if (wakeRecognizer) { wakeRecognizer.close(); wakeRecognizer = null; } } catch (_) {}
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, delay));
       }
     }
   }
@@ -461,7 +483,7 @@ app.whenReady().then(async () => {
 
   if (settings.heyCortana) {
     wakeEnabled = true;
-    startWakeLoop();
+    setTimeout(() => startWakeLoop(), 1000);
   }
 
   // Check for updates in the background
@@ -628,7 +650,8 @@ function closeApp() {
     isClosing ||
     !mainWindow ||
     mainWindow.isDestroyed() ||
-    !mainWindow.isVisible()
+    !mainWindow.isVisible() ||
+    speechRecognizer
   ) {
     return;
   }
@@ -639,6 +662,7 @@ function closeApp() {
 
 function registerIpcHandlers() {
   ipcMain.on("hide-window", () => {
+    if (speechRecognizer) return;
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.hide();
     }
