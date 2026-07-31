@@ -401,6 +401,9 @@ app.whenReady().then(async () => {
       speechRecognizer = null;
     }
     stopSapiFallback();
+    if (wakeEnabled && !wakeRunning) {
+      setTimeout(() => startWakeLoop(), 2000);
+    }
   });
 
   let wakeEnabled = false;
@@ -432,6 +435,7 @@ app.whenReady().then(async () => {
         if (text && text.includes("hey cortana")) {
           try { wakeRecognizer.close(); } catch (_) {}
           wakeRecognizer = null;
+          wakeRunning = false;
           if (mainWindow && !mainWindow.isDestroyed()) {
             if (mainWindow.isVisible()) {
               mainWindow.webContents.send('wake-listen');
@@ -440,7 +444,6 @@ app.whenReady().then(async () => {
               showWindow();
             }
           }
-          await new Promise(r => setTimeout(r, 10000));
         } else {
           try { wakeRecognizer.close(); } catch (_) {}
           wakeRecognizer = null;

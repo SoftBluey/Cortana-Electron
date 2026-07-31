@@ -55,8 +55,16 @@ body.slim-mode #app-container {
     height: 120px;
     transition: height 0.3s ease;
 }
-body.slim-mode .main-container {
+body.slim-mode .main-container > *:not(#animation-container) {
     display: none;
+}
+body.slim-mode #animation-container {
+    position: fixed;
+    top: 0;
+    left: 50%;
+    transform: translate(-50%, -20%);
+    z-index: 0;
+    opacity: 0.6;
 }
 body.slim-mode #search-bar {
     pointer-events: none;
