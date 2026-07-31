@@ -491,7 +491,10 @@ app.whenReady().then(async () => {
 
   if (settings.heyCortana) {
     wakeEnabled = true;
-    setTimeout(() => startWakeLoop(), 1000);
+    setTimeout(async () => {
+      try { const w = new SpeechRecognizer(); w.close(); } catch (_) {}
+      startWakeLoop();
+    }, 3000);
   }
 
   // Check for updates in the background
