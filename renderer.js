@@ -2179,23 +2179,32 @@ function displayAndSpeak(text, callback, options = {}, isError = false) {
 
     if (isError) {
         errorSound.play();
-        anim.goToState(AnimationState.ERROR);
 
         let errorHandled = false;
         const handleErrorEnd = () => {
             if (errorHandled) return;
             errorHandled = true;
             errorSound.onended = null;
-            anim.goToState(AnimationState.SPEAKING_BEGIN);
-            speak(text, () => {
-                anim.goToState(AnimationState.ERROR);
-                setTimeout(() => {
+
+            const currentState = anim.state;
+            const wasSpeaking = currentState === AnimationState.SPEAKING || currentState === AnimationState.SPEAKING_BEGIN;
+
+            if (wasSpeaking) {
+                anim.goToState(AnimationState.SPEAKING_END, { nextState: AnimationState.ERROR });
+            } else {
+                anim.goToState(AnimationState.ERROR, { nextState: AnimationState.TRANSITION_TO_IDLE });
+            }
+
+            setTimeout(() => {
+                speak(text, () => {
                     isBusy = false;
                     searchBar.disabled = false;
                     searchBar.placeholder = 'Type here to search';
-                    anim.goToState(AnimationState.TRANSITION_TO_IDLE);
-                }, 3800);
-            });
+                    if (anim.state === AnimationState.ERROR || anim.state === AnimationState.TRANSITION_TO_IDLE) {
+                        anim.goToState(AnimationState.TRANSITION_TO_IDLE);
+                    }
+                });
+            }, 500);
         };
 
         errorSound.onended = handleErrorEnd;
