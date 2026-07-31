@@ -33,7 +33,7 @@
       "renderer.js",
       "index.html",
       "style.css",
-      ".winapp/bindings"
+      ".winapp/bindings/**"
     ],
     "extraResources": [
       {
