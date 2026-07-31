@@ -319,6 +319,7 @@ app.whenReady().then(async () => {
 
   let speechRecognizer = null;
   let speechStarting = false;
+  let speechCancelled = false;
   let speechProcess = null;
 
   function startSapiFallback() {
@@ -361,6 +362,7 @@ app.whenReady().then(async () => {
   ipcMain.on('speech-start', async () => {
     if (speechRecognizer || speechStarting || speechProcess) return;
     speechStarting = true;
+    speechCancelled = false;
     try {
       speechRecognizer = new SpeechRecognizer();
       const constraint = new SpeechRecognitionTopicConstraint(
@@ -368,10 +370,12 @@ app.whenReady().then(async () => {
       speechRecognizer.constraints.append(constraint);
       await speechRecognizer.compileConstraintsAsync();
 
-      console.log('[speech] ENGINE:WinRT (dynwinrt)');
+      console.log('[speech] ENGINE:WinRT');
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-ready');
 
       const result = await speechRecognizer.recognizeAsync();
+      if (speechCancelled) return;
+
       const text = result && result.text;
       if (text && mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('speech-result', { final: true, text });
@@ -380,7 +384,8 @@ app.whenReady().then(async () => {
       try { speechRecognizer.close(); } catch (_) {}
       speechRecognizer = null;
     } catch (e) {
-      console.error('[speech] WinRT error:', e.message);
+      if (speechCancelled) return;
+      console.error('[speech] WinRT failed, falling back to SAPI');
       if (speechRecognizer) { try { speechRecognizer.close(); } catch (_) {} speechRecognizer = null; }
       startSapiFallback();
     } finally {
@@ -388,7 +393,8 @@ app.whenReady().then(async () => {
     }
   });
 
-  ipcMain.on('speech-stop', async () => {
+  ipcMain.on('speech-stop', () => {
+    speechCancelled = true;
     if (speechRecognizer) {
       try { speechRecognizer.close(); } catch (e) {}
       speechRecognizer = null;

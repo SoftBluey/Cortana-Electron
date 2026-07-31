@@ -701,6 +701,7 @@ function applyMovableModeStyles(isMovable) {
 }
 
 window.addEventListener('DOMContentLoaded', async () => {
+    try {
     appContainer = document.getElementById('app-container');
     searchBar = document.getElementById('search-bar');
     searchIcon = document.getElementById('search-icon');
@@ -866,6 +867,16 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     let speechActive = false;
     let speechFinal = '';
+    let speechPartial = '';
+    let speechShuffleTimer = null;
+
+    function speechShuffle() {
+        const chars = 'abcdefghijklmnopqrstuvwxyz';
+        let s = '';
+        const len = 7 + Math.floor(Math.random() * 2); // 7-8 chars
+        for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * 26)];
+        return s;
+    }
 
     function flashMicError() {
         micBtn.classList.add('error');
@@ -875,29 +886,43 @@ window.addEventListener('DOMContentLoaded', async () => {
     function startSpeechRecognition() {
         speechActive = true;
         speechFinal = '';
+        speechPartial = '';
         clearTimeout(blurCleanupTimer);
         micBtn.classList.add('listening');
         anim.goToState(AnimationState.LISTENING_BEGIN);
         onSound.play();
         searchBar.placeholder = 'Listening...';
+        searchBar.style.color = '#888888';
         ipcRenderer.send('speech-start');
-        setTimeout(() => { searchBar.value = ''; hideSearchPanel(); }, 0);
+        setTimeout(() => { searchBar.value = speechShuffle(); hideSearchPanel(); }, 0);
+        speechShuffleTimer = setInterval(() => {
+            if (!speechActive) return;
+            searchBar.value = speechFinal.trim() || speechShuffle();
+        }, 120);
     }
 
     function stopSpeechRecognition() {
         speechActive = false;
+        if (speechShuffleTimer) { clearInterval(speechShuffleTimer); speechShuffleTimer = null; }
+        searchBar.style.color = '';
+        searchBar.value = '';
         micBtn.classList.remove('listening');
         ipcRenderer.send('speech-stop');
+        offSound.play();
+        setStateIdle();
     }
 
     async function submitVoiceSearch() {
         speechActive = false;
+        if (speechShuffleTimer) { clearInterval(speechShuffleTimer); speechShuffleTimer = null; }
+        searchBar.style.color = '';
         micBtn.classList.remove('listening');
         ipcRenderer.send('speech-stop');
         searchBar.placeholder = 'Type here to search';
 
         const query = speechFinal.trim();
         if (!query) {
+            searchBar.value = '';
             setStateIdle();
             return;
         }
@@ -922,13 +947,10 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     ipcRenderer.on('speech-result', (event, data) => {
         if (!speechActive) return;
-        const text = data.text || '';
         if (data.final) {
-            speechFinal += text + ' ';
+            speechFinal += (data.text || '') + ' ';
             searchBar.value = speechFinal.trim();
             submitVoiceSearch();
-        } else if (text) {
-            searchBar.value = (speechFinal + text).trim();
         }
     });
 
@@ -1169,6 +1191,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchBar.placeholder = 'Type here to search';
     isBusy = false;
     searchIcon.src = cortanaIcon;
+    } catch (e) { console.error('Init error:', e); }
 });
 
 // Search panel functionality
