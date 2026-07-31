@@ -994,14 +994,14 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     ipcRenderer.on('wake-slim', () => {
         document.body.classList.add('slim-mode');
-        startSpeechRecognition();
+        setTimeout(() => startSpeechRecognition(), 500);
     });
 
     ipcRenderer.on('wake-listen', () => {
         if (document.body.classList.contains('slim-mode')) {
             document.body.classList.remove('slim-mode');
         }
-        startSpeechRecognition();
+        setTimeout(() => startSpeechRecognition(), 500);
     });
 
 

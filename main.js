@@ -66,6 +66,7 @@ let settings = {
   aiModel: "gpt-4o-mini",
   aiApiUrl: "https://api.openai.com/v1/chat/completions",
   useEverythingSearch: false,
+  heyCortana: false,
   everythingPort: 80,
 };
 let SETTINGS_FILE;
@@ -385,9 +386,9 @@ app.whenReady().then(async () => {
       speechRecognizer = null;
     } catch (e) {
       if (speechCancelled) return;
-      console.error('[speech] WinRT failed, falling back to SAPI');
+      console.error('[speech] WinRT error:', e.message);
       if (speechRecognizer) { try { speechRecognizer.close(); } catch (_) {} speechRecognizer = null; }
-      startSapiFallback();
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-error', e.message || 'Speech recognition failed');
     } finally {
       speechStarting = false;
     }
@@ -429,6 +430,8 @@ app.whenReady().then(async () => {
         if (!wakeRunning) break;
         const text = result && result.text && result.text.toLowerCase();
         if (text && text.includes("hey cortana")) {
+          try { wakeRecognizer.close(); } catch (_) {}
+          wakeRecognizer = null;
           if (mainWindow && !mainWindow.isDestroyed()) {
             if (mainWindow.isVisible()) {
               mainWindow.webContents.send('wake-listen');
@@ -437,9 +440,12 @@ app.whenReady().then(async () => {
               showWindow();
             }
           }
+          await new Promise(r => setTimeout(r, 10000));
+        } else {
+          try { wakeRecognizer.close(); } catch (_) {}
+          wakeRecognizer = null;
+          await new Promise(r => setTimeout(r, 1000));
         }
-        try { wakeRecognizer.close(); } catch (_) {}
-        wakeRecognizer = null;
       } catch (e) {
         if (!wakeRunning) break;
         try { if (wakeRecognizer) { wakeRecognizer.close(); wakeRecognizer = null; } } catch (_) {}
@@ -449,6 +455,11 @@ app.whenReady().then(async () => {
   }
 
   createWindow();
+
+  if (settings.heyCortana) {
+    wakeEnabled = true;
+    startWakeLoop();
+  }
 
   // Check for updates in the background
   sendAppVersion();
