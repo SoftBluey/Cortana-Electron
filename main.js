@@ -934,7 +934,7 @@ function registerIpcHandlers() {
       const encodedQuery = encodeURIComponent(query);
       const urlPath = `/?search=${encodedQuery}&json=1&count=10&path_column=1&sort=date_modified&ascending=0`;
       const req = http.request(
-        { hostname: "localhost", port: port || 80, path: urlPath, method: "GET" },
+        { hostname: "127.0.0.1", port: port || 80, path: urlPath, method: "GET" },
         (res) => {
           let data = "";
           res.on("data", (chunk) => (data += chunk));
