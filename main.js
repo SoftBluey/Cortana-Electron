@@ -442,6 +442,7 @@ app.whenReady().then(async () => {
   });
 
   async function startWakeLoop() {
+    console.log('[speech] Wake loop starting');
     wakeRunning = true;
     while (wakeRunning) {
       let rec = null;
@@ -452,11 +453,13 @@ app.whenReady().then(async () => {
           SpeechRecognitionScenario.Dictation, 'dictation');
         rec.constraints.append(constraint);
         await rec.compileConstraintsAsync();
+        console.log('[speech] Wake listening...');
 
         const result = await rec.recognizeAsync();
         wakeRetries = 0;
         if (!wakeRunning) break;
         const text = result && result.text && result.text.toLowerCase();
+        if (text) console.log('[speech] Wake heard:', text);
         if (text && text.includes("hey cortana")) {
           wakeRunning = false;
           if (mainWindow && !mainWindow.isDestroyed()) {
@@ -478,14 +481,17 @@ app.whenReady().then(async () => {
               const qc = new SpeechRecognitionTopicConstraint(SpeechRecognitionScenario.Dictation, 'dictation');
               qr.constraints.append(qc);
               await qr.compileConstraintsAsync();
+              console.log('[speech] Query listening...');
               const qres = await qr.recognizeAsync();
               const qtext = qres && qres.text;
+              console.log('[speech] Query heard:', qtext || '(empty)');
               if (qtext && mainWindow && !mainWindow.isDestroyed()) {
                 mainWindow.webContents.send('speech-result', { final: true, text: qtext });
               }
               try { qr.close(); } catch (_) {}
             } catch (e) {
               console.error('[speech] Query error:', e.message);
+              wakeRunning = true;
             }
           }
         } else {
@@ -506,6 +512,7 @@ app.whenReady().then(async () => {
         wakeRecognizer = null;
       }
     }
+    console.log('[speech] Wake loop ended');
   }
 
   createWindow();
