@@ -314,6 +314,7 @@ app.whenReady().then(async () => {
   const {
     SpeechRecognizer,
     SpeechRecognitionTopicConstraint,
+    SpeechRecognitionListConstraint,
     SpeechRecognitionScenario,
   } = require('#winapp/bindings');
 
@@ -401,6 +402,51 @@ app.whenReady().then(async () => {
     }
     stopSapiFallback();
   });
+
+  let wakeEnabled = false;
+  let wakeRunning = false;
+  let wakeRecognizer = null;
+
+  ipcMain.on('hey-cortana-toggle', (event, enabled) => {
+    wakeEnabled = enabled;
+    if (enabled && !wakeRunning) startWakeLoop();
+    if (!enabled && wakeRunning) {
+      wakeRunning = false;
+      if (wakeRecognizer) { try { wakeRecognizer.close(); } catch (_) {} wakeRecognizer = null; }
+    }
+  });
+
+  async function startWakeLoop() {
+    wakeRunning = true;
+    while (wakeRunning) {
+      try {
+        wakeRecognizer = new SpeechRecognizer();
+        const constraint = new SpeechRecognitionListConstraint(["Hey Cortana"]);
+        wakeRecognizer.constraints.append(constraint);
+        await wakeRecognizer.compileConstraintsAsync();
+
+        const result = await wakeRecognizer.recognizeAsync();
+        if (!wakeRunning) break;
+        const text = result && result.text && result.text.toLowerCase();
+        if (text && text.includes("hey cortana")) {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            if (mainWindow.isVisible()) {
+              mainWindow.webContents.send('wake-listen');
+            } else {
+              mainWindow.webContents.send('wake-slim');
+              showWindow();
+            }
+          }
+        }
+        try { wakeRecognizer.close(); } catch (_) {}
+        wakeRecognizer = null;
+      } catch (e) {
+        if (!wakeRunning) break;
+        try { if (wakeRecognizer) { wakeRecognizer.close(); wakeRecognizer = null; } } catch (_) {}
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+  }
 
   createWindow();
 

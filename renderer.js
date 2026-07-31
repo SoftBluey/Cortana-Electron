@@ -3,6 +3,10 @@ const path = require('path');
 const https = require('https');
 const { parseGIF, decompressFrames } = require('gifuct-js');
 
+window.onerror = (msg, src, line, col, err) => {
+    console.error('[renderer] Uncaught:', msg, src, line, err && err.stack);
+};
+
 let searchBar, searchIcon, searchPanel, micBtn, micIcon;
 let animationContainer, gifDisplay, resultsDisplay, contentWrapper;
 let webLinkContainer, webLink, webIcon;
@@ -23,6 +27,7 @@ let customActionFormContainer, customActionTriggerInput, customActionSaveBtn, cu
 let aiToggle, openaiApiKeyInput, openaiApiKeyContainer;
 let aiModelInput, aiApiUrlInput, aiSystemPromptInput, aiPresetSelect, aiCustomFields, aiModelItem, aiApiUrlItem;
 let useAccentToggle;
+let heyCortanaToggle;
 
 let availableVoices = [];
 let customActions = [];
@@ -49,6 +54,7 @@ let specificIdleGreeting = "What's on your mind?";
 let customIdleGreeting = '';
 let reminderSound = "notify.wav";
 let useEverythingSearch = false;
+let heyCortanaEnabled = false;
 let everythingPort = 80;
 let blurCleanupTimer = null;
 let suppressThemeInput = false;
@@ -777,6 +783,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchEngineSelect = document.getElementById('search-engine-select');
     themeColorPicker = document.getElementById('theme-color-picker');
     useAccentToggle = document.getElementById('use-accent-toggle');
+    heyCortanaToggle = document.getElementById('hey-cortana-toggle');
     movableToggle = document.getElementById('movable-toggle');
     pitchSlider = document.getElementById('pitch-slider');
     rateSlider = document.getElementById('rate-slider');
@@ -826,6 +833,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     assetsToPreload.forEach(src => { new Image().src = src; });
 
     document.getElementById('close-btn').addEventListener('click', () => {
+        if (document.body.classList.contains('slim-mode')) {
+            stopSpeechRecognition();
+            document.body.classList.remove('slim-mode');
+            ipcRenderer.send('close-app');
+            return;
+        }
         if (searchResultsActive) {
             hideSearchResults();
         } else {
@@ -909,6 +922,11 @@ window.addEventListener('DOMContentLoaded', async () => {
         micBtn.classList.remove('listening');
         ipcRenderer.send('speech-stop');
         offSound.play();
+        if (document.body.classList.contains('slim-mode')) {
+            document.body.classList.remove('slim-mode');
+            ipcRenderer.send('close-app');
+            return;
+        }
         setStateIdle();
     }
 
@@ -919,6 +937,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         micBtn.classList.remove('listening');
         ipcRenderer.send('speech-stop');
         searchBar.placeholder = 'Type here to search';
+        document.body.classList.remove('slim-mode');
 
         const query = speechFinal.trim();
         if (!query) {
@@ -973,6 +992,17 @@ window.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
+    ipcRenderer.on('wake-slim', () => {
+        document.body.classList.add('slim-mode');
+        startSpeechRecognition();
+    });
+
+    ipcRenderer.on('wake-listen', () => {
+        if (document.body.classList.contains('slim-mode')) {
+            document.body.classList.remove('slim-mode');
+        }
+        startSpeechRecognition();
+    });
 
 
     webLink.addEventListener('click', (e) => {
@@ -1014,6 +1044,12 @@ window.addEventListener('DOMContentLoaded', async () => {
             themeColorPicker.disabled = false;
             applyThemeColor(themeColor);
         }
+        showSavedToast();
+    });
+    heyCortanaToggle.addEventListener('change', () => {
+        heyCortanaEnabled = heyCortanaToggle.checked;
+        ipcRenderer.send('set-setting', { key: 'heyCortana', value: heyCortanaEnabled });
+        ipcRenderer.send('hey-cortana-toggle', heyCortanaEnabled);
         showSavedToast();
     });
     movableToggle.addEventListener('change', onMovableToggleChanged);
@@ -1191,7 +1227,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchBar.placeholder = 'Type here to search';
     isBusy = false;
     searchIcon.src = cortanaIcon;
-    } catch (e) { console.error('Init error:', e); }
+    } catch (e) {
+        console.error('Init error:', e);
+        ipcRenderer.send('renderer-error', e.message + '\n' + (e.stack || ''));
+    }
 });
 
 // Search panel functionality
@@ -1672,6 +1711,8 @@ async function loadAndApplySettings() {
     rateSlider.value = rate;
 
     useEverythingSearch = settings.useEverythingSearch === true;
+    heyCortanaEnabled = settings.heyCortana === true;
+    if (heyCortanaToggle) heyCortanaToggle.checked = heyCortanaEnabled;
     everythingPort = settings.everythingPort || 80;
     const everythingToggle = document.getElementById('everything-toggle');
     const everythingPortInput = document.getElementById('everything-port-input');

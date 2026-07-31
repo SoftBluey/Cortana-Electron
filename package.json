@@ -60,6 +60,7 @@
           "classes": [
             "SpeechRecognizer",
             "SpeechRecognitionTopicConstraint",
+            "SpeechRecognitionListConstraint",
             "SpeechRecognitionResult",
             "SpeechContinuousRecognitionSession",
             "SpeechRecognitionHypothesis"

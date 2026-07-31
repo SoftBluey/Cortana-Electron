@@ -51,6 +51,20 @@ body.movable-mode #app-container {
     transform: translateY(0);
 }
 
+body.slim-mode #app-container {
+    height: 120px;
+    transition: height 0.3s ease;
+}
+body.slim-mode .main-container {
+    display: none;
+}
+body.slim-mode #search-bar {
+    pointer-events: none;
+}
+body.slim-mode #search-panel {
+    display: none;
+}
+
 .main-container {
     height: calc(100% - 45px);
     position: relative;
