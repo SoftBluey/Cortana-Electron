@@ -413,6 +413,10 @@ app.whenReady().then(async () => {
       try { speechRecognizer.close(); } catch (e) {}
       speechRecognizer = null;
     }
+    if (wakeRecognizer) {
+      try { wakeRecognizer.close(); } catch (_) {}
+      wakeRecognizer = null;
+    }
     stopSapiFallback();
     if (wakeEnabled && !wakeRunning && !wakeRestartTimer) {
       wakeRestartTimer = setTimeout(() => {
@@ -478,10 +482,15 @@ app.whenReady().then(async () => {
         }
       } catch (e) {
         if (!wakeRunning) break;
+        if (e.message && e.message.includes('0x80000013')) {
+          wakeRecognizer = null;
+          await new Promise(r => setTimeout(r, 3000));
+          continue;
+        }
         wakeRetries++;
-        const delay = Math.min(wakeRetries * 2000, 30000);
+        const delay = Math.min(wakeRetries * 3000, 30000);
         console.error('[speech] Wake retry', wakeRetries, 'in', delay + 'ms:', e.message);
-        try { if (wakeRecognizer) { wakeRecognizer.close(); wakeRecognizer = null; } } catch (_) {}
+        wakeRecognizer = null;
         await new Promise(r => setTimeout(r, delay));
       }
     }
@@ -672,10 +681,15 @@ function closeApp() {
 
 function registerIpcHandlers() {
   ipcMain.on("hide-window", () => {
+    speechCancelled = true;
     if (speechRecognizer) {
-      speechCancelled = true;
       try { speechRecognizer.close(); } catch (_) {}
       speechRecognizer = null;
+    }
+    if (wakeRecognizer) {
+      try { wakeRecognizer.close(); } catch (_) {}
+      wakeRecognizer = null;
+      wakeRunning = false;
     }
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.hide();
