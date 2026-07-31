@@ -319,11 +319,14 @@ app.whenReady().then(async () => {
     );
   } catch (_) {}
 
+  const bindingsPath = app.isPackaged
+    ? path.join(__dirname, '.winapp', 'bindings')
+    : '#winapp/bindings';
   const {
     SpeechRecognizer,
     SpeechRecognitionTopicConstraint,
     SpeechRecognitionScenario,
-  } = require('#winapp/bindings');
+  } = require(bindingsPath);
 
   function startSapiFallback() {
     if (speechProcess) return;
