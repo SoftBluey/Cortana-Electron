@@ -422,7 +422,7 @@ app.whenReady().then(async () => {
       wakeRestartTimer = setTimeout(() => {
         wakeRestartTimer = null;
         startWakeLoop();
-      }, 3000);
+      }, 500);
     }
   });
 
@@ -442,7 +442,6 @@ app.whenReady().then(async () => {
   });
 
   async function startWakeLoop() {
-    console.log('[speech] Wake loop starting');
     wakeRunning = true;
     while (wakeRunning) {
       let rec = null;
@@ -453,13 +452,11 @@ app.whenReady().then(async () => {
           SpeechRecognitionScenario.Dictation, 'dictation');
         rec.constraints.append(constraint);
         await rec.compileConstraintsAsync();
-        console.log('[speech] Wake listening...');
 
         const result = await rec.recognizeAsync();
         wakeRetries = 0;
         if (!wakeRunning) break;
         const text = result && result.text && result.text.toLowerCase();
-        if (text) console.log('[speech] Wake heard:', text);
         if (text && text.includes("hey cortana")) {
           wakeRunning = false;
           if (mainWindow && !mainWindow.isDestroyed()) {
@@ -481,22 +478,19 @@ app.whenReady().then(async () => {
               const qc = new SpeechRecognitionTopicConstraint(SpeechRecognitionScenario.Dictation, 'dictation');
               qr.constraints.append(qc);
               await qr.compileConstraintsAsync();
-              console.log('[speech] Query listening...');
               const qres = await qr.recognizeAsync();
               const qtext = qres && qres.text;
-              console.log('[speech] Query heard:', qtext || '(empty)');
               if (qtext && mainWindow && !mainWindow.isDestroyed()) {
                 mainWindow.webContents.send('speech-result', { final: true, text: qtext });
               }
               try { qr.close(); } catch (_) {}
             } catch (e) {
-              console.error('[speech] Query error:', e.message);
               wakeRunning = true;
             }
           }
         } else {
           try { rec.close(); } catch (_) {}
-          await new Promise(r => setTimeout(r, 1000));
+          await new Promise(r => setTimeout(r, 200));
         }
       } catch (e) {
         if (!wakeRunning) break;
@@ -506,13 +500,11 @@ app.whenReady().then(async () => {
         }
         wakeRetries++;
         const delay = Math.min(wakeRetries * 3000, 30000);
-        console.error('[speech] Wake retry', wakeRetries, 'in', delay + 'ms:', e.message);
         await new Promise(r => setTimeout(r, delay));
       } finally {
         wakeRecognizer = null;
       }
     }
-    console.log('[speech] Wake loop ended');
   }
 
   createWindow();
