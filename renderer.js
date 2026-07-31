@@ -1170,6 +1170,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     ipcRenderer.on('go-idle-and-close', () => {
         if (!appContainer.classList.contains('visible')) return;
+        if (speechActive) stopSpeechRecognition();
 
         const onAnimationEnd = () => {
             if (!appContainer.classList.contains('visible')) {

@@ -661,6 +661,11 @@ function closeApp() {
 
 function registerIpcHandlers() {
   ipcMain.on("hide-window", () => {
+    if (speechRecognizer) {
+      speechCancelled = true;
+      try { speechRecognizer.close(); } catch (_) {}
+      speechRecognizer = null;
+    }
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.hide();
     }
