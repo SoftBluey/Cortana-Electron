@@ -452,8 +452,6 @@ app.whenReady().then(async () => {
         if (!wakeRunning) break;
         const text = result && result.text && result.text.toLowerCase();
         if (text && text.includes("hey cortana")) {
-          try { wakeRecognizer.close(); } catch (_) {}
-          wakeRecognizer = null;
           wakeRunning = false;
           if (mainWindow && !mainWindow.isDestroyed()) {
             if (mainWindow.isVisible()) {
@@ -462,6 +460,16 @@ app.whenReady().then(async () => {
               mainWindow.webContents.send('wake-slim');
               showWindow();
             }
+          }
+
+          if (wakeRecognizer) {
+            const queryResult = await wakeRecognizer.recognizeAsync();
+            const queryText = queryResult && queryResult.text;
+            if (queryText && mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('speech-result', { final: true, text: queryText });
+            }
+            try { wakeRecognizer.close(); } catch (_) {}
+            wakeRecognizer = null;
           }
         } else {
           try { wakeRecognizer.close(); } catch (_) {}

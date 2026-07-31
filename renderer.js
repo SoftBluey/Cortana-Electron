@@ -896,7 +896,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         setTimeout(() => micBtn.classList.remove('error'), 1200);
     }
 
-    function startSpeechRecognition() {
+    function startSpeechUI() {
         speechActive = true;
         speechFinal = '';
         speechPartial = '';
@@ -906,12 +906,16 @@ window.addEventListener('DOMContentLoaded', async () => {
         onSound.play();
         searchBar.placeholder = 'Listening...';
         searchBar.style.color = '#888888';
-        ipcRenderer.send('speech-start');
         setTimeout(() => { searchBar.value = speechShuffle(); hideSearchPanel(); }, 0);
         speechShuffleTimer = setInterval(() => {
             if (!speechActive) return;
             searchBar.value = speechFinal.trim() || speechShuffle();
         }, 120);
+    }
+
+    function startSpeechRecognition() {
+        startSpeechUI();
+        ipcRenderer.send('speech-start');
     }
 
     function stopSpeechRecognition() {
@@ -994,14 +998,14 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     ipcRenderer.on('wake-slim', () => {
         document.body.classList.add('slim-mode');
-        setTimeout(() => startSpeechRecognition(), 800);
+        startSpeechUI();
     });
 
     ipcRenderer.on('wake-listen', () => {
         if (document.body.classList.contains('slim-mode')) {
             document.body.classList.remove('slim-mode');
         }
-        setTimeout(() => startSpeechRecognition(), 800);
+        startSpeechUI();
     });
 
 
