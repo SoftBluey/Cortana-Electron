@@ -681,6 +681,11 @@ body.slim-mode #search-panel {
     animation: fadeIn 0.3s ease-in-out forwards;
 }
 
+#reminder-container {
+    top: 160px;
+    height: calc(100% - 160px);
+}
+
 .reminder-title {
     font-size: 22px;
     color: var(--primary-color);

@@ -409,11 +409,22 @@ if (gotTheLock) {
         speechRecognizer = null;
       } catch (e) {
         if (speechCancelled) return;
-        console.error('[speech] WinRT error:', e.message);
-        if (speechRecognizer) { try { speechRecognizer.close(); } catch (_) {} speechRecognizer = null; }
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-error', e.message || 'Speech recognition failed');
-      } finally {
-        speechStarting = false;
+        console.error('[speech] WinRT failed, attempting SAPI fallback:', e.message);
+        if (speechRecognizer) {
+          try { speechRecognizer.close(); } catch (_) {}
+          speechRecognizer = null;
+        }
+        try {
+          startSapiFallback();
+          // SAPI will emit speech-ready and speech-result via its stdout handler.
+          // Do NOT send speech-error here — let SAPI try first.
+        } catch (sapiErr) {
+          console.error('[speech] SAPI fallback also failed:', sapiErr.message);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('speech-error',
+              'Speech recognition is unavailable. Try restarting the app.');
+          }
+        }
       }
     } finally {
       speechStarting = false;
@@ -480,14 +491,20 @@ if (gotTheLock) {
               }
             }
 
+            // Close the wake recognizer before starting query
             try { rec.close(); } catch (_) {}
             rec = null;
             wakeRecognizer = null;
 
+            // Capture the follow-up query
             if (mainWindow && !mainWindow.isDestroyed()) {
+              let qr = null;
               try {
-                const qr = new SpeechRecognizer();
-                const qc = new SpeechRecognitionTopicConstraint(SpeechRecognitionScenario.Dictation, 'dictation');
+                qr = new SpeechRecognizer();
+                wakeRecognizer = qr; // store so speech-stop can cancel it
+                const qc = new SpeechRecognitionTopicConstraint(
+                  SpeechRecognitionScenario.Dictation, 'dictation'
+                );
                 qr.constraints.append(qc);
                 await qr.compileConstraintsAsync();
                 const qres = await qr.recognizeAsync();
@@ -495,11 +512,24 @@ if (gotTheLock) {
                 if (qtext && mainWindow && !mainWindow.isDestroyed()) {
                   mainWindow.webContents.send('speech-result', { final: true, text: qtext });
                 }
-                try { qr.close(); } catch (_) {}
               } catch (e) {
-                wakeRunning = true;
+                console.warn('[wake] Query recognition failed:', e.message);
+                // Do not re-enter the loop — schedule a fresh wake loop restart instead
+              } finally {
+                if (qr) { try { qr.close(); } catch (_) {} }
+                wakeRecognizer = null;
               }
             }
+
+            // Schedule wake loop restart cleanly
+            if (wakeEnabled && !wakeRestartTimer) {
+              wakeRestartTimer = setTimeout(() => {
+                wakeRestartTimer = null;
+                startWakeLoop();
+              }, 1000);
+            }
+
+            break; // exit the while loop — the restart timer will relaunch
           } else {
             await new Promise(r => setTimeout(r, 200));
           }
@@ -1224,11 +1254,14 @@ function registerIpcHandlers() {
       const tempDir = os.tmpdir();
       const outFile = path.join(tempDir, `cortana-tts-${Date.now()}.mp3`);
 
+      const pitchVal = Math.round((pitch - 1) * 100);
       const pitchStr = pitch !== undefined && pitch !== 1
-        ? `${Math.round((pitch - 1) * 100)}%`
+        ? `${pitchVal > 0 ? '+' : ''}${pitchVal}%`
         : "default";
+
+      const rateVal = Math.round((rate - 1) * 100);
       const rateStr = rate !== undefined && rate !== 1
-        ? `${Math.round((rate - 1) * 100)}%`
+        ? `${rateVal > 0 ? '+' : ''}${rateVal}%`
         : "default";
 
       const tts = new EdgeTTS({

@@ -856,11 +856,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchIcon.src = cortanaIcon;
     micIcon.src = micIconPath;
 
-    const reminderCortanaIcon = document.getElementById('reminder-cortana-icon');
-    if (reminderCortanaIcon) {
-      reminderCortanaIcon.src = path.join(appRoot, 'circle_static.gif');
-    }
-
     new Image().src = drumrollSound.src;
 
     document.getElementById('close-btn').addEventListener('click', () => {
@@ -2416,6 +2411,7 @@ function setStateIdle() {
     editingReminderSound = null; // Also reset the editing sound
     reminderContainer.classList.remove('visible');
     animationContainer.style.display = 'block';
+    contentWrapper.style.display = 'block';
 
     clearTimeout(finishSpeakingTimeout);
     window.speechSynthesis.cancel();
@@ -2847,7 +2843,10 @@ function showReminderUI(options = {}) {
     editingReminderId = id;
     editingReminderSound = initialSound; // Store the initial sound for this reminder
 
-    animationContainer.style.display = 'none';
+    animationContainer.style.display = 'block';
+    contentWrapper.style.display = 'none';
+    setStateActive();
+    anim.goToState(AnimationState.IDLE);
     reminderContainer.classList.add('visible');
 
     reminderTextInput.value = initialText;
@@ -2998,6 +2997,7 @@ function onSaveReminder() {
 
         reminderContainer.classList.remove('visible');
         animationContainer.style.display = 'block';
+        contentWrapper.style.display = 'block';
         setStateActive();
         anim.goToState(AnimationState.SPEAKING_BEGIN);
 
