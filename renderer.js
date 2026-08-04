@@ -65,6 +65,9 @@ let timerEndTime = null;
 let timerDuration = null;
 
 
+// TODO: Replace __dirname.includes('app.asar') heuristic with the
+// app.isPackaged flag received via IPC for robustness. The heuristic
+// breaks if the install path contains the string 'app.asar'.
 const appRoot = path.resolve(__dirname, __dirname.includes('app.asar') ? '../assets' : 'assets');
 
 const cortanaIcon = path.join(appRoot, 'cortana.png');
@@ -100,7 +103,6 @@ const AnimationState = Object.freeze({
   ERROR: 'error',
   HOP: 'hop',
   BOW: 'bow',
-  SPIN: 'spin',
   STATIC: 'static',
 });
 
@@ -118,7 +120,6 @@ const ANIMATION_FILES = {
   [AnimationState.ERROR]: 'circle_error.gif',
   [AnimationState.HOP]: 'circle_hop.gif',
   [AnimationState.BOW]: 'circle_bow.gif',
-  [AnimationState.SPIN]: 'circle_spin.gif',
   [AnimationState.STATIC]: 'circle_static.gif',
   idle_start: 'circle_idle_start.gif',
   idle_mid: 'circle_idle_mid.gif',
@@ -186,11 +187,12 @@ class GifRenderer {
     this.themeColor = { r: 0, g: 120, b: 215 };
     this.gifWidth = 0;
     this.gifHeight = 0;
+    this._imageData = null;
   }
 
-  loadSync(path) {
+  async load(filePath) {
     this.stop();
-    const filename = require('path').basename(path);
+    const filename = require('path').basename(filePath);
     const cached = gifCache.get(filename);
 
     if (cached) {
@@ -199,12 +201,13 @@ class GifRenderer {
       this.gifHeight = cached.gifHeight;
       this.canvas.width = this.gifWidth;
       this.canvas.height = this.gifHeight;
+      this._imageData = this.ctx.createImageData(this.gifWidth, this.gifHeight);
       this.currentIndex = 0;
       this.loops = 0;
       return;
     }
 
-    const buffer = require('fs').readFileSync(path);
+    const buffer = await require('fs').promises.readFile(filePath);
     const gif = parseGIF(buffer);
     const rawFrames = decompressFrames(gif);
 
@@ -212,6 +215,7 @@ class GifRenderer {
     this.gifHeight = gif.lsd.height;
     this.canvas.width = this.gifWidth;
     this.canvas.height = this.gifHeight;
+    this._imageData = this.ctx.createImageData(this.gifWidth, this.gifHeight);
 
     this.frames = [];
     let prevData = new Uint8ClampedArray(this.gifWidth * this.gifHeight * 4);
@@ -330,7 +334,8 @@ class GifRenderer {
     const frame = this.frames[index];
     if (!frame) return;
 
-    const imageData = this.ctx.createImageData(this.gifWidth, this.gifHeight);
+    const imageData = this._imageData;
+    imageData.data.fill(0);
     const pxData = frame.data;
     const { r, g, b } = this.themeColor;
 
@@ -388,19 +393,19 @@ class AnimationManager {
     this.renderer.onComplete = () => this._onAnimationEnd();
   }
 
-  init() {
-    this.renderer.loadSync(path.join(appRoot, ANIMATION_FILES[AnimationState.STATIC]));
+  async init() {
+    await this.renderer.load(path.join(appRoot, ANIMATION_FILES[AnimationState.STATIC]));
     this.state = AnimationState.STATIC;
     this.renderer.start(true);
   }
 
-  goToState(state, options = {}) {
+  async goToState(state, options = {}) {
     if (this._destroyed) return;
 
     this.queue = [];
     this._stopIdleCycle();
     this._stopSpecial();
-    this._playState(state, options);
+    await this._playState(state, options);
   }
 
   queueAnimation(state) {
@@ -422,14 +427,14 @@ class AnimationManager {
     this.queue = [];
   }
 
-  _playState(state, options = {}) {
+  async _playState(state, options = {}) {
     if (this._destroyed) return;
 
     this.state = state;
     this._pendingNext = options.nextState || null;
 
     if (state === AnimationState.IDLE) {
-      this._startIdleCycle();
+      await this._startIdleCycle();
       return;
     }
 
@@ -439,7 +444,7 @@ class AnimationManager {
       return;
     }
 
-    this.renderer.loadSync(path.join(appRoot, file));
+    await this.renderer.load(path.join(appRoot, file));
 
     const isLooping = (
       state === AnimationState.LISTENING ||
@@ -454,19 +459,19 @@ class AnimationManager {
     }
   }
 
-  _onAnimationEnd() {
+  async _onAnimationEnd() {
     if (this._destroyed) return;
 
     if (this.queue.length > 0) {
       const next = this.queue.shift();
-      this._playState(next);
+      await this._playState(next);
       return;
     }
 
     if (this._pendingNext) {
       const next = this._pendingNext;
       this._pendingNext = null;
-      this._playState(next);
+      await this._playState(next);
       return;
     }
 
@@ -481,22 +486,21 @@ class AnimationManager {
       [AnimationState.ERROR]: AnimationState.TRANSITION_TO_IDLE,
       [AnimationState.HOP]: AnimationState.TRANSITION_TO_IDLE,
       [AnimationState.BOW]: AnimationState.TRANSITION_TO_IDLE,
-      [AnimationState.SPIN]: AnimationState.TRANSITION_TO_IDLE,
     };
 
     const next = autoNext[this.state];
     if (next) {
-      this._playState(next);
+      await this._playState(next);
     }
   }
 
-  _startIdleCycle() {
+  async _startIdleCycle() {
     this._idlePlaying = true;
     this._idleCycleIndex = 1;
-    this._playIdleFrame();
+    await this._playIdleFrame();
   }
 
-  _playIdleFrame() {
+  async _playIdleFrame() {
     if (this._destroyed || !this._idlePlaying) return;
 
     const files = ['idle_start', 'idle_mid', 'idle_end'];
@@ -505,11 +509,11 @@ class AnimationManager {
 
     if (!file) {
       this._idleCycleIndex = (this._idleCycleIndex + 1) % files.length;
-      this._playIdleFrame();
+      await this._playIdleFrame();
       return;
     }
 
-    this.renderer.loadSync(path.join(appRoot, file));
+    await this.renderer.load(path.join(appRoot, file));
     this.renderer.playOneShot(() => {
       if (this._destroyed || !this._idlePlaying) return;
       this._idleCycleIndex = (this._idleCycleIndex + 1) % files.length;
@@ -532,13 +536,13 @@ class AnimationManager {
     return id;
   }
 
-  playSpecial(id) {
+  async playSpecial(id) {
     if (this._destroyed || id < 0 || id >= SPECIAL_ANIMATIONS.length) return;
     this._stopIdleCycle();
     this._stopSpecial();
     this._isPlayingSpecial = true;
     this._currentSpecialIndex = id;
-    this._playSpecialStart();
+    await this._playSpecialStart();
   }
 
   _stopSpecial() {
@@ -549,20 +553,20 @@ class AnimationManager {
     }
   }
 
-  _playSpecialStart() {
+  async _playSpecialStart() {
     const special = SPECIAL_ANIMATIONS[this._currentSpecialIndex];
-    this.renderer.loadSync(path.join(appRoot, special.start));
+    await this.renderer.load(path.join(appRoot, special.start));
     this.renderer.playOneShot(() => this._onSpecialStartEnd());
   }
 
-  _onSpecialStartEnd() {
+  async _onSpecialStartEnd() {
     if (this._destroyed || !this._isPlayingSpecial) return;
-    this._playSpecialLoop();
+    await this._playSpecialLoop();
   }
 
-  _playSpecialLoop() {
+  async _playSpecialLoop() {
     const special = SPECIAL_ANIMATIONS[this._currentSpecialIndex];
-    this.renderer.loadSync(path.join(appRoot, special.loop));
+    await this.renderer.load(path.join(appRoot, special.loop));
     this.renderer.start(true);
   }
 }
@@ -736,7 +740,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     
     const circleCanvas = document.getElementById('circle-canvas');
     anim = new AnimationManager(circleCanvas);
-    anim.init();
+    await anim.init();
 
     let entranceReceived = false;
     ipcRenderer.on('trigger-enter-animation', (event, { timeSinceHidden }) => {
@@ -851,6 +855,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('close-btn-icon').src = closeIconPng;
     searchIcon.src = cortanaIcon;
     micIcon.src = micIconPath;
+
+    const reminderCortanaIcon = document.getElementById('reminder-cortana-icon');
+    if (reminderCortanaIcon) {
+      reminderCortanaIcon.src = path.join(appRoot, 'circle_static.gif');
+    }
 
     new Image().src = drumrollSound.src;
 
@@ -2154,7 +2163,7 @@ const AI_PRESETS = {
   perplexity: { url: 'https://api.perplexity.ai/chat/completions',           model: 'sonar-pro',                keyHint: 'pplx-...' },
   xai:        { url: 'https://api.x.ai/v1/chat/completions',                 model: 'grok-4.5',                 keyHint: 'xai-...' },
   mistral:    { url: 'https://api.mistral.ai/v1/chat/completions',           model: 'mistral-large-latest',     keyHint: '...' },
-  'google-gemini': { url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', model: 'gemini-3.6-flash', keyHint: 'AIza...' },
+  'google-gemini': { url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', model: 'gemini-2.5-flash', keyHint: 'AIza...' },
   deepseek:   { url: 'https://api.deepseek.com/v1/chat/completions',         model: 'deepseek-chat',            keyHint: 'sk-...' },
 };
 
@@ -3681,18 +3690,13 @@ function startTimer(value, unit, ms) {
 
     const updateTimer = () => {
         const remaining = Math.max(0, timerEndTime - Date.now());
-        const mins = Math.floor(remaining / 60000);
-        const secs = Math.floor((remaining % 60000) / 1000);
-        const display = document.getElementById('timer-display');
-        if (display) {
-            display.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
-        }
-        if (remaining <= 0 && timerId) {
+        if (remaining <= 0) {
             clearInterval(timerInterval);
             timerInterval = null;
             timerId = null;
             timerEndTime = null;
             timerDuration = null;
+            const display = document.getElementById('timer-display');
             if (display) display.textContent = 'Time\'s up!';
             const notifyAudio = new Audio(path.join(appRoot, 'notify.wav'));
             notifyAudio.play();
@@ -3703,6 +3707,13 @@ function startTimer(value, unit, ms) {
                 searchBar.placeholder = 'Type here to search';
                 anim.goToState(AnimationState.TRANSITION_TO_IDLE);
             });
+            return;
+        }
+        const mins = Math.floor(remaining / 60000);
+        const secs = Math.floor((remaining % 60000) / 1000);
+        const display = document.getElementById('timer-display');
+        if (display) {
+            display.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
         }
     };
 
@@ -4001,6 +4012,17 @@ function createActionItemUI(action, index, isLastItem) {
             }
         };
         body.appendChild(browseBtn);
+    }
+
+    if (action.type === 'run_command') {
+        const runCommandWarning = document.createElement('span');
+        runCommandWarning.className = 'run-command-warning';
+        runCommandWarning.style.color = '#e8a838';
+        runCommandWarning.style.fontSize = '11px';
+        runCommandWarning.style.display = 'block';
+        runCommandWarning.style.marginTop = '2px';
+        runCommandWarning.textContent = '⚠ This command will run with your user account permissions.';
+        body.appendChild(runCommandWarning);
     }
 
     itemDiv.appendChild(header);

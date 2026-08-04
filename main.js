@@ -76,20 +76,42 @@ let settings = {
 let SETTINGS_FILE;
 let REMINDERS_FILE;
 let iconPath;
+let assetsPath;
 
 const isSilentStart = process.argv.includes("--hidden");
 
-let gotTheLock;
+const gotTheLock = app.requestSingleInstanceLock();
+
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on("second-instance", (event, commandLine, workingDirectory) => {
+    if (mainWindow) {
+      showWindow();
+    }
+  });
+}
+
+const MAX_TIMEOUT_MS = 2_147_483_647;
 
 const scheduleReminder = (reminderData) => {
   const timeInMs = new Date(reminderData.time).getTime() - Date.now();
+  if (timeInMs > MAX_TIMEOUT_MS) {
+    console.warn('[reminder] Delay exceeds max safe setTimeout value:', timeInMs);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('reminder-schedule-error',
+        'Reminder is too far in the future (maximum is about 24 days). ' +
+        'Please set a closer reminder time.');
+    }
+    return;
+  }
   if (timeInMs > 0) {
     const timeout = setTimeout(() => {
       if (Notification.isSupported()) {
         new Notification({
           title: `⏰ Reminder`,
           body: `It's time for: ${reminderData.text}`,
-          icon: iconPath,
+          icon: path.join(assetsPath, 'cortana.png'),
         }).show();
       }
       
@@ -251,15 +273,14 @@ async function saveSettings() {
 const sendAppVersion = async () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     const currentVersion = app.getVersion();
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("update-status", {
-        currentVersion: currentVersion,
-      });
-    }
+    mainWindow.webContents.send("update-status", {
+      currentVersion: currentVersion,
+    });
   }
 };
 
-app.whenReady().then(async () => {
+if (gotTheLock) {
+  app.whenReady().then(async () => {
   app.setAppUserModelId(APP_ID);
   
   // Clean up old Edge TTS temp files from previous sessions
@@ -275,21 +296,8 @@ app.whenReady().then(async () => {
   
   SETTINGS_FILE = path.join(app.getPath("userData"), "settings.json");
   REMINDERS_FILE = path.join(app.getPath("userData"), "reminders.json");
-  gotTheLock = app.requestSingleInstanceLock();
   
-  if (!gotTheLock) {
-    app.quit();
-    return;
-  }
-  
-  // Handle second instance
-  app.on("second-instance", (event, commandLine, workingDirectory) => {
-    if (mainWindow) {
-      showWindow();
-    }
-  });
-  
-  const assetsPath = app.isPackaged
+  assetsPath = app.isPackaged
     ? path.join(process.resourcesPath, "assets")
     : path.join(__dirname, "assets");
   iconPath = path.join(assetsPath, "icon.ico");
@@ -367,42 +375,46 @@ app.whenReady().then(async () => {
 
   ipcMain.on('speech-start', async () => {
     if (speechStarting || speechProcess) return;
-    if (wakeRecognizer) {
-      try { wakeRecognizer.close(); } catch (_) {}
-      wakeRecognizer = null;
-      wakeRunning = false;
-    }
-    if (speechRecognizer) {
-      try { speechRecognizer.close(); } catch (_) {}
-      speechRecognizer = null;
-    }
     speechStarting = true;
-    speechCancelled = false;
     try {
-      speechRecognizer = new SpeechRecognizer();
-      const constraint = new SpeechRecognitionTopicConstraint(
-        SpeechRecognitionScenario.Dictation, 'dictation');
-      speechRecognizer.constraints.append(constraint);
-      await speechRecognizer.compileConstraintsAsync();
-
-      console.log('[speech] ENGINE:WinRT');
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-ready');
-
-      const result = await speechRecognizer.recognizeAsync();
-      if (speechCancelled) return;
-
-      const text = result && result.text;
-      if (text && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('speech-result', { final: true, text });
+      if (wakeRecognizer) {
+        try { wakeRecognizer.close(); } catch (_) {}
+        wakeRecognizer = null;
+        wakeRunning = false;
       }
+      if (speechRecognizer) {
+        try { speechRecognizer.close(); } catch (_) {}
+        speechRecognizer = null;
+      }
+      speechCancelled = false;
+      try {
+        speechRecognizer = new SpeechRecognizer();
+        const constraint = new SpeechRecognitionTopicConstraint(
+          SpeechRecognitionScenario.Dictation, 'dictation');
+        speechRecognizer.constraints.append(constraint);
+        await speechRecognizer.compileConstraintsAsync();
 
-      try { speechRecognizer.close(); } catch (_) {}
-      speechRecognizer = null;
-    } catch (e) {
-      if (speechCancelled) return;
-      console.error('[speech] WinRT error:', e.message);
-      if (speechRecognizer) { try { speechRecognizer.close(); } catch (_) {} speechRecognizer = null; }
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-error', e.message || 'Speech recognition failed');
+        console.log('[speech] ENGINE:WinRT');
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-ready');
+
+        const result = await speechRecognizer.recognizeAsync();
+        if (speechCancelled) return;
+
+        const text = result && result.text;
+        if (text && mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('speech-result', { final: true, text });
+        }
+
+        try { speechRecognizer.close(); } catch (_) {}
+        speechRecognizer = null;
+      } catch (e) {
+        if (speechCancelled) return;
+        console.error('[speech] WinRT error:', e.message);
+        if (speechRecognizer) { try { speechRecognizer.close(); } catch (_) {} speechRecognizer = null; }
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-error', e.message || 'Speech recognition failed');
+      } finally {
+        speechStarting = false;
+      }
     } finally {
       speechStarting = false;
     }
@@ -442,72 +454,88 @@ app.whenReady().then(async () => {
 
   async function startWakeLoop() {
     wakeRunning = true;
-    while (wakeRunning) {
-      let rec = null;
-      try {
-        rec = new SpeechRecognizer();
-        wakeRecognizer = rec;
-        const constraint = new SpeechRecognitionTopicConstraint(
-          SpeechRecognitionScenario.Dictation, 'dictation');
-        rec.constraints.append(constraint);
-        await rec.compileConstraintsAsync();
+    let rec = null;
+    try {
+      rec = new SpeechRecognizer();
+      wakeRecognizer = rec;
+      const constraint = new SpeechRecognitionTopicConstraint(
+        SpeechRecognitionScenario.Dictation, 'dictation');
+      rec.constraints.append(constraint);
+      await rec.compileConstraintsAsync();
 
-        const result = await rec.recognizeAsync();
-        wakeRetries = 0;
-        if (!wakeRunning) break;
-        const text = result && result.text && result.text.toLowerCase();
-        if (text && text.includes("hey cortana")) {
-          wakeRunning = false;
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            if (mainWindow.isVisible()) {
-              mainWindow.webContents.send('wake-listen');
-            } else {
-              mainWindow.webContents.send('wake-slim');
-              showWindow();
-            }
-          }
-
-          try { rec.close(); } catch (_) {}
-          rec = null;
-          wakeRecognizer = null;
-
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            try {
-              const qr = new SpeechRecognizer();
-              const qc = new SpeechRecognitionTopicConstraint(SpeechRecognitionScenario.Dictation, 'dictation');
-              qr.constraints.append(qc);
-              await qr.compileConstraintsAsync();
-              const qres = await qr.recognizeAsync();
-              const qtext = qres && qres.text;
-              if (qtext && mainWindow && !mainWindow.isDestroyed()) {
-                mainWindow.webContents.send('speech-result', { final: true, text: qtext });
+      while (wakeRunning) {
+        try {
+          const result = await rec.recognizeAsync();
+          wakeRetries = 0;
+          if (!wakeRunning) break;
+          const text = result && result.text && result.text.toLowerCase();
+          if (text && text.includes("hey cortana")) {
+            wakeRunning = false;
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              if (mainWindow.isVisible()) {
+                mainWindow.webContents.send('wake-listen');
+              } else {
+                mainWindow.webContents.send('wake-slim');
+                showWindow();
               }
-              try { qr.close(); } catch (_) {}
-            } catch (e) {
-              wakeRunning = true;
             }
+
+            try { rec.close(); } catch (_) {}
+            rec = null;
+            wakeRecognizer = null;
+
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              try {
+                const qr = new SpeechRecognizer();
+                const qc = new SpeechRecognitionTopicConstraint(SpeechRecognitionScenario.Dictation, 'dictation');
+                qr.constraints.append(qc);
+                await qr.compileConstraintsAsync();
+                const qres = await qr.recognizeAsync();
+                const qtext = qres && qres.text;
+                if (qtext && mainWindow && !mainWindow.isDestroyed()) {
+                  mainWindow.webContents.send('speech-result', { final: true, text: qtext });
+                }
+                try { qr.close(); } catch (_) {}
+              } catch (e) {
+                wakeRunning = true;
+              }
+            }
+          } else {
+            await new Promise(r => setTimeout(r, 200));
           }
-        } else {
-          try { rec.close(); } catch (_) {}
-          await new Promise(r => setTimeout(r, 200));
+        } catch (e) {
+          if (!wakeRunning) break;
+          if (e.message && e.message.includes('0x80000013')) {
+            await new Promise(r => setTimeout(r, 3000));
+            continue;
+          }
+          wakeRetries++;
+          const delay = Math.min(wakeRetries * 3000, 5000);
+          await new Promise(r => setTimeout(r, delay));
         }
-      } catch (e) {
-        if (!wakeRunning) break;
-        if (e.message && e.message.includes('0x80000013')) {
-          try { rec.close(); } catch (_) {}
-          await new Promise(r => setTimeout(r, 3000));
-          continue;
-        }
-        try { rec.close(); } catch (_) {}
-        wakeRetries++;
-        const delay = Math.min(wakeRetries * 3000, 5000);
-        await new Promise(r => setTimeout(r, delay));
-      } finally {
-        if (rec) { try { rec.close(); } catch (_) {} }
-        wakeRecognizer = null;
       }
+    } catch (outerErr) {
+      console.error('[wake] Fatal wake loop error:', outerErr);
+    } finally {
+      if (rec) { try { rec.close(); } catch (_) {} }
+      wakeRecognizer = null;
     }
   }
+
+  app.on('before-quit', () => {
+    wakeRunning = false;
+    if (typeof wakeRestartTimer !== 'undefined' && wakeRestartTimer) {
+      clearTimeout(wakeRestartTimer);
+      wakeRestartTimer = null;
+    }
+    if (typeof wakeRecognizer !== 'undefined' && wakeRecognizer) {
+      try { wakeRecognizer.close(); } catch (_) {}
+      wakeRecognizer = null;
+    }
+    if (typeof stopSapiFallback === 'function') {
+      try { stopSapiFallback(); } catch (_) {}
+    }
+  });
 
   createWindow();
 
@@ -521,6 +549,7 @@ app.whenReady().then(async () => {
   // Check for updates in the background
   sendAppVersion();
 });
+}
 
 function showWindow() {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -589,9 +618,9 @@ async function scanApplications() {
 
   for (const folder of startMenuFolders) {
     const appsInFolder = await findApplicationsIn(folder);
-    for (const app of appsInFolder) {
-      if (!applicationCache.has(app.name)) {
-        applicationCache.set(app.name, app.path);
+    for (const appEntry of appsInFolder) {
+      if (!applicationCache.has(appEntry.name)) {
+        applicationCache.set(appEntry.name, appEntry.path);
       }
     }
   }
@@ -1319,7 +1348,12 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
 
       const icsPath = path.join(os.tmpdir(), `cortana-event-${Date.now()}.ics`);
       await fs.writeFile(icsPath, ics);
-      shell.openPath(icsPath);
+      await shell.openPath(icsPath);
+      setTimeout(() => {
+        fs.unlink(icsPath).catch((err) => {
+          console.warn('[calendar] Failed to clean up ICS file:', err.message);
+        });
+      }, 5000);
       return { success: true };
     } catch (error) {
       console.error("Failed to create calendar event:", error);
