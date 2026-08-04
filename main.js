@@ -492,7 +492,6 @@ if (gotTheLock) {
       console.log('[wake] Deferring: manual speech active.');
       return;
     }
-    wakeRetries = 0;
     wakeRunning = true;
     let wakeTriggered = false;
     let rec = null;
@@ -519,6 +518,7 @@ if (gotTheLock) {
 
         wakeTriggered = true;
         console.log('[wake] Wake word detected:', text);
+        wakeRetries = 0;
         try { await session.stopAsync(); } catch (_) {}
 
         if (mainWindow && !mainWindow.isDestroyed()) {
