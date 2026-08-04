@@ -282,7 +282,9 @@ class GifRenderer {
   }
 
   start(loop = true) {
+    const savedOnComplete = this.onComplete;
     this.stop();
+    this.onComplete = savedOnComplete;
     this.running = true;
     this.currentIndex = 0;
     this.loops = 0;
@@ -291,8 +293,8 @@ class GifRenderer {
   }
 
   playOneShot(onComplete) {
-    this.start(false);
     this.onComplete = onComplete;
+    this.start(false);
   }
 
   stop() {
@@ -385,12 +387,11 @@ class AnimationManager {
     this._idleCycleIndex = 0;
     this._idlePlaying = false;
     this._destroyed = false;
+    this._generation = 0;
 
     this._isPlayingSpecial = false;
     this._currentSpecialIndex = -1;
     this._lastSpecialIndex = -1;
-
-    this.renderer.onComplete = () => this._onAnimationEnd();
   }
 
   async init() {
@@ -428,9 +429,11 @@ class AnimationManager {
   }
 
   async _playState(state, options = {}) {
+    const generation = ++this._generation;
     if (this._destroyed) return;
 
     this.state = state;
+    const completingState = state;
     this._pendingNext = options.nextState || null;
 
     if (state === AnimationState.IDLE) {
@@ -445,6 +448,7 @@ class AnimationManager {
     }
 
     await this.renderer.load(path.join(appRoot, file));
+    if (generation !== this._generation) return;
 
     const isLooping = (
       state === AnimationState.LISTENING ||
@@ -455,11 +459,14 @@ class AnimationManager {
     if (state === AnimationState.STATIC || isLooping) {
       this.renderer.start(true);
     } else {
-      this.renderer.playOneShot(() => this._onAnimationEnd());
+      this.renderer.playOneShot(() => {
+        if (generation !== this._generation) return;
+        this._onAnimationEnd(completingState);
+      });
     }
   }
 
-  async _onAnimationEnd() {
+  async _onAnimationEnd(completingState) {
     if (this._destroyed) return;
 
     if (this.queue.length > 0) {
@@ -488,19 +495,23 @@ class AnimationManager {
       [AnimationState.BOW]: AnimationState.TRANSITION_TO_IDLE,
     };
 
-    const next = autoNext[this.state];
+    // Use completingState (the state we were playing) not this.state
+    // (which may have been updated by a concurrent goToState call)
+    const next = autoNext[completingState];
     if (next) {
       await this._playState(next);
     }
   }
 
   async _startIdleCycle() {
+    const generation = ++this._generation;
     this._idlePlaying = true;
     this._idleCycleIndex = 1;
     await this._playIdleFrame();
   }
 
   async _playIdleFrame() {
+    const generation = this._generation;
     if (this._destroyed || !this._idlePlaying) return;
 
     const files = ['idle_start', 'idle_mid', 'idle_end'];
@@ -514,8 +525,10 @@ class AnimationManager {
     }
 
     await this.renderer.load(path.join(appRoot, file));
+    if (generation !== this._generation) return;
     this.renderer.playOneShot(() => {
       if (this._destroyed || !this._idlePlaying) return;
+      if (this._generation !== generation) return;
       this._idleCycleIndex = (this._idleCycleIndex + 1) % files.length;
       this._playIdleFrame();
     });
@@ -892,8 +905,9 @@ window.addEventListener('DOMContentLoaded', async () => {
             searchBar.placeholder = 'Type here to search';
             setStateIdle();
         }, 200);
-        anim.goToState(AnimationState.IDLE);
         offSound.play();
+        // NOTE: anim.goToState(AnimationState.IDLE) removed from here —
+        // setStateIdle() inside the timer handles this exclusively.
     });
 
     searchBar.addEventListener('focus', () => {
@@ -3175,7 +3189,7 @@ async function showReminders() {
         isBusy = false;
         searchBar.disabled = false;
         searchBar.placeholder = 'Type here to search';
-        anim.goToState(AnimationState.TRANSITION_TO_IDLE);
+        anim.goToState(AnimationState.SPEAKING_END, { nextState: AnimationState.TRANSITION_TO_IDLE });
     });
 }
 
@@ -3676,7 +3690,7 @@ function startTimer(value, unit, ms) {
     anim.goToState(AnimationState.SPEAKING_BEGIN);
     speak(`Timer set for ${value} ${unit}${value !== 1 ? 's' : ''}.`, () => {
         if (!timerEndTime) return;
-        anim.goToState(AnimationState.TRANSITION_TO_IDLE);
+        onActionFinished();
     });
 
     resultsDisplay.innerHTML = '';
@@ -3705,7 +3719,7 @@ function startTimer(value, unit, ms) {
                 isBusy = false;
                 searchBar.disabled = false;
                 searchBar.placeholder = 'Type here to search';
-                anim.goToState(AnimationState.TRANSITION_TO_IDLE);
+                anim.goToState(AnimationState.SPEAKING_END, { nextState: AnimationState.TRANSITION_TO_IDLE });
             });
             return;
         }
