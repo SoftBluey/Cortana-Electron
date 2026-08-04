@@ -1289,6 +1289,13 @@ window.addEventListener('DOMContentLoaded', async () => {
         playReminderSound(soundFile);
     });
 
+    ipcRenderer.on('online-speech-status', (event, { enabled }) => {
+        const banner = document.getElementById('online-speech-warning');
+        if (banner) {
+            banner.style.display = enabled ? 'none' : 'flex';
+        }
+    });
+
     await loadAndApplySettings();
     setupTTS();
 

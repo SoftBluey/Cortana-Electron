@@ -60,6 +60,18 @@
               <div class="settings-main-content">
                 <div class="settings-section">
                   <h2>Personalisation</h2>
+                  <div id="online-speech-warning"
+                       style="display:none; align-items:flex-start; gap:8px; padding:10px 12px;
+                              background:rgba(232,168,56,0.12); border:1px solid rgba(232,168,56,0.4);
+                              border-radius:6px; margin-bottom:12px;">
+                    <span style="font-size:16px; line-height:1.2;">⚠️</span>
+                    <div style="font-size:12px; line-height:1.5; color:var(--text-color, #fff); opacity:0.9;">
+                      <strong>Online Speech Recognition is disabled.</strong><br>
+                      For the best "Hey Cortana" accuracy, go to
+                      <strong>Windows Settings → Privacy &amp; security → Speech</strong>
+                      and turn on <em>Online speech recognition</em>.
+                    </div>
+                  </div>
                   <div class="setting-item">
                     <label for="tts-engine-select">Speech Engine</label>
                     <select id="tts-engine-select">

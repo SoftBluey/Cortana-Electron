@@ -77,6 +77,7 @@ let SETTINGS_FILE;
 let REMINDERS_FILE;
 let iconPath;
 let assetsPath;
+let onlineSpeechEnabled = false;
 
 const isSilentStart = process.argv.includes("--hidden");
 
@@ -325,7 +326,15 @@ if (gotTheLock) {
       `powershell -NoProfile -Command "New-Item -Path '${consentKey}' -Force | Out-Null; Set-ItemProperty -Path '${consentKey}' -Name HasAccepted -Value 1 -Type DWord -Force"`,
       { stdio: 'ignore' }
     );
-  } catch (_) {}
+    // Verify the write succeeded by reading back
+    const readResult = require('child_process').execSync(
+      `powershell -NoProfile -Command "try { (Get-ItemProperty -Path '${consentKey}' -Name HasAccepted -ErrorAction Stop).HasAccepted } catch { 0 }"`,
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+    ).trim();
+    onlineSpeechEnabled = readResult === '1';
+  } catch (_) {
+    onlineSpeechEnabled = false;
+  }
 
   const bindingsPath = app.isPackaged
     ? path.join(__dirname, '.winapp', 'bindings')
@@ -377,6 +386,7 @@ if (gotTheLock) {
     if (speechStarting || speechProcess) return;
     speechStarting = true;
     try {
+      if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
       if (wakeRecognizer) {
         try { wakeRecognizer.close(); } catch (_) {}
         wakeRecognizer = null;
@@ -463,7 +473,27 @@ if (gotTheLock) {
     }
   });
 
+  function recognizeWithTimeout(recognizer, ms) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error('recognizeAsync timed out after ' + ms + 'ms'));
+      }, ms);
+      recognizer.recognizeAsync().then(
+        result => { if (!settled) { settled = true; clearTimeout(timer); resolve(result); } },
+        err    => { if (!settled) { settled = true; clearTimeout(timer); reject(err); } }
+      );
+    });
+  }
+
   async function startWakeLoop() {
+    if (speechStarting || speechRecognizer || speechProcess) {
+      console.log('[wake] Deferring wake loop start while speech recognition is active.');
+      return;
+    }
+    wakeRetries = 0;
     wakeRunning = true;
     let rec = null;
     try {
@@ -476,7 +506,7 @@ if (gotTheLock) {
 
       while (wakeRunning) {
         try {
-          const result = await rec.recognizeAsync();
+          const result = await recognizeWithTimeout(rec, 10000);
           wakeRetries = 0;
           if (!wakeRunning) break;
           const text = result && result.text && result.text.toLowerCase();
@@ -531,24 +561,64 @@ if (gotTheLock) {
 
             break; // exit the while loop — the restart timer will relaunch
           } else {
-            await new Promise(r => setTimeout(r, 200));
+            await new Promise(r => setTimeout(r, 50));
           }
         } catch (e) {
           if (!wakeRunning) break;
+
+          // Transient resource error — wait and retry with same rec
           if (e.message && e.message.includes('0x80000013')) {
+            console.warn('[wake] Resource busy (0x80000013), waiting 3s...');
             await new Promise(r => setTimeout(r, 3000));
             continue;
           }
+
           wakeRetries++;
-          const delay = Math.min(wakeRetries * 3000, 5000);
+          const delay = Math.min(wakeRetries * 2000, 15000);
+          console.warn(`[wake] recognizeAsync error (retry ${wakeRetries}, delay ${delay}ms):`, e.message);
+
+          // Close the broken recognizer before waiting
+          try { rec.close(); } catch (_) {}
+          rec = null;
+          wakeRecognizer = null;
+
           await new Promise(r => setTimeout(r, delay));
+          if (!wakeRunning) break;
+
+          // Create a fresh recognizer for the next iteration
+          try {
+            rec = new SpeechRecognizer();
+            wakeRecognizer = rec;
+            const freshConstraint = new SpeechRecognitionTopicConstraint(
+              SpeechRecognitionScenario.Dictation, 'dictation'
+            );
+            rec.constraints.append(freshConstraint);
+            await rec.compileConstraintsAsync();
+            console.log('[wake] Recognizer recreated successfully after error.');
+          } catch (recreateErr) {
+            console.error('[wake] Failed to recreate recognizer:', recreateErr.message);
+            // Break out — outer finally + catch will handle restart scheduling
+            break;
+          }
         }
       }
     } catch (outerErr) {
-      console.error('[wake] Fatal wake loop error:', outerErr);
+      wakeRunning = false;
+      console.error('[wake] Fatal wake loop error:', outerErr.message || outerErr);
     } finally {
       if (rec) { try { rec.close(); } catch (_) {} }
       wakeRecognizer = null;
+      // Auto-restart with backoff if the user still has Hey Cortana enabled
+      // and no manual dictation is currently taking over the audio input.
+      if (wakeEnabled && !wakeRestartTimer && !speechStarting && !speechRecognizer && !speechProcess) {
+        const delay = Math.min(wakeRetries * 2000, 20000);
+        wakeRetries++;
+        console.warn(`[wake] Scheduling restart in ${delay}ms (retry ${wakeRetries})`);
+        wakeRestartTimer = setTimeout(() => {
+          wakeRestartTimer = null;
+          if (wakeEnabled) startWakeLoop();
+        }, delay);
+      }
     }
   }
 
@@ -597,6 +667,7 @@ function showWindow() {
         timeSinceHidden: Date.now() - lastHiddenTime
       });
     }
+    mainWindow.webContents.send('online-speech-status', { enabled: onlineSpeechEnabled });
   }
 }
 
