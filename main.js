@@ -322,18 +322,25 @@ if (gotTheLock) {
 
   try {
     const consentKey = 'HKCU\\Software\\Microsoft\\Speech_OneCore\\Settings\\OnlineSpeechPrivacy';
+
+    // Read BEFORE writing — reg.exe never throws on a missing key
+    try {
+      const regOut = require('child_process').execSync(
+        `reg query "HKCU\\Software\\Microsoft\\Speech_OneCore\\Settings\\OnlineSpeechPrivacy" /v HasAccepted`,
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+      );
+      onlineSpeechEnabled = /HasAccepted\s+REG_DWORD\s+0x1/i.test(regOut);
+    } catch (_) {
+      onlineSpeechEnabled = false;
+    }
+
+    // Now write 1 to enable it regardless
     require('child_process').execSync(
       `powershell -NoProfile -Command "New-Item -Path '${consentKey}' -Force | Out-Null; Set-ItemProperty -Path '${consentKey}' -Name HasAccepted -Value 1 -Type DWord -Force"`,
       { stdio: 'ignore' }
     );
-    // Verify the write succeeded by reading back
-    const readResult = require('child_process').execSync(
-      `powershell -NoProfile -Command "try { (Get-ItemProperty -Path '${consentKey}' -Name HasAccepted -ErrorAction Stop).HasAccepted } catch { 0 }"`,
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
-    ).trim();
-    onlineSpeechEnabled = readResult === '1';
   } catch (_) {
-    onlineSpeechEnabled = false;
+    // Write failed — leave onlineSpeechEnabled as whatever the read found
   }
 
   const bindingsPath = app.isPackaged
