@@ -458,7 +458,7 @@ if (gotTheLock) {
     }
   });
 
-  ipcMain.on('hey-cortana-toggle', (event, enabled) => {
+  ipcMain.on('hey-cortana-toggle', async (event, enabled) => {
     wakeEnabled = enabled;
     wakeRetries = 0;
     if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
@@ -468,149 +468,137 @@ if (gotTheLock) {
     }
     if (!enabled) {
       wakeRunning = false;
-      if (wakeRecognizer) { try { wakeRecognizer.close(); } catch (_) {} wakeRecognizer = null; }
-      if (powerBlocker) { require('electron').powerSaveBlocker.stop(powerBlocker); powerBlocker = null; }
+      if (wakeRecognizer) {
+        try {
+          // Try to stop continuous session first if available
+          if (wakeRecognizer.continuousRecognitionSession) {
+            try {
+              await wakeRecognizer.continuousRecognitionSession.stopAsync();
+            } catch (_) {}
+          }
+          wakeRecognizer.close();
+        } catch (_) {}
+        wakeRecognizer = null;
+      }
+      if (powerBlocker) {
+        require('electron').powerSaveBlocker.stop(powerBlocker);
+        powerBlocker = null;
+      }
     }
   });
 
-  function recognizeWithTimeout(recognizer, ms) {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        reject(new Error('recognizeAsync timed out after ' + ms + 'ms'));
-      }, ms);
-      recognizer.recognizeAsync().then(
-        result => { if (!settled) { settled = true; clearTimeout(timer); resolve(result); } },
-        err    => { if (!settled) { settled = true; clearTimeout(timer); reject(err); } }
-      );
-    });
-  }
-
   async function startWakeLoop() {
     if (speechStarting || speechRecognizer || speechProcess) {
-      console.log('[wake] Deferring wake loop start while speech recognition is active.');
+      console.log('[wake] Deferring: manual speech active.');
       return;
     }
     wakeRetries = 0;
     wakeRunning = true;
+    let wakeTriggered = false;
     let rec = null;
+
     try {
       rec = new SpeechRecognizer();
       wakeRecognizer = rec;
+
       const constraint = new SpeechRecognitionTopicConstraint(
         SpeechRecognitionScenario.Dictation, 'dictation');
       rec.constraints.append(constraint);
       await rec.compileConstraintsAsync();
 
-      while (wakeRunning) {
+      const session = rec.continuousRecognitionSession;
+
+      // Continuous session — results stream in without polling gaps
+      session.onResultGenerated(async (sender, args) => {
+        if (!wakeRunning || wakeTriggered) return;
+        let text = '';
         try {
-          const result = await recognizeWithTimeout(rec, 10000);
-          wakeRetries = 0;
-          if (!wakeRunning) break;
-          const text = result && result.text && result.text.toLowerCase();
-          if (text && text.includes("hey cortana")) {
-            wakeRunning = false;
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              if (mainWindow.isVisible()) {
-                mainWindow.webContents.send('wake-listen');
-              } else {
-                mainWindow.webContents.send('wake-slim');
-                showWindow();
-              }
-            }
+          text = (args.result && args.result.text || '').toLowerCase().trim();
+        } catch (_) {}
+        if (!(text.includes('hey cortana') || text.includes('cortana'))) return;
 
-            // Close the wake recognizer before starting query
-            try { rec.close(); } catch (_) {}
-            rec = null;
-            wakeRecognizer = null;
+        wakeTriggered = true;
+        console.log('[wake] Wake word detected:', text);
+        try { await session.stopAsync(); } catch (_) {}
 
-            // Capture the follow-up query
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              let qr = null;
-              try {
-                qr = new SpeechRecognizer();
-                wakeRecognizer = qr; // store so speech-stop can cancel it
-                const qc = new SpeechRecognitionTopicConstraint(
-                  SpeechRecognitionScenario.Dictation, 'dictation'
-                );
-                qr.constraints.append(qc);
-                await qr.compileConstraintsAsync();
-                const qres = await qr.recognizeAsync();
-                const qtext = qres && qres.text;
-                if (qtext && mainWindow && !mainWindow.isDestroyed()) {
-                  mainWindow.webContents.send('speech-result', { final: true, text: qtext });
-                }
-              } catch (e) {
-                console.warn('[wake] Query recognition failed:', e.message);
-                // Do not re-enter the loop — schedule a fresh wake loop restart instead
-              } finally {
-                if (qr) { try { qr.close(); } catch (_) {} }
-                wakeRecognizer = null;
-              }
-            }
-
-            // Schedule wake loop restart cleanly
-            if (wakeEnabled && !wakeRestartTimer) {
-              wakeRestartTimer = setTimeout(() => {
-                wakeRestartTimer = null;
-                startWakeLoop();
-              }, 1000);
-            }
-
-            break; // exit the while loop — the restart timer will relaunch
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          if (mainWindow.isVisible()) {
+            mainWindow.webContents.send('wake-listen');
           } else {
-            await new Promise(r => setTimeout(r, 50));
-          }
-        } catch (e) {
-          if (!wakeRunning) break;
-
-          // Transient resource error — wait and retry with same rec
-          if (e.message && e.message.includes('0x80000013')) {
-            console.warn('[wake] Resource busy (0x80000013), waiting 3s...');
-            await new Promise(r => setTimeout(r, 3000));
-            continue;
-          }
-
-          wakeRetries++;
-          const delay = Math.min(wakeRetries * 2000, 15000);
-          console.warn(`[wake] recognizeAsync error (retry ${wakeRetries}, delay ${delay}ms):`, e.message);
-
-          // Close the broken recognizer before waiting
-          try { rec.close(); } catch (_) {}
-          rec = null;
-          wakeRecognizer = null;
-
-          await new Promise(r => setTimeout(r, delay));
-          if (!wakeRunning) break;
-
-          // Create a fresh recognizer for the next iteration
-          try {
-            rec = new SpeechRecognizer();
-            wakeRecognizer = rec;
-            const freshConstraint = new SpeechRecognitionTopicConstraint(
-              SpeechRecognitionScenario.Dictation, 'dictation'
-            );
-            rec.constraints.append(freshConstraint);
-            await rec.compileConstraintsAsync();
-            console.log('[wake] Recognizer recreated successfully after error.');
-          } catch (recreateErr) {
-            console.error('[wake] Failed to recreate recognizer:', recreateErr.message);
-            // Break out — outer finally + catch will handle restart scheduling
-            break;
+            mainWindow.webContents.send('wake-slim');
+            showWindow();
           }
         }
-      }
+
+        try { rec.close(); } catch (_) {}
+        rec = null;
+        wakeRecognizer = null;
+        wakeRunning = false;
+
+        // Capture the follow-up query with a standard recognizeAsync
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          let qr = null;
+          try {
+            qr = new SpeechRecognizer();
+            wakeRecognizer = qr; // store so speech-stop can cancel it
+            qr.constraints.append(new SpeechRecognitionTopicConstraint(
+              SpeechRecognitionScenario.Dictation, 'dictation'));
+            await qr.compileConstraintsAsync();
+            const qres = await qr.recognizeAsync();
+            const qtext = qres && qres.text;
+            if (qtext && mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('speech-result',
+                { final: true, text: qtext });
+            }
+          } catch (e) {
+            console.warn('[wake] Query recognition failed:', e.message);
+          } finally {
+            if (qr) { try { qr.close(); } catch (_) {} }
+            if (wakeRecognizer === qr) wakeRecognizer = null;
+          }
+        }
+
+        // Restart wake loop after query completes
+        if (wakeEnabled && !wakeRestartTimer) {
+          wakeRestartTimer = setTimeout(() => {
+            wakeRestartTimer = null;
+            if (wakeEnabled) startWakeLoop();
+          }, 1000);
+        }
+      });
+
+      // Handle session ending on its own (error or external stop)
+      session.onCompleted((sender, args) => {
+        if (wakeTriggered) return;
+        console.warn('[wake] ContinuousRecognitionSession ended unexpectedly.',
+          args && args.status ? args.status : '');
+        wakeRunning = false;
+      });
+
+      console.log('[wake] Starting continuous recognition session...');
+      await session.startAsync();
+      console.log('[wake] Continuous session active — listening for Hey Cortana.');
+
+      // Block here until wakeRunning is set to false
+      // (either by wake word detection or external stop)
+      await new Promise(resolve => {
+        const check = setInterval(() => {
+          if (!wakeRunning) { clearInterval(check); resolve(); }
+        }, 200);
+      });
+
+      // Ensure session is stopped when we exit
+      try { await session.stopAsync(); } catch (_) {}
+
     } catch (outerErr) {
       wakeRunning = false;
       console.error('[wake] Fatal wake loop error:', outerErr.message || outerErr);
     } finally {
       if (rec) { try { rec.close(); } catch (_) {} }
-      wakeRecognizer = null;
-      // Auto-restart with backoff if the user still has Hey Cortana enabled
-      // and no manual dictation is currently taking over the audio input.
-      if (wakeEnabled && !wakeRestartTimer && !speechStarting && !speechRecognizer && !speechProcess) {
+      if (wakeRecognizer === rec) wakeRecognizer = null;
+
+      if (wakeEnabled && !wakeRestartTimer && !wakeTriggered
+          && !speechStarting && !speechRecognizer && !speechProcess) {
         const delay = Math.min(wakeRetries * 2000, 20000);
         wakeRetries++;
         console.warn(`[wake] Scheduling restart in ${delay}ms (retry ${wakeRetries})`);
