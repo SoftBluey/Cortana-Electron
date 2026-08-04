@@ -69,7 +69,7 @@ body.slim-mode #settings-container {
     display: none;
 }
 body.slim-mode #circle-canvas {
-    top: -40px !important;
+    top: -70px !important;
     transform: translateX(-50%) scale(0.5) !important;
     transition: none !important;
 }
@@ -270,24 +270,24 @@ body.slim-mode #search-panel {
 }
 
 #animation-container.idle #circle-canvas {
-    top: 197px;
+    top: 157px;
     height: 200px;
     width: auto;
 }
 
 #animation-container.idle #content-wrapper {
-    top: 405px;
+    top: 340px;
 }
 
 #animation-container.active #circle-canvas {
-    top: 60px;
+    top: 40px;
     height: 110px;
     width: auto;
 }
 
 #animation-container.active #content-wrapper {
-    top: 175px;
-    height: calc(100% - 175px);
+    top: 135px;
+    height: calc(100% - 135px);
     overflow-y: auto;
     overflow-x: hidden;
     padding-bottom: 20px;
@@ -393,7 +393,7 @@ body.slim-mode #search-panel {
     bottom: 0;
     left: 0;
     right: 0;
-    height: 45px;
+    min-height: 45px;
     display: flex;
     flex-direction: column;
     background-color: #171717;
@@ -403,8 +403,8 @@ body.slim-mode #search-panel {
 
 .search-input-wrapper {
     display: flex;
-    align-items: center;
-    height: 45px;
+    align-items: flex-start;
+    min-height: 45px;
     position: relative;
 }
 
@@ -447,25 +447,32 @@ body.slim-mode #search-panel {
 
 #search-bar {
     width: 100%;
-    height: 45px;
+    min-height: 45px;
     background-color: #333333;
     color: white;
     font-size: 16px;
-    padding: 0 48px 0 45px;
+    padding: 12px 48px 12px 45px;
     border: none;
     outline: none;
+    resize: none;
+    overflow-y: auto;
+    font-family: inherit;
+    line-height: 1.4;
+    max-height: 145px;
 }
 
 #search-bar:hover {
     background-color: #4c4c4c;
 }
 
-#search-bar:focus {
+#search-bar:focus,
+.search-panel.visible ~ .search-container #search-bar {
     background-color: #f3f3f3;
     color: black;
 }
 
-.search-input-wrapper:focus-within #search-icon {
+.search-input-wrapper:focus-within #search-icon,
+.search-panel.visible ~ .search-container .search-input-wrapper #search-icon {
     filter: none;
 }
 
@@ -656,7 +663,7 @@ body.slim-mode #search-panel {
     left: 0;
     width: 100%;
     height: 100%;
-    background-color: #171717;
+    background-color: transparent;
     color: white;
     display: none;
     flex-direction: column;
@@ -669,13 +676,6 @@ body.slim-mode #search-panel {
 #custom-action-form-container.visible {
     display: flex;
     animation: fadeIn 0.3s ease-in-out forwards;
-}
-
-#reminder-icon {
-    width: 48px;
-    height: 48px;
-    margin-bottom: 20px;
-    filter: hue-rotate(var(--hue-rotate-deg));
 }
 
 .reminder-title {

@@ -17,7 +17,7 @@ let editingReminderSound = null;
 let selectedPanelIndex = -1;
 let allPanelItems = [];
 
-let reminderContainer, reminderTextInput, reminderTimeInput, reminderSoundInput, reminderSaveBtn, reminderCancelBtn, reminderIcon, reminderSoundBrowseBtn;
+let reminderContainer, reminderTextInput, reminderTimeInput, reminderSoundInput, reminderSaveBtn, reminderCancelBtn, reminderSoundBrowseBtn;
 
 let settingsContainer, settingsBtn, settingsBackBtn, voiceSelect, startupToggle, startupWarning, voiceWarning, searchEngineSelect, themeColorPicker, movableToggle, pitchSlider, rateSlider, resetVoiceBtn, resetReminderSoundBtn, resetAllBtn, reminderSoundSettingInput, reminderSoundBrowseSettingBtn, reminderSoundResetSettingBtn;
 let ttsEngineSelect, edgeVoiceSelect, edgeVoiceContainer;
@@ -66,13 +66,6 @@ let timerDuration = null;
 
 
 const appRoot = path.resolve(__dirname, __dirname.includes('app.asar') ? '../assets' : 'assets');
-
-const idleVideo = path.join(appRoot, 'idle.png');
-const speakingVideo = path.join(appRoot, 'speaking.png');
-const speakingEndVideo = path.join(appRoot, 'speaking-end.png');
-const thinkingVideo = path.join(appRoot, 'thinking.png');
-const listeningVideo = path.join(appRoot, 'listening.png');
-const errorVideo = path.join(appRoot, 'error.png');
 
 const cortanaIcon = path.join(appRoot, 'cortana.png');
 const searchIconPng = path.join(appRoot, 'search.png');
@@ -176,6 +169,8 @@ function getReadableTextColor(hex) {
   return `#${nr.toString(16).padStart(2, '0')}${ng.toString(16).padStart(2, '0')}${nb.toString(16).padStart(2, '0')}`;
 }
 
+const gifCache = new Map();
+
 class GifRenderer {
   constructor(canvas) {
     this.canvas = canvas;
@@ -195,6 +190,20 @@ class GifRenderer {
 
   loadSync(path) {
     this.stop();
+    const filename = require('path').basename(path);
+    const cached = gifCache.get(filename);
+
+    if (cached) {
+      this.frames = cached.frames.map(f => ({ data: f.data, delay: f.delay }));
+      this.gifWidth = cached.gifWidth;
+      this.gifHeight = cached.gifHeight;
+      this.canvas.width = this.gifWidth;
+      this.canvas.height = this.gifHeight;
+      this.currentIndex = 0;
+      this.loops = 0;
+      return;
+    }
+
     const buffer = require('fs').readFileSync(path);
     const gif = parseGIF(buffer);
     const rawFrames = decompressFrames(gif);
@@ -257,6 +266,12 @@ class GifRenderer {
         : new Uint8ClampedArray(frameData);
       prevDisposal = raw.disposalType;
     }
+
+    gifCache.set(filename, {
+      frames: this.frames.map(f => ({ data: f.data, delay: f.delay })),
+      gifWidth: this.gifWidth,
+      gifHeight: this.gifHeight
+    });
 
     this.currentIndex = 0;
     this.loops = 0;
@@ -723,6 +738,16 @@ window.addEventListener('DOMContentLoaded', async () => {
     anim = new AnimationManager(circleCanvas);
     anim.init();
 
+    let entranceReceived = false;
+    ipcRenderer.on('trigger-enter-animation', (event, { timeSinceHidden }) => {
+        entranceReceived = true;
+        appContainer.classList.add('visible');
+        const state = timeSinceHidden > 5000
+            ? AnimationState.ENTRANCE
+            : AnimationState.RESUME;
+        anim.goToState(state);
+    });
+
     circleCanvas.addEventListener('click', () => {
       if (anim._destroyed) return;
       if (anim._isPlayingSpecial || anim.state === AnimationState.IDLE) {
@@ -762,7 +787,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     webIcon = document.getElementById('web-icon');
 
     reminderContainer = document.getElementById('reminder-container');
-    reminderIcon = document.getElementById('reminder-icon');
     reminderTextInput = document.getElementById('reminder-text-input');
     reminderTimeInput = document.getElementById('reminder-time-input');
     reminderSoundInput = document.getElementById('reminder-sound-input'); // May be null initially
@@ -827,10 +851,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('close-btn-icon').src = closeIconPng;
     searchIcon.src = cortanaIcon;
     micIcon.src = micIconPath;
-    reminderIcon.src = idleVideo;
 
-    const assetsToPreload = [idleVideo, speakingVideo, speakingEndVideo, thinkingVideo, listeningVideo, errorVideo, drumrollSound.src];
-    assetsToPreload.forEach(src => { new Image().src = src; });
+    new Image().src = drumrollSound.src;
 
     document.getElementById('close-btn').addEventListener('click', () => {
         if (document.body.classList.contains('slim-mode')) {
@@ -848,6 +870,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     
     // Search bar event listeners
     searchBar.addEventListener('input', onSearchInput);
+    searchBar.addEventListener('input', autoResizeSearchBar);
     searchBar.addEventListener('keydown', onSearchKeyDown);
     searchBar.addEventListener('blur', () => {
         if (speechActive) {
@@ -855,7 +878,9 @@ window.addEventListener('DOMContentLoaded', async () => {
             searchBar.placeholder = 'Type here to search';
             return;
         }
-        searchIcon.src = cortanaIcon;
+        if (!searchPanel.classList.contains('visible')) {
+            searchIcon.src = cortanaIcon;
+        }
         if (animationContainer.className === 'idle') return;
         blurCleanupTimer = setTimeout(() => {
             hideSearchPanel();
@@ -883,6 +908,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     let speechPartial = '';
     let speechShuffleTimer = null;
 
+    function autoResizeSearchBar() {
+        searchBar.style.height = 'auto';
+        searchBar.style.height = Math.min(searchBar.scrollHeight, 145) + 'px';
+    }
+
     function speechShuffle() {
         const chars = 'abcdefghijklmnopqrstuvwxyz';
         let s = '';
@@ -906,11 +936,23 @@ window.addEventListener('DOMContentLoaded', async () => {
         onSound.play();
         searchBar.placeholder = 'Listening...';
         searchBar.style.color = '#888888';
-        setTimeout(() => { searchBar.value = speechShuffle(); hideSearchPanel(); }, 0);
+        searchBar.value = speechShuffle();
+        searchBar.placeholder = '';
+        hideSearchPanel();
+        autoResizeSearchBar();
         speechShuffleTimer = setInterval(() => {
             if (!speechActive) return;
-            searchBar.value = speechFinal.trim() || speechShuffle();
-        }, 120);
+            if (speechFinal) {
+                searchBar.style.color = '';
+                searchBar.value = speechFinal;
+                searchBar.placeholder = speechShuffle();
+            } else {
+                searchBar.style.color = '#888888';
+                searchBar.value = speechShuffle();
+                searchBar.placeholder = '';
+            }
+            autoResizeSearchBar();
+        }, 250);
     }
 
     function startSpeechRecognition() {
@@ -923,6 +965,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         if (speechShuffleTimer) { clearInterval(speechShuffleTimer); speechShuffleTimer = null; }
         searchBar.style.color = '';
         searchBar.value = '';
+        searchBar.placeholder = 'Type here to search';
+        autoResizeSearchBar();
         micBtn.classList.remove('listening');
         ipcRenderer.send('speech-stop');
         offSound.play();
@@ -946,11 +990,13 @@ window.addEventListener('DOMContentLoaded', async () => {
         const query = speechFinal.trim();
         if (!query) {
             searchBar.value = '';
+            autoResizeSearchBar();
             setStateIdle();
             return;
         }
 
         searchBar.value = '';
+        autoResizeSearchBar();
         const categories = await generateCategorizedResults(query);
         let topItem = null;
         for (const cat of categories) {
@@ -971,9 +1017,31 @@ window.addEventListener('DOMContentLoaded', async () => {
     ipcRenderer.on('speech-result', (event, data) => {
         if (!speechActive) return;
         if (data.final) {
-            speechFinal += (data.text || '') + ' ';
-            searchBar.value = speechFinal.trim();
-            submitVoiceSearch();
+            const fullText = (data.text || '').trim();
+            if (!fullText) { submitVoiceSearch(); return; }
+            const words = fullText.split(/\s+/);
+            let wordIndex = 0;
+            speechFinal = '';
+            searchBar.style.color = '';
+            const typeWord = () => {
+                if (!speechActive) return;
+                if (wordIndex < words.length) {
+                    speechFinal += (wordIndex > 0 ? ' ' : '') + words[wordIndex];
+                    searchBar.value = speechFinal;
+                    searchBar.placeholder = speechShuffle();
+                    autoResizeSearchBar();
+                    wordIndex++;
+                    setTimeout(typeWord, 200);
+                } else {
+                    setTimeout(() => {
+                        if (!speechActive) return;
+                        submitVoiceSearch();
+                    }, 300);
+                }
+            };
+            typeWord();
+        } else {
+            speechFinal = (data.text || '').trim();
         }
     });
 
@@ -1187,16 +1255,6 @@ window.addEventListener('DOMContentLoaded', async () => {
         appContainer.classList.remove('visible');
     });
 
-    let entranceReceived = false;
-    ipcRenderer.on('trigger-enter-animation', (event, { timeSinceHidden }) => {
-        entranceReceived = true;
-        appContainer.classList.add('visible');
-        const state = timeSinceHidden > 5000
-            ? AnimationState.ENTRANCE
-            : AnimationState.RESUME;
-        anim.goToState(state);
-    });
-
     ipcRenderer.on('command-failed', (event, { command }) => {
         let errorText = `Sorry, I had trouble with that command.`;
         if (command === 'open-application') {
@@ -1218,7 +1276,8 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     animationContainer.className = 'idle';
     if (!entranceReceived) {
-        anim.goToState(AnimationState.IDLE);
+        appContainer.classList.add('visible');
+        anim.goToState(AnimationState.ENTRANCE);
     }
 
     const p = document.createElement('p');
@@ -1255,6 +1314,7 @@ async function onSearchInput(event) {
         return;
     }
     const categories = await generateCategorizedResults(query);
+    if (searchBar.value.trim() !== query) return;
     showSearchPanel(categories);
 }
 
@@ -2362,7 +2422,7 @@ function setStateIdle() {
     isBusy = false;
 
     animationContainer.className = 'idle';
-    if (document.activeElement === searchBar) {
+    if (document.activeElement === searchBar || searchPanel.classList.contains('visible')) {
         searchIcon.src = searchIconPng;
     } else {
         searchIcon.src = cortanaIcon;

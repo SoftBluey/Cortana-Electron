@@ -296,7 +296,7 @@ app.whenReady().then(async () => {
 
   await loadSettings();
   await loadReminders();
-  await scanApplications();
+  scanApplications();
 
   let speechStarting = false;
   let speechCancelled = false;
@@ -416,10 +416,6 @@ app.whenReady().then(async () => {
       try { speechRecognizer.close(); } catch (e) {}
       speechRecognizer = null;
     }
-    if (wakeRecognizer) {
-      try { wakeRecognizer.close(); } catch (_) {}
-      wakeRecognizer = null;
-    }
     stopSapiFallback();
     if (wakeEnabled && !wakeRunning && !wakeRestartTimer) {
       wakeRestartTimer = setTimeout(() => {
@@ -498,13 +494,16 @@ app.whenReady().then(async () => {
       } catch (e) {
         if (!wakeRunning) break;
         if (e.message && e.message.includes('0x80000013')) {
+          try { rec.close(); } catch (_) {}
           await new Promise(r => setTimeout(r, 3000));
           continue;
         }
+        try { rec.close(); } catch (_) {}
         wakeRetries++;
-        const delay = Math.min(wakeRetries * 3000, 30000);
+        const delay = Math.min(wakeRetries * 3000, 5000);
         await new Promise(r => setTimeout(r, delay));
       } finally {
+        if (rec) { try { rec.close(); } catch (_) {} }
         wakeRecognizer = null;
       }
     }
@@ -514,8 +513,7 @@ app.whenReady().then(async () => {
 
   if (settings.heyCortana) {
     wakeEnabled = true;
-    setTimeout(async () => {
-      try { const w = new SpeechRecognizer(); w.close(); } catch (_) {}
+    setTimeout(() => {
       startWakeLoop();
     }, 3000);
   }
@@ -699,10 +697,6 @@ function registerIpcHandlers() {
     if (speechRecognizer) {
       try { speechRecognizer.close(); } catch (_) {}
       speechRecognizer = null;
-    }
-    if (wakeRecognizer) {
-      try { wakeRecognizer.close(); } catch (_) {}
-      wakeRecognizer = null;
     }
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.hide();
@@ -1260,7 +1254,7 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
 
   ipcMain.handle("wikipedia-lookup", async (event, query) => {
     try {
-      const ua = "Cortana-Electron/5.1 (https://github.com/SoftBluey/Cortana-Electron)";
+      const ua = `Cortana/${app.getVersion()} (https://github.com/SoftBluey/Cortana-Electron)`;
       const fetchJson = (url) => new Promise((resolve, reject) => {
         const req = https.get(url, { headers: { "User-Agent": ua } }, (res) => {
           if (res.statusCode !== 200) { reject(new Error(`HTTP ${res.statusCode}`)); return; }
@@ -1338,6 +1332,7 @@ function createWindow() {
   const winOptions = {
     width: winWidth,
     height: winHeight,
+    icon: iconPath,
     frame: settings.isMovable,
     transparent: !settings.isMovable,
     resizable: settings.isMovable,

@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="UTF-8" />
-    <title>Cortana Client</title>
+    <title>Cortana</title>
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
@@ -30,7 +30,6 @@
             </div>
           </div>
           <div id="reminder-container">
-            <img id="reminder-icon" alt="Cortana Icon" />
             <p class="reminder-title">What do you want to be reminded about?</p>
             <div class="reminder-form">
               <label for="reminder-text-input" class="reminder-label-gray"
@@ -368,12 +367,12 @@
       <div class="search-container">
         <div class="search-input-wrapper">
           <img id="search-icon" alt="Cortana Icon" />
-          <input
-            type="text"
+          <textarea
             id="search-bar"
+            rows="1"
             placeholder="Type here to search"
             autocomplete="off"
-          />
+          ></textarea>
           <button id="mic-btn" class="mic-btn" title="Voice search">
             <img id="mic-icon" alt="Microphone" />
           </button>
