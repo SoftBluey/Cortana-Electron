@@ -2421,6 +2421,7 @@ function onActionFinished() {
 }
 
 function setStateIdle() {
+    searchIcon.src = cortanaIcon;
     if (settingsContainer.classList.contains('visible')) return;
     if (animationContainer.className === 'idle' && document.activeElement === searchBar) return;
     
