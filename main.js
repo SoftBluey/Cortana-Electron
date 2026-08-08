@@ -573,11 +573,16 @@ if (gotTheLock) {
       try { speechRecognizer.close(); } catch (e) {}
       speechRecognizer = null;
     }
+    if (wakeRecognizer) {
+      try { wakeRecognizer.close(); } catch (_) {}
+      wakeRecognizer = null;
+    }
     stopSapiFallback();
-    if (wakeEnabled && !wakeRunning && !wakeRestartTimer) {
+    if (wakeEnabled && !wakeRunning && !wakeRestartTimer && !isSettingsVisible) {
+      wakeBackoff = 0;
       wakeRestartTimer = setTimeout(() => {
         wakeRestartTimer = null;
-        startWakeLoop();
+        if (wakeEnabled && !isSettingsVisible) startWakeLoop();
       }, 500);
     }
   });
@@ -612,6 +617,7 @@ if (gotTheLock) {
 
   async function startWakeLoop() {
     if (wakeRunning) return;
+    if (isSettingsVisible) return;
     if (speechStarting || speechRecognizer || speechProcess) {
       console.log('[wake] Deferring: manual speech active.');
       return;
@@ -688,10 +694,10 @@ if (gotTheLock) {
           }
         }
 
-        if (wakeEnabled && !wakeRestartTimer) {
+        if (wakeEnabled && !wakeRestartTimer && !isSettingsVisible) {
           wakeRestartTimer = setTimeout(() => {
             wakeRestartTimer = null;
-            if (wakeEnabled) startWakeLoop();
+            if (wakeEnabled && !isSettingsVisible) startWakeLoop();
           }, 1000);
         }
       });
@@ -724,7 +730,8 @@ if (gotTheLock) {
       if (wakeRecognizer === rec) wakeRecognizer = null;
 
       if (wakeEnabled && !wakeRestartTimer && !wakeTriggered
-          && !speechStarting && !speechRecognizer && !speechProcess) {
+          && !speechStarting && !speechRecognizer && !speechProcess
+          && !isSettingsVisible) {
 
         const isExpectedEnd = completionStatus === 0
                            || completionStatus === 5
@@ -735,7 +742,7 @@ if (gotTheLock) {
           console.log('[wake] Restarting in 1000ms');
           wakeRestartTimer = setTimeout(() => {
             wakeRestartTimer = null;
-            if (wakeEnabled) startWakeLoop();
+            if (wakeEnabled && !isSettingsVisible) startWakeLoop();
           }, 1000);
         } else {
           const delay = Math.min(5000 * Math.pow(2, wakeBackoff), 30000);
@@ -744,7 +751,7 @@ if (gotTheLock) {
             completionStatus + '); retrying in ' + delay + 'ms');
           wakeRestartTimer = setTimeout(() => {
             wakeRestartTimer = null;
-            if (wakeEnabled) startWakeLoop();
+            if (wakeEnabled && !isSettingsVisible) startWakeLoop();
           }, delay);
         }
       }
@@ -769,14 +776,22 @@ if (gotTheLock) {
   ipcMain.on("set-settings-visibility", (event, visible) => {
     isSettingsVisible = visible;
     if (visible) {
+      speechCancelled = true;
       if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
       if (wakeRecognizer) {
         wakeRunning = false;
         try { wakeRecognizer.close(); } catch (_) {}
         wakeRecognizer = null;
       }
-    } else if (wakeEnabled && !wakeRunning && !wakeRestartTimer) {
-      startWakeLoop();
+      if (speechRecognizer) {
+        try { speechRecognizer.close(); } catch (_) {}
+        speechRecognizer = null;
+      }
+      stopSapiFallback();
+    } else if (wakeEnabled) {
+      if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
+      wakeBackoff = 0;
+      if (!wakeRunning) startWakeLoop();
     }
   });
 

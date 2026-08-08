@@ -1079,6 +1079,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     micBtn.addEventListener('mousedown', (e) => {
         e.preventDefault();
+        if (settingsContainer.classList.contains('visible')) return;
         if (speechActive) {
             stopSpeechRecognition();
         } else {
@@ -1088,11 +1089,13 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
 
     ipcRenderer.on('wake-slim', () => {
+        if (settingsContainer.classList.contains('visible')) return;
         document.body.classList.add('slim-mode');
         startSpeechUI();
     });
 
     ipcRenderer.on('wake-listen', () => {
+        if (settingsContainer.classList.contains('visible')) return;
         if (document.body.classList.contains('slim-mode')) {
             document.body.classList.remove('slim-mode');
         }
@@ -1714,6 +1717,7 @@ function updatePanelSelection() {
 }
 
 async function showSettingsUI() {
+    if (speechActive) stopSpeechRecognition();
     animationContainer.style.display = 'none';
     reminderContainer.classList.remove('visible');
     ipcRenderer.send('set-settings-visibility', true);
