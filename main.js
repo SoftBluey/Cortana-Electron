@@ -465,6 +465,7 @@ if (gotTheLock) {
     SpeechRecognizer,
     SpeechRecognitionTopicConstraint,
     SpeechRecognitionScenario,
+    SpeechRecognitionListConstraint,
   } = require(bindingsPath);
 
   function startSapiFallback() {
@@ -564,6 +565,7 @@ if (gotTheLock) {
   });
 
   let wakeRestartTimer = null;
+  let wakeBackoff = 0;
 
   ipcMain.on('speech-stop', () => {
     speechCancelled = true;
@@ -616,13 +618,14 @@ if (gotTheLock) {
     wakeRunning = true;
     let wakeTriggered = false;
     let rec = null;
+    let completionStatus = null;
 
     try {
       rec = new SpeechRecognizer();
       wakeRecognizer = rec;
 
-      const constraint = new SpeechRecognitionTopicConstraint(
-        SpeechRecognitionScenario.Dictation, 'dictation');
+      const constraint = new SpeechRecognitionListConstraint(
+        ['hey cortana', 'cortana'], 'wake');
       rec.constraints.append(constraint);
       await rec.compileConstraintsAsync();
 
@@ -636,6 +639,7 @@ if (gotTheLock) {
           text = (args.result && args.result.text || '').toLowerCase().trim();
         } catch (_) {}
         if (!(text.includes('hey cortana') || text.includes('cortana'))) return;
+        if (isSettingsVisible) return;
 
         wakeTriggered = true;
         console.log('[wake] Wake word detected:', text);
@@ -690,13 +694,15 @@ if (gotTheLock) {
       // Handle session ending on its own (error or external stop)
       session.onCompleted((sender, args) => {
         if (wakeTriggered) return;
-        console.warn('[wake] ContinuousRecognitionSession ended unexpectedly.',
-          args && args.status ? args.status : '');
+        completionStatus = args && args.status != null ? args.status : null;
+        console.warn('[wake] ContinuousRecognitionSession ended (status ' +
+          completionStatus + ')');
         wakeRunning = false;
       });
 
       console.log('[wake] Starting continuous recognition session...');
       await session.startAsync();
+      wakeBackoff = 0;
       console.log('[wake] Continuous session active — listening for Hey Cortana.');
 
       // Block here until wakeRunning is set to false
@@ -712,6 +718,7 @@ if (gotTheLock) {
 
     } catch (outerErr) {
       wakeRunning = false;
+      completionStatus = 'error';
       console.error('[wake] Fatal wake loop error:', outerErr.message || outerErr);
     } finally {
       if (rec) { try { rec.close(); } catch (_) {} }
@@ -719,11 +726,24 @@ if (gotTheLock) {
 
       if (wakeEnabled && !wakeRestartTimer && !wakeTriggered
           && !speechStarting && !speechRecognizer && !speechProcess) {
-        console.warn('[wake] Restarting in 1000ms');
-        wakeRestartTimer = setTimeout(() => {
-          wakeRestartTimer = null;
-          if (wakeEnabled) startWakeLoop();
-        }, 1000);
+        const expectedEnd = completionStatus === 7 || completionStatus === 5;
+        if (expectedEnd) {
+          wakeBackoff = 0;
+          console.log('[wake] Restarting in 1000ms');
+          wakeRestartTimer = setTimeout(() => {
+            wakeRestartTimer = null;
+            if (wakeEnabled) startWakeLoop();
+          }, 1000);
+        } else {
+          const delay = Math.min(5000 * Math.pow(2, wakeBackoff), 30000);
+          wakeBackoff++;
+          console.warn('[wake] Session ended abnormally (status ' +
+            completionStatus + '); retrying in ' + delay + 'ms');
+          wakeRestartTimer = setTimeout(() => {
+            wakeRestartTimer = null;
+            if (wakeEnabled) startWakeLoop();
+          }, delay);
+        }
       }
     }
   }
