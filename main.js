@@ -118,6 +118,22 @@ function getEvaVoiceStatus() {
   };
 }
 
+function readLogRetry(logPath, done) {
+  const attempts = 10;
+  const tryRead = (n) => {
+    try {
+      done(fssync.readFileSync(logPath, "utf8"));
+    } catch (_) {
+      if (n < attempts) {
+        setTimeout(() => tryRead(n + 1), 150);
+      } else {
+        done("");
+      }
+    }
+  };
+  tryRead(0);
+}
+
 function runElevatedVoiceScript(action) {
   const scriptPath = evaInstallerScriptPath();
   const voiceDataDir = evaVoiceDataDir();
@@ -150,31 +166,31 @@ function runElevatedVoiceScript(action) {
       (error, stdout, stderr) => {
         const exitMatch = /EXIT:(\d+)/.exec(stdout || "");
         const exitCode = exitMatch ? parseInt(exitMatch[1], 10) : null;
-        let log = "";
-        try {
-          log = fssync.readFileSync(logPath, "utf8");
-        } catch (_) {}
-        try {
-          fssync.unlinkSync(logPath);
-        } catch (_) {}
-        if (exitCode === null && error) {
-          const text = `${error.message} ${stderr || ""}`.trim();
-          resolve({
-            success: false,
-            canceled: /canceled|cancelled|user declined|denied/i.test(text),
-            error: text,
-          });
-          return;
-        }
-        if (exitCode === 0) {
-          resolve({ success: true, log });
-        } else {
-          resolve({
-            success: false,
-            error: `Installer exited with code ${exitCode}`,
-            log,
-          });
-        }
+        readLogRetry(logPath, (log) => {
+          if (exitCode === 0) {
+            try {
+              fssync.unlinkSync(logPath);
+            } catch (_) {}
+          }
+          if (exitCode === null && error) {
+            const text = `${error.message} ${stderr || ""}`.trim();
+            resolve({
+              success: false,
+              canceled: /canceled|cancelled|user declined|denied/i.test(text),
+              error: text,
+            });
+            return;
+          }
+          if (exitCode === 0) {
+            resolve({ success: true, log });
+          } else {
+            resolve({
+              success: false,
+              error: `Installer exited with code ${exitCode}. ${log}`,
+              log,
+            });
+          }
+        });
       }
     );
     let logged = 0;

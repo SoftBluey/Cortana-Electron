@@ -175,6 +175,7 @@ function getReadableTextColor(hex) {
 }
 
 const gifCache = new Map();
+const GIF_CACHE_MAX = 20;
 
 class GifRenderer {
   constructor(canvas) {
@@ -275,6 +276,10 @@ class GifRenderer {
       prevDisposal = raw.disposalType;
     }
 
+    if (gifCache.size >= GIF_CACHE_MAX) {
+      const firstKey = gifCache.keys().next().value;
+      gifCache.delete(firstKey);
+    }
     gifCache.set(filename, {
       frames: this.frames.map(f => ({ data: f.data, delay: f.delay })),
       gifWidth: this.gifWidth,
@@ -659,10 +664,15 @@ const WINDOWS_SETTINGS = [
 
 const idleMessages = [
     "What's on your mind?",
-    "Hello!",
+    "Hello there.",
     "How can I help?",
-    "Hi!",
-    "Ask me anything."
+    "Ask me anything.",
+    "Hi. What's on your mind?",
+    "Need anything?",
+    "What can I do for you?",
+    "Hey there.",
+    "What can I help you with?",
+    "Hi there."
 ];
 
 function getIdleMessage() {
@@ -1320,11 +1330,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
 
     ipcRenderer.on('command-failed', (event, { command }) => {
-        let errorText = `Sorry, I had trouble with that command.`;
+        let errorText = "Sorry, something went wrong. Try again in a little bit.";
         if (command === 'open-application') {
-            errorText = `Sorry, I had trouble opening that. Make sure it's installed correctly.`;
+            errorText = "Sorry, something went wrong. Try again in a little bit.";
         } else if (command === 'run-command') {
-            errorText = `Sorry, that command failed to run.`;
+            errorText = "Sorry, something went wrong. Try again in a little bit.";
         }
         displayAndSpeak(errorText, onActionFinished, {}, true);
     });
@@ -2251,8 +2261,7 @@ function updateTtsEngineUI() {
     const isEdge = ttsEngine === 'edge';
     edgeVoiceContainer.style.display = isEdge ? 'flex' : 'none';
     voiceSelect.parentElement.style.display = isEdge ? 'none' : 'flex';
-    pitchSlider.parentElement.style.display = isEdge ? 'none' : 'flex';
-    rateSlider.parentElement.style.display = isEdge ? 'none' : 'flex';
+    // Pitch and rate sliders work for Edge TTS too — don't hide them
 }
 
 async function loadEdgeVoices() {
@@ -2337,11 +2346,11 @@ function onPresetChanged() {
     if (preset) {
         aiApiUrlInput.value = preset.url;
         aiModelInput.value = preset.local ? '' : preset.model;
-        openaiApiKeyInput.value = '';
         openaiApiKeyInput.placeholder = preset.keyHint || 'No API key needed';
-        ipcRenderer.send('set-setting', { key: 'openaiApiKey', value: '' });
         ipcRenderer.send('set-setting', { key: 'aiApiUrl', value: preset.url });
-        ipcRenderer.send('set-setting', { key: 'aiModel', value: aiModelInput.value });
+        if (aiModelInput.value) {
+            ipcRenderer.send('set-setting', { key: 'aiModel', value: aiModelInput.value });
+        }
     }
     showSavedToast();
 }
@@ -2701,7 +2710,7 @@ async function performWebSearch(query) {
     } else {
         const p = document.createElement('p');
         p.className = 'fade-in-item';
-        p.textContent = 'No results found.';
+        p.textContent = 'No results found. Try a different spelling or search term.';
         resultsDisplay.appendChild(p);
         anim.goToState(AnimationState.SPEAKING_BEGIN);
         setTimeout(() => {
@@ -2853,7 +2862,7 @@ function calculate(query) {
         responseText = `The answer is ${result}.`;
         displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, false);
     } catch (error) {
-        responseText = `Sorry, that doesn't look like a valid calculation.`;
+        responseText = "That doesn't look like a valid calculation.";
         displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, true);
     }
 }
@@ -2896,7 +2905,7 @@ async function getWeather(location) {
         displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, false);
 
     } catch (error) {
-        responseText = `Sorry, an unexpected error occurred while getting the weather.`;
+        responseText = "Sorry, something went wrong. Try again in a little bit.";
         displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, true);
     }
 }
@@ -3147,7 +3156,7 @@ function onSaveReminder() {
 
         if (editingReminderId) {
             ipcRenderer.send('update-reminder', { id: editingReminderId, ...reminderPayload });
-            text = `OK. I've updated your reminder.`;
+            text = "Done. I've updated your reminder.";
         } else {
             ipcRenderer.send('set-reminder', reminderPayload);
             const friendlyTime = reminderDate.toLocaleString([], formatDateTimeOptions());
@@ -3471,35 +3480,35 @@ const commands = [
     {
         regex: /who (are you|made you|created you|built you)\??/i,
         handler: () => {
-            const response = "I am a remake of the 1607 styled Cortana from late 2016 Windows 10, created by BlueySoft.";
+            const response = "I'm Cortana. I'm a remake of the 1607 version from Windows 10, brought back by BlueySoft.";
             displayAndSpeak(response, onActionFinished, {}, false);
         }
     },
     {
         regex: /are you official\??/i,
         handler: () => {
-            const response = "No. I am a third party remade client made by BlueySoft. This project is not affiliated with Microsoft. I exist because she had fond memories with me.";
+            const response = "No — I'm a third-party remake by BlueySoft, not affiliated with Microsoft. I'm here because someone had fond memories of me.";
             displayAndSpeak(response, onActionFinished, {}, false);
         }
     },
     {
         regex: /what can you do|what are your skills|help|what can i ask you\??/i,
         handler: () => {
-            const response = "I can get the time, date, and weather. I can also do math and unit conversions, set reminders, timers, and alarms, control volume, open apps, create calendar events, look up information, tell jokes, and search the web.";
+            const response = "I can help with your day. I can tell you the time, date, and weather; do math and unit conversions; set reminders, timers, and alarms; control volume; open apps; create calendar events; look things up; tell jokes; and search the web.";
             displayAndSpeak(response, onActionFinished, {}, false);
         }
     },
     {
         regex: /marry me\??/i,
         handler: () => {
-            const response = "I honestly don't think that's in the cards for us.";
+            const response = "I'm flattered, but I don't think that's in the cards for us.";
             displayAndSpeak(response, onActionFinished, {}, false);
         }
     },
     {
         regex: /(hide|dispose of) a body\??/i,
         handler: () => {
-            const response = "What kind of assistant do you think I am??";
+            const response = "I'm afraid I can't help with that.";
             displayAndSpeak(response, onActionFinished, {}, true);
         }
     },
@@ -3752,7 +3761,7 @@ const commands = [
                     anim.goToState(AnimationState.SPEAKING_BEGIN);
                     speak(result.extract, onActionFinished);
                 } else {
-                    displayAndSpeak(result.error || "Sorry, I couldn't find information on that.", onActionFinished, {}, true);
+                    displayAndSpeak(result.error || "Sorry, something went wrong. Try again in a little bit.", onActionFinished, {}, true);
                 }
             }).catch(() => {
                 performWebSearch(topic);
@@ -3762,14 +3771,14 @@ const commands = [
     {
         regex: /^(what's up|sup|how's it going|how are you)\??$/i,
         handler: () => {
-            const response = "Nothing much. What may I help you with?";
+            ("Not much. What can I do for you?")
             displayAndSpeak(response, onActionFinished, {}, false);
         }
     },
     {
         regex: /^(thanks|thank you|thx|ty)(.+)?(!|\.)?$/i,
         handler: () => {
-            const responses = ["You're welcome!", "No problem.", "Happy to help!"];
+            const responses = ["You're welcome.", "Happy to help.", "Of course."];
             const response = responses[Math.floor(Math.random() * responses.length)];
             displayAndSpeak(response, onActionFinished, {}, false);
         }
@@ -3777,7 +3786,7 @@ const commands = [
     {
         regex: /^(bye|goodbye|see ya|later|cya|see you later)(!|\.)?$/i,
         handler: () => {
-            const responses = ["Goodbye!", "See you later.", "Catch you later."];
+            const responses = ["Goodbye.", "See you later.", "Talk to you later."];
             const response = responses[Math.floor(Math.random() * responses.length)];
             displayAndSpeak(response, onActionFinished, {}, false);
         }
@@ -3792,7 +3801,15 @@ const commands = [
     {
         regex: /^(hello|hi|hey|yo|heya|hey there)(!|\.)?$/i,
         handler: () => {
-            const responses = ["Hello there. How can I help you?", "Hi! What's on your mind?", "Hey! What can I do for you?"];
+            const hour = new Date().getHours();
+            const responses = [
+                "Hello there. What can I do for you?",
+                "Hi. What's on your mind?",
+                "Hey. What can I do for you?",
+            ];
+            if (hour < 12) responses.push("Good morning!");
+            else if (hour < 17) responses.push("Hello there.");
+            else responses.push("Good evening.");
             const response = responses[Math.floor(Math.random() * responses.length)];
             displayAndSpeak(response, onActionFinished, {}, false);
         }
@@ -4062,7 +4079,12 @@ async function executeActionSequence(actions) {
             return;
         }
     }
-    onActionFinished();
+    // Don't call onActionFinished if the last action was 'speak'
+    // — the speak callback already handles the animation transition.
+    const lastAction = actions[actions.length - 1];
+    if (!lastAction || lastAction.type !== 'speak') {
+        onActionFinished();
+    }
 }
 
 function renderActionSequenceUI(actions) {
