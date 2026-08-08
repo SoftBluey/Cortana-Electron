@@ -45,10 +45,6 @@
         "to": "speech.ps1"
       },
       {
-        "from": "wake.grxml",
-        "to": "wake.grxml"
-      },
-      {
         "from": "scripts/install-eva-voice.ps1",
         "to": "install-eva-voice.ps1"
       },
@@ -73,7 +69,6 @@
             "SpeechRecognizer",
             "SpeechRecognitionTopicConstraint",
             "SpeechRecognitionListConstraint",
-            "SpeechRecognitionGrammarFileConstraint",
             "SpeechRecognitionResult",
             "SpeechContinuousRecognitionSession",
             "SpeechRecognitionHypothesis"
