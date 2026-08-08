@@ -505,7 +505,11 @@ if (gotTheLock) {
   }
 
   ipcMain.on('speech-start', async () => {
-    if (isSettingsVisible) return;
+    if (isSettingsVisible) {
+      if (mainWindow && !mainWindow.isDestroyed())
+        mainWindow.webContents.send('speech-force-stop');
+      return;
+    }
     if (speechStarting || speechProcess) return;
     speechStarting = true;
     try {
@@ -573,7 +577,7 @@ if (gotTheLock) {
       try { speechRecognizer.close(); } catch (e) {}
       speechRecognizer = null;
     }
-    if (wakeRecognizer) {
+    if (wakeRecognizer && !wakeRunning) {
       try { wakeRecognizer.close(); } catch (_) {}
       wakeRecognizer = null;
     }
@@ -682,9 +686,9 @@ if (gotTheLock) {
             await qr.compileConstraintsAsync();
             const qres = await qr.recognizeAsync();
             const qtext = qres && qres.text;
-            if (qtext && mainWindow && !mainWindow.isDestroyed()) {
+            if (mainWindow && !mainWindow.isDestroyed()) {
               mainWindow.webContents.send('speech-result',
-                { final: true, text: qtext });
+                { final: true, text: qtext || '' });
             }
           } catch (e) {
             console.warn('[wake] Query recognition failed:', e.message);
@@ -788,6 +792,9 @@ if (gotTheLock) {
         speechRecognizer = null;
       }
       stopSapiFallback();
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('speech-force-stop');
+      }
     } else if (wakeEnabled) {
       if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
       wakeBackoff = 0;

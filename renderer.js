@@ -30,6 +30,8 @@ let aiModelInput, aiApiUrlInput, aiSystemPromptInput, aiPresetSelect, aiCustomFi
 let useAccentToggle;
 let heyCortanaToggle;
 
+let _stopSpeechFromOutside = null;
+
 let availableVoices = [];
 let customActions = [];
 let currentVoice = null;
@@ -85,6 +87,7 @@ const errorSound = new Audio(path.join(appRoot, 'error.wav'));
 const drumrollSound = new Audio(path.join(appRoot, 'drumroll.mp3'));
 
 let isBusy = false;
+let micBtnBusy = false;
 let lastQuery = '';
 let anim = null;
 
@@ -950,6 +953,13 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
 
     function startSpeechUI() {
+        window.speechSynthesis.cancel();
+        if (currentEdgeAudio) { currentEdgeAudio.pause(); currentEdgeAudio = null; }
+        clearTimeout(finishSpeakingTimeout);
+        finishSpeakingTimeout = null;
+        requestSound.pause();
+        requestSound.currentTime = 0;
+        isBusy = false;
         speechActive = true;
         speechFinal = '';
         speechPartial = '';
@@ -1000,6 +1010,10 @@ window.addEventListener('DOMContentLoaded', async () => {
         }
         setStateIdle();
     }
+
+    _stopSpeechFromOutside = () => {
+        if (speechActive) stopSpeechRecognition();
+    };
 
     async function submitVoiceSearch() {
         speechActive = false;
@@ -1080,10 +1094,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     micBtn.addEventListener('mousedown', (e) => {
         e.preventDefault();
         if (settingsContainer.classList.contains('visible')) return;
+        if (micBtnBusy) return;
+        micBtnBusy = true;
+        setTimeout(() => { micBtnBusy = false; }, 300);
         if (speechActive) {
             stopSpeechRecognition();
         } else {
-            speechActive = true;
             startSpeechRecognition();
         }
     });
@@ -1102,6 +1118,26 @@ window.addEventListener('DOMContentLoaded', async () => {
         startSpeechUI();
     });
 
+    ipcRenderer.on('speech-force-stop', () => {
+        if (speechActive) {
+            speechActive = false;
+            if (speechShuffleTimer) { clearInterval(speechShuffleTimer); speechShuffleTimer = null; }
+            searchBar.style.color = '';
+            searchBar.value = '';
+            searchBar.placeholder = 'Type here to search';
+            autoResizeSearchBar();
+            micBtn.classList.remove('listening');
+        }
+        window.speechSynthesis.cancel();
+        if (currentEdgeAudio) { currentEdgeAudio.pause(); currentEdgeAudio = null; }
+        clearTimeout(finishSpeakingTimeout);
+        finishSpeakingTimeout = null;
+        requestSound.pause();
+        requestSound.currentTime = 0;
+        isBusy = false;
+        document.body.classList.remove('slim-mode');
+        setStateIdle();
+    });
 
     webLink.addEventListener('click', (e) => {
         e.preventDefault();
@@ -1717,7 +1753,7 @@ function updatePanelSelection() {
 }
 
 async function showSettingsUI() {
-    if (speechActive) stopSpeechRecognition();
+    _stopSpeechFromOutside?.();
     animationContainer.style.display = 'none';
     reminderContainer.classList.remove('visible');
     ipcRenderer.send('set-settings-visibility', true);
