@@ -20,6 +20,7 @@ let allPanelItems = [];
 let reminderContainer, reminderTextInput, reminderTimeInput, reminderSoundInput, reminderSaveBtn, reminderCancelBtn, reminderSoundBrowseBtn;
 
 let settingsContainer, settingsBtn, settingsBackBtn, voiceSelect, startupToggle, startupWarning, voiceWarning, searchEngineSelect, themeColorPicker, movableToggle, pitchSlider, rateSlider, resetVoiceBtn, resetReminderSoundBtn, resetAllBtn, reminderSoundSettingInput, reminderSoundBrowseSettingBtn, reminderSoundResetSettingBtn;
+let evaVoiceContainer, evaVoiceStatus, installEvaVoiceBtn, uninstallEvaVoiceBtn;
 let ttsEngineSelect, edgeVoiceSelect, edgeVoiceContainer;
 let timeFormatSelect;
 let idleGreetingModeSelect, specificGreetingContainer, specificGreetingSelect, customGreetingContainer, customGreetingInput;
@@ -832,6 +833,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     resetReminderSoundBtn = document.getElementById('reset-reminder-sound-btn');
     resetThemeBtn = document.getElementById('reset-theme-btn');
     resetAllBtn = document.getElementById('reset-all-btn');
+    evaVoiceContainer = document.getElementById('eva-voice-container');
+    evaVoiceStatus = document.getElementById('eva-voice-status');
+    installEvaVoiceBtn = document.getElementById('install-eva-voice-btn');
+    uninstallEvaVoiceBtn = document.getElementById('uninstall-eva-voice-btn');
 
     ttsEngineSelect = document.getElementById('tts-engine-select');
     edgeVoiceSelect = document.getElementById('edge-voice-select');
@@ -1152,6 +1157,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     resetReminderSoundBtn.addEventListener('click', onResetReminderSound);
     resetThemeBtn.addEventListener('click', onResetThemeColors);
     resetAllBtn.addEventListener('click', onResetAllSettings);
+    installEvaVoiceBtn.addEventListener('click', onInstallEvaVoice);
+    uninstallEvaVoiceBtn.addEventListener('click', onUninstallEvaVoice);
     
     aiToggle.addEventListener('change', onAIChanged);
     openaiApiKeyInput.addEventListener('input', onOpenAIKeyChanged);
@@ -1296,8 +1303,24 @@ window.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
+    ipcRenderer.on('eva-voice-progress', (event, line) => {
+        if (!evaVoiceStatus) return;
+        let text = line;
+        if (/^STATUS:/i.test(line)) text = line.replace(/^STATUS:/i, '');
+        else if (/^FILE:/i.test(line)) text = 'Copying ' + line.replace(/^FILE:/i, '') + '...';
+        else if (/^DEL:/i.test(line)) text = 'Removing ' + line.replace(/^DEL:/i, '') + '...';
+        else if (/^REG-:/i.test(line)) text = 'Removing registry token...';
+        else if (/^REG:/i.test(line)) text = 'Writing registry token...';
+        else if (/^OK:/i.test(line)) text = line.replace(/^OK:/i, '');
+        else if (/^ERROR:/i.test(line)) text = line.replace(/^ERROR:/i, '');
+        evaVoiceStatus.textContent = text;
+        evaVoiceStatus.style.color = /^ERROR:/i.test(line) ? '#e74c3c' : '#a2a2a2';
+        evaVoiceStatus.style.display = 'block';
+    });
+
     await loadAndApplySettings();
     setupTTS();
+    refreshEvaVoiceStatus();
 
     animationContainer.className = 'idle';
     if (!entranceReceived) {
@@ -1663,6 +1686,7 @@ function onSearchKeyDown(event) {
             if (enterIndex >= 0 && enterIndex < enterItems.length) {
                 searchBar.value = '';
                 enterItems[enterIndex].action();
+                searchIcon.src = cortanaIcon;
             } else {
                 onSearch();
             }
@@ -2078,6 +2102,83 @@ function onResetAllSettings() {
     }
 }
 
+
+async function refreshEvaVoiceStatus() {
+    if (!evaVoiceContainer || !evaVoiceStatus) return;
+    let status;
+    try {
+        status = await ipcRenderer.invoke('eva-voice-status');
+    } catch (err) {
+        return;
+    }
+    if (!status.voiceDataPresent) {
+        evaVoiceContainer.style.display = 'none';
+        return;
+    }
+    evaVoiceContainer.style.display = 'flex';
+    evaVoiceStatus.style.color = '#a2a2a2';
+    if (status.installed) {
+        evaVoiceStatus.textContent = 'Installed (Microsoft Eva Mobile). A restart may be needed before it appears in the voice list.';
+        installEvaVoiceBtn.style.display = 'none';
+        uninstallEvaVoiceBtn.style.display = 'inline-block';
+    } else {
+        evaVoiceStatus.textContent = 'Not installed. Installs Cortana\u2019s original Eva voice for local (offline) speech.';
+        installEvaVoiceBtn.style.display = 'inline-block';
+        uninstallEvaVoiceBtn.style.display = 'none';
+    }
+}
+
+async function onInstallEvaVoice() {
+    if (!installEvaVoiceBtn || !evaVoiceStatus) return;
+    installEvaVoiceBtn.disabled = true;
+    installEvaVoiceBtn.textContent = 'Installing...';
+    evaVoiceStatus.textContent = 'Requesting administrator permission...';
+    evaVoiceStatus.style.color = '#a2a2a2';
+    evaVoiceStatus.style.display = 'block';
+    try {
+        const result = await ipcRenderer.invoke('install-eva-voice');
+        if (result.success && result.alreadyInstalled) {
+            evaVoiceStatus.textContent = 'Eva voice is already installed.';
+        } else if (result.success) {
+            evaVoiceStatus.textContent = 'Eva voice installed! Restart Cortana (or Windows) so Windows TTS picks up the new voice.';
+            await refreshEvaVoiceStatus();
+        } else if (result.canceled) {
+            evaVoiceStatus.textContent = 'Installation cancelled.';
+        } else {
+            evaVoiceStatus.textContent = result.error || 'Installation failed. Try running Cortana as administrator.';
+            evaVoiceStatus.style.color = '#e74c3c';
+        }
+    } catch (err) {
+        evaVoiceStatus.textContent = 'Installation failed: ' + err.message;
+        evaVoiceStatus.style.color = '#e74c3c';
+    }
+    installEvaVoiceBtn.disabled = false;
+    installEvaVoiceBtn.textContent = 'Install Eva Voice';
+}
+
+async function onUninstallEvaVoice() {
+    if (!uninstallEvaVoiceBtn || !evaVoiceStatus) return;
+    uninstallEvaVoiceBtn.disabled = true;
+    evaVoiceStatus.textContent = 'Requesting administrator permission...';
+    evaVoiceStatus.style.color = '#a2a2a2';
+    evaVoiceStatus.style.display = 'block';
+    try {
+        const result = await ipcRenderer.invoke('uninstall-eva-voice');
+        if (result.success) {
+            evaVoiceStatus.textContent = 'Eva voice removed.';
+            await refreshEvaVoiceStatus();
+        } else if (result.canceled) {
+            evaVoiceStatus.textContent = 'Uninstall cancelled.';
+        } else {
+            evaVoiceStatus.textContent = result.error || 'Uninstall failed.';
+            evaVoiceStatus.style.color = '#e74c3c';
+        }
+    } catch (err) {
+        evaVoiceStatus.textContent = 'Uninstall failed: ' + err.message;
+        evaVoiceStatus.style.color = '#e74c3c';
+    }
+    uninstallEvaVoiceBtn.disabled = false;
+}
 
 function onVoiceChanged() {
     const selectedVoiceName = voiceSelect.value;

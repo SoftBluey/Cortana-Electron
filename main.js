@@ -14,7 +14,7 @@ const path = require("path");
 const https = require("https");
 const http = require("http");
 const crypto = require("crypto");
-const { exec, spawn } = require("child_process");
+const { exec, spawn, execSync } = require("child_process");
 const fs = require("fs/promises");
 const fssync = require("fs");
 const cityTimezones = require("city-timezones");
@@ -78,6 +78,122 @@ let REMINDERS_FILE;
 let iconPath;
 let assetsPath;
 let onlineSpeechEnabled = false;
+
+const EVA_TTS_DIR = "C:\\Windows\\Speech_OneCore\\Engines\\TTS\\en-US";
+const EVA_REG_TOKEN = "MSTTS_V110_enUS_EvaM";
+const EVA_TOKEN_PATH = `HKLM\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\${EVA_REG_TOKEN}`;
+
+function evaVoiceDataDir() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "voice-data")
+    : path.join(__dirname, "voice-data");
+}
+
+function evaInstallerScriptPath() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "install-eva-voice.ps1")
+    : path.join(__dirname, "scripts", "install-eva-voice.ps1");
+}
+
+function getEvaVoiceStatus() {
+  let registryPresent = false;
+  try {
+    const out = execSync(`reg query "${EVA_TOKEN_PATH}"`, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    registryPresent = out.includes(EVA_REG_TOKEN);
+  } catch (_) {
+    registryPresent = false;
+  }
+  const filesPresent = fssync.existsSync(path.join(EVA_TTS_DIR, "M1033Eva.INI"));
+  const voiceDataPresent = fssync.existsSync(
+    path.join(evaVoiceDataDir(), "M1033Eva.INI")
+  );
+  return {
+    installed: registryPresent && filesPresent,
+    registryPresent,
+    filesPresent,
+    voiceDataPresent,
+  };
+}
+
+function runElevatedVoiceScript(action) {
+  const scriptPath = evaInstallerScriptPath();
+  const voiceDataDir = evaVoiceDataDir();
+  const logPath = path.join(os.tmpdir(), `cortana-eva-${Date.now()}.log`);
+  const q = (s) => `'${s.replace(/'/g, "''")}'`;
+  const args = [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    q(scriptPath),
+    "-VoiceDataDir",
+    q(voiceDataDir),
+    "-LogPath",
+    q(logPath),
+    "-Action",
+    q(action),
+  ].join(", ");
+  const inner = [
+    "$ErrorActionPreference = 'Stop'",
+    `$p = Start-Process -FilePath 'powershell.exe' -ArgumentList @(${args}) -Verb RunAs -Wait -PassThru`,
+    "Write-Output ('EXIT:' + $p.ExitCode)",
+  ].join("; ");
+  const encoded = Buffer.from(inner, "utf16le").toString("base64");
+
+  return new Promise((resolve) => {
+    const proc = exec(
+      `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand "${encoded}"`,
+      { timeout: 300000, windowsHide: true },
+      (error, stdout, stderr) => {
+        const exitMatch = /EXIT:(\d+)/.exec(stdout || "");
+        const exitCode = exitMatch ? parseInt(exitMatch[1], 10) : null;
+        let log = "";
+        try {
+          log = fssync.readFileSync(logPath, "utf8");
+        } catch (_) {}
+        try {
+          fssync.unlinkSync(logPath);
+        } catch (_) {}
+        if (exitCode === null && error) {
+          const text = `${error.message} ${stderr || ""}`.trim();
+          resolve({
+            success: false,
+            canceled: /canceled|cancelled|user declined|denied/i.test(text),
+            error: text,
+          });
+          return;
+        }
+        if (exitCode === 0) {
+          resolve({ success: true, log });
+        } else {
+          resolve({
+            success: false,
+            error: `Installer exited with code ${exitCode}`,
+            log,
+          });
+        }
+      }
+    );
+    let logged = 0;
+    const poll = setInterval(() => {
+      try {
+        const log = fssync.readFileSync(logPath, "utf8");
+        const lines = log.split(/\r?\n/);
+        for (let i = logged; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (line && mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("eva-voice-progress", line);
+          }
+        }
+        logged = lines.length;
+      } catch (_) {}
+    }, 250);
+    proc.on("close", () => clearInterval(poll));
+  });
+}
 
 const isSilentStart = process.argv.includes("--hidden");
 
@@ -310,7 +426,6 @@ if (gotTheLock) {
   let speechStarting = false;
   let speechCancelled = false;
   let speechProcess = null;
-  let wakeRetries = 0;
   let powerBlocker = null;
 
   registerIpcHandlers();
@@ -467,7 +582,6 @@ if (gotTheLock) {
 
   ipcMain.on('hey-cortana-toggle', async (event, enabled) => {
     wakeEnabled = enabled;
-    wakeRetries = 0;
     if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
     if (enabled) {
       if (!powerBlocker) powerBlocker = require('electron').powerSaveBlocker.start('prevent-app-suspension');
@@ -525,7 +639,6 @@ if (gotTheLock) {
 
         wakeTriggered = true;
         console.log('[wake] Wake word detected:', text);
-        wakeRetries = 0;
         try { await session.stopAsync(); } catch (_) {}
 
         if (mainWindow && !mainWindow.isDestroyed()) {
@@ -606,13 +719,11 @@ if (gotTheLock) {
 
       if (wakeEnabled && !wakeRestartTimer && !wakeTriggered
           && !speechStarting && !speechRecognizer && !speechProcess) {
-        const delay = Math.min(wakeRetries * 2000, 20000);
-        wakeRetries++;
-        console.warn(`[wake] Scheduling restart in ${delay}ms (retry ${wakeRetries})`);
+        console.warn('[wake] Restarting in 1000ms');
         wakeRestartTimer = setTimeout(() => {
           wakeRestartTimer = null;
           if (wakeEnabled) startWakeLoop();
-        }, delay);
+        }, 1000);
       }
     }
   }
@@ -1196,6 +1307,41 @@ function registerIpcHandlers() {
 
   ipcMain.on("set-settings-visibility", (event, visible) => {
     isSettingsVisible = visible;
+  });
+
+  ipcMain.handle("eva-voice-status", () => {
+    return getEvaVoiceStatus();
+  });
+
+  ipcMain.handle("install-eva-voice", async () => {
+    try {
+      const status = getEvaVoiceStatus();
+      if (!status.voiceDataPresent) {
+        return { success: false, error: "Eva voice data is missing from this build." };
+      }
+      if (status.installed) {
+        return { success: true, alreadyInstalled: true, log: "" };
+      }
+      const result = await runElevatedVoiceScript("Install");
+      if (result.success) {
+        return { ...result, installed: getEvaVoiceStatus().installed };
+      }
+      return result;
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("uninstall-eva-voice", async () => {
+    try {
+      const result = await runElevatedVoiceScript("Uninstall");
+      if (result.success) {
+        return { ...result, installed: getEvaVoiceStatus().installed };
+      }
+      return result;
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
   });
 
   const regionAliases = {

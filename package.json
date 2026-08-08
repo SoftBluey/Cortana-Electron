@@ -43,6 +43,14 @@
       {
         "from": "speech.ps1",
         "to": "speech.ps1"
+      },
+      {
+        "from": "scripts/install-eva-voice.ps1",
+        "to": "install-eva-voice.ps1"
+      },
+      {
+        "from": "voice-data",
+        "to": "voice-data"
       }
     ],
     "win": {
