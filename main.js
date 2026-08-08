@@ -505,6 +505,7 @@ if (gotTheLock) {
   }
 
   ipcMain.on('speech-start', async () => {
+    if (isSettingsVisible) return;
     if (speechStarting || speechProcess) return;
     speechStarting = true;
     try {
@@ -762,6 +763,20 @@ if (gotTheLock) {
     }
     if (typeof stopSapiFallback === 'function') {
       try { stopSapiFallback(); } catch (_) {}
+    }
+  });
+
+  ipcMain.on("set-settings-visibility", (event, visible) => {
+    isSettingsVisible = visible;
+    if (visible) {
+      if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
+      if (wakeRecognizer) {
+        wakeRunning = false;
+        try { wakeRecognizer.close(); } catch (_) {}
+        wakeRecognizer = null;
+      }
+    } else if (wakeEnabled && !wakeRunning && !wakeRestartTimer) {
+      startWakeLoop();
     }
   });
 
@@ -1325,10 +1340,6 @@ function registerIpcHandlers() {
     shell.openExternal(
       "https://github.com/SoftBluey/Cortana-Electron/releases"
     );
-  });
-
-  ipcMain.on("set-settings-visibility", (event, visible) => {
-    isSettingsVisible = visible;
   });
 
   ipcMain.handle("eva-voice-status", () => {
