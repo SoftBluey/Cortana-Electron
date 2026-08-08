@@ -1,0 +1,10 @@
+<grammar version="1.0" xml:lang="en-US" root="wake"
+         xmlns="http://www.w3.org/2001/06/grammar">
+  <rule id="wake">
+    <one-of>
+      <item>hey cortana</item>
+      <item>okay cortana</item>
+      <item>cortana</item>
+    </one-of>
+  </rule>
+</grammar>

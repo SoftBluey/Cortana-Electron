@@ -36,6 +36,7 @@ let speechRecognizer = null;
 let wakeEnabled = false;
 let wakeRunning = false;
 let wakeRecognizer = null;
+let wakeReviveFn = null;
 const winWidth = 360;
 const winHeight = 640;
 let isSettingsVisible = false;
@@ -93,6 +94,12 @@ function evaInstallerScriptPath() {
   return app.isPackaged
     ? path.join(process.resourcesPath, "install-eva-voice.ps1")
     : path.join(__dirname, "scripts", "install-eva-voice.ps1");
+}
+
+function wakeGrammarPath() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "wake.grxml")
+    : path.join(__dirname, "wake.grxml");
 }
 
 function getEvaVoiceStatus() {
@@ -465,7 +472,8 @@ if (gotTheLock) {
     SpeechRecognizer,
     SpeechRecognitionTopicConstraint,
     SpeechRecognitionScenario,
-    SpeechRecognitionListConstraint,
+    SpeechRecognitionGrammarFileConstraint,
+    StorageFile,
   } = require(bindingsPath);
 
   function startSapiFallback() {
@@ -566,6 +574,9 @@ if (gotTheLock) {
 
   let wakeRestartTimer = null;
   let wakeBackoff = 0;
+  let wakeWatchdogTimer = null;
+  const WAKE_STUCK_MS = 60000;
+  const WAKE_CHECK_MS = 30000;
 
   ipcMain.on('speech-stop', () => {
     speechCancelled = true;
@@ -610,30 +621,52 @@ if (gotTheLock) {
     }
   });
 
+  const reviveWakeLoop = () => {
+    if (!wakeEnabled || wakeRunning || wakeRestartTimer || wakeRecognizer) return;
+    if (speechStarting || speechRecognizer || speechProcess) return;
+    console.log('[wake] Reviving wake loop after window regain.');
+    startWakeLoop();
+  };
+  wakeReviveFn = reviveWakeLoop;
+
   async function startWakeLoop() {
     if (speechStarting || speechRecognizer || speechProcess) {
       console.log('[wake] Deferring: manual speech active.');
       return;
     }
+    if (wakeWatchdogTimer) { clearInterval(wakeWatchdogTimer); wakeWatchdogTimer = null; }
     wakeRunning = true;
     let wakeTriggered = false;
     let rec = null;
     let completionStatus = null;
+    let lastWakeActivity = Date.now();
+    let wakeForcedRestart = false;
 
     try {
       rec = new SpeechRecognizer();
       wakeRecognizer = rec;
 
-      const constraint = new SpeechRecognitionListConstraint(
-        ['hey cortana', 'cortana'], 'wake');
+      const grammarFile = await StorageFile.getFileFromPathAsync(wakeGrammarPath());
+      const constraint = new SpeechRecognitionGrammarFileConstraint(grammarFile, 'wake');
       rec.constraints.append(constraint);
       await rec.compileConstraintsAsync();
 
       const session = rec.continuousRecognitionSession;
 
+      const isOutOfFocus = () => !mainWindow || mainWindow.isDestroyed() ||
+        mainWindow.isMinimized() || !mainWindow.isVisible() || !mainWindow.isFocused();
+
+      const forceWakeRestart = (reason) => {
+        if (!wakeRunning || wakeTriggered || wakeForcedRestart) return;
+        wakeForcedRestart = true;
+        console.warn('[wake] ' + reason + ' — recreating recognizer.');
+        wakeRunning = false;
+      };
+
       // Continuous session — results stream in without polling gaps
       session.onResultGenerated(async (sender, args) => {
         if (!wakeRunning || wakeTriggered) return;
+        lastWakeActivity = Date.now();
         let text = '';
         try {
           text = (args.result && args.result.text || '').toLowerCase().trim();
@@ -703,7 +736,29 @@ if (gotTheLock) {
       console.log('[wake] Starting continuous recognition session...');
       await session.startAsync();
       wakeBackoff = 0;
+      lastWakeActivity = Date.now();
       console.log('[wake] Continuous session active — listening for Hey Cortana.');
+
+      try {
+        rec.onStateChanged((sender, args) => {
+          if (!wakeRunning || wakeTriggered || wakeForcedRestart) return;
+          const st = args && args.state;
+          if (st === 0 || st === 6) {
+            if (Date.now() - lastWakeActivity < 5000) return;
+            forceWakeRestart('Recognizer entered state ' + st + ' while listening');
+          }
+        });
+      } catch (e) {
+        console.warn('[wake] StateChanged subscription unavailable:', e.message);
+      }
+
+      wakeWatchdogTimer = setInterval(() => {
+        if (!wakeRunning || wakeTriggered || wakeForcedRestart) return;
+        if (!isOutOfFocus()) return;
+        if (Date.now() - lastWakeActivity < WAKE_STUCK_MS) return;
+        forceWakeRestart('No recognition activity for ' +
+          Math.round((Date.now() - lastWakeActivity) / 1000) + 's while out of focus');
+      }, WAKE_CHECK_MS);
 
       // Block here until wakeRunning is set to false
       // (either by wake word detection or external stop)
@@ -721,28 +776,39 @@ if (gotTheLock) {
       completionStatus = 'error';
       console.error('[wake] Fatal wake loop error:', outerErr.message || outerErr);
     } finally {
+      if (wakeWatchdogTimer) { clearInterval(wakeWatchdogTimer); wakeWatchdogTimer = null; }
       if (rec) { try { rec.close(); } catch (_) {} }
       if (wakeRecognizer === rec) wakeRecognizer = null;
 
       if (wakeEnabled && !wakeRestartTimer && !wakeTriggered
           && !speechStarting && !speechRecognizer && !speechProcess) {
-        const expectedEnd = completionStatus === 7 || completionStatus === 5;
-        if (expectedEnd) {
+        if (wakeForcedRestart) {
+          wakeForcedRestart = false;
           wakeBackoff = 0;
-          console.log('[wake] Restarting in 1000ms');
+          console.log('[wake] Restarting in 1000ms (forced revive)');
           wakeRestartTimer = setTimeout(() => {
             wakeRestartTimer = null;
             if (wakeEnabled) startWakeLoop();
           }, 1000);
         } else {
-          const delay = Math.min(5000 * Math.pow(2, wakeBackoff), 30000);
-          wakeBackoff++;
-          console.warn('[wake] Session ended abnormally (status ' +
-            completionStatus + '); retrying in ' + delay + 'ms');
-          wakeRestartTimer = setTimeout(() => {
-            wakeRestartTimer = null;
-            if (wakeEnabled) startWakeLoop();
-          }, delay);
+          const expectedEnd = completionStatus === 7 || completionStatus === 5;
+          if (expectedEnd) {
+            wakeBackoff = 0;
+            console.log('[wake] Restarting in 1000ms');
+            wakeRestartTimer = setTimeout(() => {
+              wakeRestartTimer = null;
+              if (wakeEnabled) startWakeLoop();
+            }, 1000);
+          } else {
+            const delay = Math.min(5000 * Math.pow(2, wakeBackoff), 30000);
+            wakeBackoff++;
+            console.warn('[wake] Session ended abnormally (status ' +
+              completionStatus + '); retrying in ' + delay + 'ms');
+            wakeRestartTimer = setTimeout(() => {
+              wakeRestartTimer = null;
+              if (wakeEnabled) startWakeLoop();
+            }, delay);
+          }
         }
       }
     }
@@ -753,6 +819,10 @@ if (gotTheLock) {
     if (typeof wakeRestartTimer !== 'undefined' && wakeRestartTimer) {
       clearTimeout(wakeRestartTimer);
       wakeRestartTimer = null;
+    }
+    if (typeof wakeWatchdogTimer !== 'undefined' && wakeWatchdogTimer) {
+      clearInterval(wakeWatchdogTimer);
+      wakeWatchdogTimer = null;
     }
     if (typeof wakeRecognizer !== 'undefined' && wakeRecognizer) {
       try { wakeRecognizer.close(); } catch (_) {}
@@ -1699,6 +1769,10 @@ function createWindow() {
   };
 
   mainWindow.on("blur", handleBlur);
+  const reviveWakeOnWindow = () => { if (typeof wakeReviveFn === 'function') wakeReviveFn(); };
+  mainWindow.on("focus", reviveWakeOnWindow);
+  mainWindow.on("restore", reviveWakeOnWindow);
+  mainWindow.on("show", reviveWakeOnWindow);
   mainWindow.on("close", (event) => {
     if (!app.isQuitting) {
       event.preventDefault();
