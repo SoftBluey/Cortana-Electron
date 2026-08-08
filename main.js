@@ -122,18 +122,18 @@ function runElevatedVoiceScript(action) {
   const scriptPath = evaInstallerScriptPath();
   const voiceDataDir = evaVoiceDataDir();
   const logPath = path.join(os.tmpdir(), `cortana-eva-${Date.now()}.log`);
-  const q = (s) => `'${s.replace(/'/g, "''")}'`;
+  const q = (s) => `'"${s.replace(/"/g, '""')}"'`;
   const args = [
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-File",
+    "'-NoProfile'",
+    "'-ExecutionPolicy'",
+    "'Bypass'",
+    "'-File'",
     q(scriptPath),
-    "-VoiceDataDir",
+    "'-VoiceDataDir'",
     q(voiceDataDir),
-    "-LogPath",
+    "'-LogPath'",
     q(logPath),
-    "-Action",
+    "'-Action'",
     q(action),
   ].join(", ");
   const inner = [
