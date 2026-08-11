@@ -43,14 +43,6 @@
       {
         "from": "speech.ps1",
         "to": "speech.ps1"
-      },
-      {
-        "from": "scripts/install-eva-voice.ps1",
-        "to": "install-eva-voice.ps1"
-      },
-      {
-        "from": "voice-data",
-        "to": "voice-data"
       }
     ],
     "win": {
@@ -89,5 +81,9 @@
       "types": "./.winapp/bindings/*.d.ts",
       "default": "./.winapp/bindings/*.js"
     }
+  },
+  "allowScripts": {
+    "@microsoft/winappcli@0.5.0": true,
+    "electron-winstaller@5.4.0": true
   }
 }
