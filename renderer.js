@@ -23,6 +23,7 @@ let settingsContainer, settingsBtn, settingsBackBtn, voiceSelect, startupToggle,
 let evaVoiceContainer, evaVoiceStatus, installEvaVoiceBtn, uninstallEvaVoiceBtn;
 let ttsEngineSelect, edgeVoiceSelect, edgeVoiceContainer;
 let timeFormatSelect;
+let weatherUnitsSelect;
 let idleGreetingModeSelect, specificGreetingContainer, specificGreetingSelect, customGreetingContainer, customGreetingInput;
 let customActionFormContainer, customActionTriggerInput, customActionSaveBtn, customActionCancelBtn, customActionsList, addCustomActionBtn, actionSequenceList, actionSequenceWarning;
 let aiToggle, openaiApiKeyInput, openaiApiKeyContainer;
@@ -47,6 +48,7 @@ let ttsEngine = "edge";
 let edgeVoice = "en-US-JennyNeural";
 let edgeVoices = [];
 let timeFormat = "12";
+let weatherUnits = 'metric';
 let searchResultsActive = false;
 let aiEnabled = false;
 let aiSystemPrompt = '';
@@ -61,6 +63,7 @@ let heyCortanaEnabled = false;
 let everythingPort = 80;
 let blurCleanupTimer = null;
 let suppressThemeInput = false;
+let wakeTriggered = false;
 
 let timerId = null;
 let timerInterval = null;
@@ -662,17 +665,68 @@ const WINDOWS_SETTINGS = [
   { name: 'About', uri: 'ms-settings:about' },
 ];
 
-const idleMessages = [
-    "What's on your mind?",
+const morningMessages = [
+    "Good morning!",
     "Hello there.",
+    "Hi there!",
+    "Hey. What can I do for you?",
     "How can I help?",
-    "Ask me anything.",
-    "Hi. What's on your mind?",
-    "Need anything?",
-    "What can I do for you?",
+    "What's on your mind?",
+];
+
+const afternoonMessages = [
+    "Hi there!",
+    "Hello!",
     "Hey there.",
+    "How can I help?",
+    "Need anything?",
     "What can I help you with?",
-    "Hi there."
+    "What's up?",
+];
+
+const eveningMessages = [
+    "Good evening.",
+    "Hello there.",
+    "Hi!",
+    "Hey. What can I do for you?",
+    "How can I help?",
+    "Need anything?",
+];
+
+const nightMessages = [
+    "Hello.",
+    "Hi there!",
+    "How can I help?",
+    "What's on your mind?",
+    "Still up? What can I do for you?",
+];
+
+const idleMessages = [
+    "Hello there.",
+    "Hello!",
+    "Hello. What can I do for you?",
+    "Hey there.",
+    "Hey. What can I do for you?",
+    "Hi there!",
+    "Hi!",
+    "Hi! How can I help?",
+    "Hi! What's up?",
+    "Hi. What's on your mind?",
+    "Greetings!",
+    "Oh hey!",
+    "Anything I can do for you?",
+    "Anything I can get started?",
+    "Can I be of assistance?",
+    "How can I help?",
+    "Need anything?",
+    "Need something?",
+    "Something I can do for you?",
+    "What can I help you with?",
+    "What would you like me to do?",
+    "What's on your mind?",
+    "What's up?",
+    "Ask me anything.",
+    "I'm Cortana! I can help with your day.",
 ];
 
 function getIdleMessage() {
@@ -683,7 +737,20 @@ function getIdleMessage() {
             return customIdleGreeting.trim() || "Hello!";
         case 'random':
         default:
-            return idleMessages[Math.floor(Math.random() * idleMessages.length)];
+            const hour = new Date().getHours();
+            let pool;
+            if (hour >= 5 && hour < 12) {
+                pool = morningMessages;
+            } else if (hour >= 12 && hour < 17) {
+                pool = afternoonMessages;
+            } else if (hour >= 17 && hour < 22) {
+                pool = eveningMessages;
+            } else {
+                pool = nightMessages;
+            }
+            // Occasionally pull from the general pool for variety (1 in 4 chance)
+            if (Math.random() < 0.25) pool = idleMessages;
+            return pool[Math.floor(Math.random() * pool.length)];
     }
 }
 
@@ -771,6 +838,17 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     let entranceReceived = false;
     ipcRenderer.on('trigger-enter-animation', (event, { timeSinceHidden }) => {
+        if (wakeTriggered) {
+            wakeTriggered = false;
+            appContainer.classList.add('visible');
+            startSpeechUI();
+            return;
+        }
+        if (speechActive || document.body.classList.contains('slim-mode')) {
+            appContainer.classList.add('visible');
+            return;
+        }
+        closeSettings(true);
         entranceReceived = true;
         appContainer.classList.add('visible');
         const state = timeSinceHidden > 5000
@@ -855,6 +933,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     edgeVoiceSelect = document.getElementById('edge-voice-select');
     edgeVoiceContainer = document.getElementById('edge-voice-container');
     timeFormatSelect = document.getElementById('time-format-select');
+    weatherUnitsSelect = document.getElementById('weather-units-select');
 
     idleGreetingModeSelect = document.getElementById('idle-greeting-mode-select');
     specificGreetingContainer = document.getElementById('specific-greeting-container');
@@ -924,8 +1003,6 @@ window.addEventListener('DOMContentLoaded', async () => {
             setStateIdle();
         }, 200);
         offSound.play();
-        // NOTE: anim.goToState(AnimationState.IDLE) removed from here —
-        // setStateIdle() inside the timer handles this exclusively.
     });
 
     searchBar.addEventListener('focus', () => {
@@ -1115,6 +1192,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
 
     ipcRenderer.on('wake-slim', () => {
+        appContainer.classList.add('visible');
+        wakeTriggered = true;
         if (settingsContainer.classList.contains('visible')) return;
         document.body.classList.add('slim-mode');
         startSpeechUI();
@@ -1202,6 +1281,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     ttsEngineSelect.addEventListener('change', onTtsEngineChanged);
     edgeVoiceSelect.addEventListener('change', onEdgeVoiceChanged);
     timeFormatSelect.addEventListener('change', onTimeFormatChanged);
+    weatherUnitsSelect?.addEventListener('change', () => {
+        weatherUnits = weatherUnitsSelect.value;
+        ipcRenderer.send('set-setting', { key: 'weatherUnits', value: weatherUnits });
+        showSavedToast();
+    });
     resetVoiceBtn.addEventListener('click', onResetVoiceSettings);
     resetReminderSoundBtn.addEventListener('click', onResetReminderSound);
     resetThemeBtn.addEventListener('click', onResetThemeColors);
@@ -1270,7 +1354,6 @@ window.addEventListener('DOMContentLoaded', async () => {
                     if (reminderSoundSettingInput) {
                         reminderSoundSettingInput.value = fullPath;
                         reminderSound = fullPath;
-                        // Save the setting
                         ipcRenderer.send('set-setting', { 
                             key: 'reminderSound', 
                             value: fullPath 
@@ -1287,7 +1370,6 @@ window.addEventListener('DOMContentLoaded', async () => {
             if (reminderSoundSettingInput) {
                 reminderSoundSettingInput.value = "notify.wav";
                 reminderSound = "notify.wav";
-                // Save the setting
                 ipcRenderer.send('set-setting', { 
                     key: 'reminderSound', 
                     value: "notify.wav" 
@@ -1343,6 +1425,14 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     ipcRenderer.on('play-reminder-sound', (event, soundFile) => {
         playReminderSound(soundFile);
+        setTimeout(() => {
+            isBusy = false;
+            setStateIdle();
+        }, 4000);
+    });
+
+    ipcRenderer.on('settings-force-close', () => {
+        closeSettings(true);
     });
 
     ipcRenderer.on('online-speech-status', (event, { enabled }) => {
@@ -1350,21 +1440,6 @@ window.addEventListener('DOMContentLoaded', async () => {
         if (banner) {
             banner.style.display = enabled ? 'none' : 'flex';
         }
-    });
-
-    ipcRenderer.on('eva-voice-progress', (event, line) => {
-        if (!evaVoiceStatus) return;
-        let text = line;
-        if (/^STATUS:/i.test(line)) text = line.replace(/^STATUS:/i, '');
-        else if (/^FILE:/i.test(line)) text = 'Copying ' + line.replace(/^FILE:/i, '') + '...';
-        else if (/^DEL:/i.test(line)) text = 'Removing ' + line.replace(/^DEL:/i, '') + '...';
-        else if (/^REG-:/i.test(line)) text = 'Removing registry token...';
-        else if (/^REG:/i.test(line)) text = 'Writing registry token...';
-        else if (/^OK:/i.test(line)) text = line.replace(/^OK:/i, '');
-        else if (/^ERROR:/i.test(line)) text = line.replace(/^ERROR:/i, '');
-        evaVoiceStatus.textContent = text;
-        evaVoiceStatus.style.color = /^ERROR:/i.test(line) ? '#e74c3c' : '#a2a2a2';
-        evaVoiceStatus.style.display = 'block';
     });
 
     await loadAndApplySettings();
@@ -1780,11 +1855,13 @@ async function showSettingsUI() {
     isBusy = false;
 }
 
-function closeSettings() {
+function closeSettings(silent = false) {
     ipcRenderer.send('set-settings-visibility', false);
     settingsContainer.classList.remove('visible');
     animationContainer.style.display = 'block';
-    setStateIdle();
+    if (!silent) {
+        setStateIdle();
+    }
 }
 
 function hexToHsl(H) {
@@ -1897,6 +1974,9 @@ async function loadAndApplySettings() {
 
     timeFormat = settings.timeFormat || '12';
     timeFormatSelect.value = timeFormat;
+
+    weatherUnits = settings.weatherUnits || 'metric';
+    if (weatherUnitsSelect) weatherUnitsSelect.value = weatherUnits;
 
     idleGreetingMode = settings.idleGreetingMode || 'random';
     specificIdleGreeting = settings.specificIdleGreeting || "What's on your mind?";
@@ -2115,7 +2195,6 @@ function onResetReminderSound() {
     if (reminderSoundSettingInput) {
         reminderSoundSettingInput.value = "notify.wav";
         reminderSound = "notify.wav";
-        // Save the setting
         ipcRenderer.send('set-setting', { 
             key: 'reminderSound', 
             value: "notify.wav" 
@@ -2161,10 +2240,6 @@ async function refreshEvaVoiceStatus() {
     } catch (err) {
         return;
     }
-    if (!status.voiceDataPresent) {
-        evaVoiceContainer.style.display = 'none';
-        return;
-    }
     evaVoiceContainer.style.display = 'flex';
     evaVoiceStatus.style.color = '#a2a2a2';
     if (status.installed) {
@@ -2178,32 +2253,13 @@ async function refreshEvaVoiceStatus() {
     }
 }
 
-async function onInstallEvaVoice() {
+function onInstallEvaVoice() {
     if (!installEvaVoiceBtn || !evaVoiceStatus) return;
-    installEvaVoiceBtn.disabled = true;
-    installEvaVoiceBtn.textContent = 'Installing...';
-    evaVoiceStatus.textContent = 'Requesting administrator permission...';
+    ipcRenderer.send('install-eva-voice');
+    evaVoiceStatus.textContent = 'Opening download page...';
     evaVoiceStatus.style.color = '#a2a2a2';
     evaVoiceStatus.style.display = 'block';
-    try {
-        const result = await ipcRenderer.invoke('install-eva-voice');
-        if (result.success && result.alreadyInstalled) {
-            evaVoiceStatus.textContent = 'Eva voice is already installed.';
-        } else if (result.success) {
-            evaVoiceStatus.textContent = 'Eva voice installed! Restart Cortana (or Windows) so Windows TTS picks up the new voice.';
-            await refreshEvaVoiceStatus();
-        } else if (result.canceled) {
-            evaVoiceStatus.textContent = 'Installation cancelled.';
-        } else {
-            evaVoiceStatus.textContent = result.error || 'Installation failed. Try running Cortana as administrator.';
-            evaVoiceStatus.style.color = '#e74c3c';
-        }
-    } catch (err) {
-        evaVoiceStatus.textContent = 'Installation failed: ' + err.message;
-        evaVoiceStatus.style.color = '#e74c3c';
-    }
-    installEvaVoiceBtn.disabled = false;
-    installEvaVoiceBtn.textContent = 'Install Eva Voice';
+    setTimeout(() => { evaVoiceStatus.textContent = ''; }, 3000);
 }
 
 async function onUninstallEvaVoice() {
@@ -2580,7 +2636,7 @@ function setStateIdle() {
     }
 
     editingReminderId = null;
-    editingReminderSound = null; // Also reset the editing sound
+    editingReminderSound = null;
     reminderContainer.classList.remove('visible');
     animationContainer.style.display = 'block';
     contentWrapper.style.display = 'block';
@@ -2788,7 +2844,7 @@ function calculate(query) {
             
             while (index < cleanQuery.length && (cleanQuery[index] === '+' || cleanQuery[index] === '-')) {
                 const op = cleanQuery[index];
-                index++; // consume operator
+                index++;
                 const right = parseTerm();
                 result = op === '+' ? result + right : result - right;
             }
@@ -2802,7 +2858,7 @@ function calculate(query) {
             
             while (index < cleanQuery.length && (cleanQuery[index] === '*' || cleanQuery[index] === '/')) {
                 const op = cleanQuery[index];
-                index++; // consume operator
+                index++;
                 const right = parseFactor();
                 if (op === '*') {
                     result = result * right;
@@ -2887,7 +2943,14 @@ async function getWeather(location) {
         const { name, admin1, country, latitude, longitude } = geoData.results[0];
         const locationNameForSpeech = (admin1 && admin1.toLowerCase() !== name.toLowerCase()) ? `${name}, ${admin1}` : `${name}, ${country}`;
 
-        const weatherResponse = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current_weather=true`);
+        const isImperial = weatherUnits === 'imperial';
+        const tempUnit = isImperial ? 'fahrenheit' : 'celsius';
+        const windUnit = isImperial ? 'mph' : 'kmh';
+        const tempSymbol = isImperial ? '°F' : '°C';
+        const windSymbol = isImperial ? 'mph' : 'km/h';
+        const windPhrase = isImperial ? 'miles per hour' : 'kilometers per hour';
+
+        const weatherResponse = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current_weather=true&temperature_unit=${tempUnit}&wind_speed_unit=${windUnit}`);
         if (!weatherResponse.ok) {
             responseText = `Sorry, I couldn't get the weather for ${locationNameForSpeech}.`;
             displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, true);
@@ -2896,11 +2959,10 @@ async function getWeather(location) {
 
         const weatherData = await weatherResponse.json();
         const { temperature, windspeed, weathercode } = weatherData.current_weather;
-        const tempUnit = weatherData.current_weather_units?.temperature || '°C';
         const conditions = getWeatherDescription(weathercode);
 
         lastQuery = `weather in ${location}`;
-        responseText = `Currently in ${locationNameForSpeech}: ${temperature}${tempUnit}, ${conditions}. Wind speed is ${windspeed} kilometers per hour.`;
+        responseText = `Currently in ${locationNameForSpeech}: ${temperature}${tempSymbol}, ${conditions}. Wind speed is ${windspeed} ${windPhrase}.`;
 
         displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, false);
 
@@ -3013,7 +3075,7 @@ function updateSaveButtonState() {
 function showReminderUI(options = {}) {
     const { initialText = '', initialTime = '', initialSound = '', id = null } = options;
     editingReminderId = id;
-    editingReminderSound = initialSound; // Store the initial sound for this reminder
+    editingReminderSound = initialSound;
 
     animationContainer.style.display = 'block';
     contentWrapper.style.display = 'none';
@@ -3023,9 +3085,6 @@ function showReminderUI(options = {}) {
 
     reminderTextInput.value = initialText;
     reminderTimeInput.value = initialTime;
-    // Set the sound - use initialSound if provided (for editing), otherwise use default
-    // Note: In this version, we don't dynamically modify the UI, but sound is handled in the background
-    // The sound is passed through the reminder payload when saving
 
     updateSaveButtonState();
 
@@ -3163,7 +3222,6 @@ function onSaveReminder() {
             text = `OK. I'll remind you to "${reminder}" on ${friendlyTime}.`;
         }
 
-        // Reset editing variables
         editingReminderId = null;
         editingReminderSound = null;
 
@@ -3972,7 +4030,6 @@ function processQuery(query) {
     const customAction = customActions.find(a => {
         if (!a.trigger) return false;
         const triggerLower = a.trigger.toLowerCase();
-        // Check for exact match first
         if (lowerCaseQuery === triggerLower) return true;
         // Check if trigger appears as a complete word/phrase
         const regex = new RegExp(`\\b${triggerLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
@@ -4251,7 +4308,6 @@ function playReminderSound(soundFile) {
         soundPath = 'file://' + fullFilePath.replace(/\\/g, '/');
     }
     
-    // Check if the file exists before trying to play it
     const fs = require('fs');
     if (!fs.existsSync(fullFilePath)) {
         console.warn(`Reminder sound file not found: ${fullFilePath}, using fallback`);
@@ -4270,7 +4326,6 @@ function playReminderSound(soundFile) {
     
     const audio = new Audio(soundPath);
     
-    // Play the sound
     audio.play().catch(error => {
         console.error(`Failed to play reminder sound ${soundFile}:`, error);
         // Fallback: try with the default notify.wav if a custom sound fails

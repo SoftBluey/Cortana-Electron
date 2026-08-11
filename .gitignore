@@ -1,12 +1,9 @@
-node_modules
-package-lock.json
-dist
 CHANGELOG.md
 err.log
 out.log
-
-# Windows SDK packages and generated files
 .winapp
-
-# Stray registry command output
-HKCU
+package-lock.json
+.winapp
+dist/
+node_modules/
+cortana_strings.txt

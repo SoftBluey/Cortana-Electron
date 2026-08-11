@@ -9,6 +9,7 @@ const {
   Menu,
   dialog,
   systemPreferences,
+  powerMonitor,
 } = require("electron");
 const path = require("path");
 const https = require("https");
@@ -36,6 +37,7 @@ let speechRecognizer = null;
 let wakeEnabled = false;
 let wakeRunning = false;
 let wakeRecognizer = null;
+let queryRecognizer = null;
 const winWidth = 360;
 const winHeight = 640;
 let isSettingsVisible = false;
@@ -64,6 +66,7 @@ let settings = {
   ttsEngine: "edge",
   edgeVoice: "en-US-JennyNeural",
   timeFormat: "12",
+  weatherUnits: "metric",
   openaiApiKey: "",
   aiEnabled: false,
   aiSystemPrompt: "You are Cortana, Microsoft's virtual assistant. Be helpful, concise, and friendly. Keep responses brief and conversational. Do not use markdown formatting.",
@@ -83,12 +86,6 @@ const EVA_TTS_DIR = "C:\\Windows\\Speech_OneCore\\Engines\\TTS\\en-US";
 const EVA_REG_TOKEN = "MSTTS_V110_enUS_EvaM";
 const EVA_TOKEN_PATH = `HKLM\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\${EVA_REG_TOKEN}`;
 
-function evaVoiceDataDir() {
-  return app.isPackaged
-    ? path.join(process.resourcesPath, "voice-data")
-    : path.join(__dirname, "voice-data");
-}
-
 function evaInstallerScriptPath() {
   return app.isPackaged
     ? path.join(process.resourcesPath, "install-eva-voice.ps1")
@@ -107,14 +104,10 @@ function getEvaVoiceStatus() {
     registryPresent = false;
   }
   const filesPresent = fssync.existsSync(path.join(EVA_TTS_DIR, "M1033Eva.INI"));
-  const voiceDataPresent = fssync.existsSync(
-    path.join(evaVoiceDataDir(), "M1033Eva.INI")
-  );
   return {
     installed: registryPresent && filesPresent,
     registryPresent,
     filesPresent,
-    voiceDataPresent,
   };
 }
 
@@ -136,7 +129,6 @@ function readLogRetry(logPath, done) {
 
 function runElevatedVoiceScript(action) {
   const scriptPath = evaInstallerScriptPath();
-  const voiceDataDir = evaVoiceDataDir();
   const logPath = path.join(os.tmpdir(), `cortana-eva-${Date.now()}.log`);
   const q = (s) => `'"${s.replace(/"/g, '""')}"'`;
   const args = [
@@ -145,8 +137,6 @@ function runElevatedVoiceScript(action) {
     "'Bypass'",
     "'-File'",
     q(scriptPath),
-    "'-VoiceDataDir'",
-    q(voiceDataDir),
     "'-LogPath'",
     q(logPath),
     "'-Action'",
@@ -248,14 +238,12 @@ const scheduleReminder = (reminderData) => {
         }).show();
       }
       
-      // Play reminder sound if mainWindow exists
       // Since there's no UI to set individual reminder sounds, always use the global setting
       if (mainWindow && !mainWindow.isDestroyed()) {
         const soundFile = settings.reminderSound || "notify.wav";
         mainWindow.webContents.send("play-reminder-sound", soundFile);
       }
       
-      // remove the fired reminder
       reminders = reminders.filter((r) => r.id !== reminderData.id);
       saveReminders();
     }, timeInMs);
@@ -402,7 +390,6 @@ async function saveSettings() {
   }
 }
 
-// Initialize app when ready
 const sendAppVersion = async () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     const currentVersion = app.getVersion();
@@ -437,6 +424,62 @@ if (gotTheLock) {
 
   await loadSettings();
   await loadReminders();
+
+  powerMonitor.on('resume', () => {
+    console.log('[reminder] System resumed — checking for missed reminders.');
+    const now = Date.now();
+    reminders.forEach((reminder) => {
+      const timeLeft = new Date(reminder.time).getTime() - now;
+
+      // Cancel the old (now-stale) timeout
+      if (reminder.timeout) {
+        clearTimeout(reminder.timeout);
+        reminder.timeout = null;
+      }
+
+      if (timeLeft <= 0) {
+        // Missed while sleeping — fire immediately
+        if (Notification.isSupported()) {
+          new Notification({
+            title: `⏰ Reminder`,
+            body: `It's time for: ${reminder.text}`,
+            icon: path.join(assetsPath, 'cortana.png'),
+          }).show();
+        }
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          const soundFile = settings.reminderSound || 'notify.wav';
+          mainWindow.webContents.send('play-reminder-sound', soundFile);
+        }
+        reminders = reminders.filter((r) => r.id !== reminder.id);
+      } else {
+        // Still in the future — reschedule with correct remaining time
+        reminder.timeout = scheduleReminder(reminder);
+      }
+    });
+    saveReminders();
+  });
+
+  powerMonitor.on('resume', () => {
+    console.log('[speech] System resumed — invalidating stale recognizers.');
+
+    // Null out the WinRT recognizer so it is recreated fresh on next use
+    if (speechRecognizer) {
+      try { speechRecognizer.close(); } catch (_) {}
+      speechRecognizer = null;
+    }
+
+    // Stop any stale SAPI process — it will restart on next mic press
+    stopSapiFallback();
+
+    // If Hey Cortana was running, let the existing wake loop self-heal.
+    // The wakeRecognizer will have already ended (status 5/7) and the
+    // backoff restart timer will relaunch it automatically.
+    // We just make sure it isn't stuck in wakeRunning=true.
+    if (wakeRunning && !wakeRecognizer) {
+      wakeRunning = false;
+    }
+  });
+
   scanApplications();
 
   let speechStarting = false;
@@ -452,26 +495,13 @@ if (gotTheLock) {
   })
 
   try {
-    const consentKey = 'HKCU\\Software\\Microsoft\\Speech_OneCore\\Settings\\OnlineSpeechPrivacy';
-
-    // Read BEFORE writing — reg.exe never throws on a missing key
-    try {
-      const regOut = require('child_process').execSync(
-        `reg query "HKCU\\Software\\Microsoft\\Speech_OneCore\\Settings\\OnlineSpeechPrivacy" /v HasAccepted`,
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
-      );
-      onlineSpeechEnabled = /HasAccepted\s+REG_DWORD\s+0x1/i.test(regOut);
-    } catch (_) {
-      onlineSpeechEnabled = false;
-    }
-
-    // Now write 1 to enable it regardless
-    require('child_process').execSync(
-      `powershell -NoProfile -Command "New-Item -Path '${consentKey}' -Force | Out-Null; Set-ItemProperty -Path '${consentKey}' -Name HasAccepted -Value 1 -Type DWord -Force"`,
-      { stdio: 'ignore' }
+    const regOut = require('child_process').execSync(
+      `reg query "HKCU\\Software\\Microsoft\\Speech_OneCore\\Settings\\OnlineSpeechPrivacy" /v HasAccepted`,
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
     );
+    onlineSpeechEnabled = /HasAccepted\s+REG_DWORD\s+0x1/i.test(regOut);
   } catch (_) {
-    // Write failed — leave onlineSpeechEnabled as whatever the read found
+    onlineSpeechEnabled = false;
   }
 
   const bindingsPath = app.isPackaged
@@ -534,6 +564,10 @@ if (gotTheLock) {
         try { wakeRecognizer.close(); } catch (_) {}
         wakeRecognizer = null;
         wakeRunning = false;
+      }
+      if (queryRecognizer) {
+        try { queryRecognizer.close(); } catch (_) {}
+        queryRecognizer = null;
       }
       if (speechRecognizer) {
         try { speechRecognizer.close(); } catch (_) {}
@@ -696,7 +730,7 @@ if (gotTheLock) {
           let qr = null;
           try {
             qr = new SpeechRecognizer();
-            wakeRecognizer = qr;
+            queryRecognizer = qr;
             qr.constraints.append(new SpeechRecognitionTopicConstraint(
               SpeechRecognitionScenario.Dictation, 'dictation'));
             await qr.compileConstraintsAsync();
@@ -710,7 +744,7 @@ if (gotTheLock) {
             console.warn('[wake] Query recognition failed:', e.message);
           } finally {
             if (qr) { try { qr.close(); } catch (_) {} }
-            if (wakeRecognizer === qr) wakeRecognizer = null;
+            if (queryRecognizer === qr) queryRecognizer = null;
           }
         }
 
@@ -827,7 +861,6 @@ if (gotTheLock) {
     }, 3000);
   }
 
-  // Check for updates in the background
   sendAppVersion();
 });
 }
@@ -849,6 +882,7 @@ function showWindow() {
       });
     }
     mainWindow.webContents.send('online-speech-status', { enabled: onlineSpeechEnabled });
+    mainWindow.webContents.send('settings-force-close');
   }
 }
 
@@ -1384,23 +1418,10 @@ function registerIpcHandlers() {
     return getEvaVoiceStatus();
   });
 
-  ipcMain.handle("install-eva-voice", async () => {
-    try {
-      const status = getEvaVoiceStatus();
-      if (!status.voiceDataPresent) {
-        return { success: false, error: "Eva voice data is missing from this build." };
-      }
-      if (status.installed) {
-        return { success: true, alreadyInstalled: true, log: "" };
-      }
-      const result = await runElevatedVoiceScript("Install");
-      if (result.success) {
-        return { ...result, installed: getEvaVoiceStatus().installed };
-      }
-      return result;
-    } catch (err) {
-      return { success: false, error: err.message };
-    }
+  ipcMain.on("install-eva-voice", () => {
+    shell.openExternal(
+      "https://1drv.ms/u/c/cc24422cfecfe7e7/IQBWS7LMFWNHQZS1ZtcdaJTBAVTi4FJjAT7PFbGEfIdZiYk?e=GsGtIg"
+    );
   });
 
   ipcMain.handle("uninstall-eva-voice", async () => {

@@ -9,7 +9,7 @@
     margin: 0;
     padding: 0;
     box-sizing: border-box;
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    font-family: 'Segoe UI', 'Segoe UI Light', Tahoma, Geneva, Verdana, sans-serif;
 }
 
 html,
@@ -184,7 +184,8 @@ body.slim-mode #search-panel {
     position: absolute;
     width: 100%;
     height: 100%;
-    transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    transition: top 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                height 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
 #circle-canvas {
@@ -209,7 +210,8 @@ body.slim-mode #search-panel {
 
 #results-display {
     color: var(--text-color);
-    font-size: 22px;
+    font-size: 28px;
+    font-weight: 300;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -283,19 +285,23 @@ body.slim-mode #search-panel {
 }
 
 #animation-container.active #circle-canvas {
-    top: 40px;
+    top: 4px;
     height: 110px;
     width: auto;
 }
 
 #animation-container.active #content-wrapper {
-    top: 135px;
-    height: calc(100% - 135px);
+    top: 110px;
+    height: calc(100% - 110px);
     overflow-y: auto;
     overflow-x: hidden;
     padding-bottom: 20px;
     scrollbar-width: thin;
     scrollbar-color: #555 #171717;
+}
+
+#animation-container.active #results-display {
+    font-size: 26px;
 }
 
 #animation-container.active #content-wrapper::-webkit-scrollbar {
@@ -1124,6 +1130,7 @@ body.slim-mode #search-panel {
 #tts-engine-select,
 #edge-voice-select,
 #time-format-select,
+#weather-units-select,
 .action-item-type-select {
     background-color: #171717;
     color: white;
@@ -1182,6 +1189,7 @@ textarea.settings-text-input::-webkit-scrollbar-thumb:hover {
 #voice-select:hover, #search-engine-select:hover,
 #idle-greeting-mode-select:hover, #specific-greeting-select:hover,
 #tts-engine-select:hover, #edge-voice-select:hover, #time-format-select:hover,
+#weather-units-select:hover,
 .settings-text-input:hover, .action-item-type-select:hover {
     background-color: #333;
 }
@@ -1189,6 +1197,7 @@ textarea.settings-text-input::-webkit-scrollbar-thumb:hover {
 #voice-select:focus, #search-engine-select:focus,
 #idle-greeting-mode-select:focus, #specific-greeting-select:focus,
 #tts-engine-select:focus, #edge-voice-select:focus, #time-format-select:focus,
+#weather-units-select:focus,
 .settings-text-input:focus, .action-item-type-select:focus {
     border-color: var(--primary-color);
 }
@@ -1196,6 +1205,7 @@ textarea.settings-text-input::-webkit-scrollbar-thumb:hover {
 #voice-select option, #search-engine-select option,
 #idle-greeting-mode-select option, #specific-greeting-select option,
 #tts-engine-select option, #edge-voice-select option, #time-format-select option,
+#weather-units-select option,
 .action-item-type-select option {
     background-color: #171717;
     color: white;
