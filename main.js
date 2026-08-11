@@ -86,12 +86,6 @@ const EVA_TTS_DIR = "C:\\Windows\\Speech_OneCore\\Engines\\TTS\\en-US";
 const EVA_REG_TOKEN = "MSTTS_V110_enUS_EvaM";
 const EVA_TOKEN_PATH = `HKLM\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\${EVA_REG_TOKEN}`;
 
-function evaInstallerScriptPath() {
-  return app.isPackaged
-    ? path.join(process.resourcesPath, "install-eva-voice.ps1")
-    : path.join(__dirname, "scripts", "install-eva-voice.ps1");
-}
-
 function getEvaVoiceStatus() {
   let registryPresent = false;
   try {
@@ -125,80 +119,6 @@ function readLogRetry(logPath, done) {
     }
   };
   tryRead(0);
-}
-
-function runElevatedVoiceScript(action) {
-  const scriptPath = evaInstallerScriptPath();
-  const logPath = path.join(os.tmpdir(), `cortana-eva-${Date.now()}.log`);
-  const q = (s) => `'"${s.replace(/"/g, '""')}"'`;
-  const args = [
-    "'-NoProfile'",
-    "'-ExecutionPolicy'",
-    "'Bypass'",
-    "'-File'",
-    q(scriptPath),
-    "'-LogPath'",
-    q(logPath),
-    "'-Action'",
-    q(action),
-  ].join(", ");
-  const inner = [
-    "$ErrorActionPreference = 'Stop'",
-    `$p = Start-Process -FilePath 'powershell.exe' -ArgumentList @(${args}) -Verb RunAs -Wait -PassThru`,
-    "Write-Output ('EXIT:' + $p.ExitCode)",
-  ].join("; ");
-  const encoded = Buffer.from(inner, "utf16le").toString("base64");
-
-  return new Promise((resolve) => {
-    const proc = exec(
-      `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand "${encoded}"`,
-      { timeout: 300000, windowsHide: true },
-      (error, stdout, stderr) => {
-        const exitMatch = /EXIT:(\d+)/.exec(stdout || "");
-        const exitCode = exitMatch ? parseInt(exitMatch[1], 10) : null;
-        readLogRetry(logPath, (log) => {
-          if (exitCode === 0) {
-            try {
-              fssync.unlinkSync(logPath);
-            } catch (_) {}
-          }
-          if (exitCode === null && error) {
-            const text = `${error.message} ${stderr || ""}`.trim();
-            resolve({
-              success: false,
-              canceled: /canceled|cancelled|user declined|denied/i.test(text),
-              error: text,
-            });
-            return;
-          }
-          if (exitCode === 0) {
-            resolve({ success: true, log });
-          } else {
-            resolve({
-              success: false,
-              error: `Installer exited with code ${exitCode}. ${log}`,
-              log,
-            });
-          }
-        });
-      }
-    );
-    let logged = 0;
-    const poll = setInterval(() => {
-      try {
-        const log = fssync.readFileSync(logPath, "utf8");
-        const lines = log.split(/\r?\n/);
-        for (let i = logged; i < lines.length; i++) {
-          const line = lines[i].trim();
-          if (line && mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send("eva-voice-progress", line);
-          }
-        }
-        logged = lines.length;
-      } catch (_) {}
-    }, 250);
-    proc.on("close", () => clearInterval(poll));
-  });
 }
 
 const isSilentStart = process.argv.includes("--hidden");
@@ -426,7 +346,8 @@ if (gotTheLock) {
   await loadReminders();
 
   powerMonitor.on('resume', () => {
-    console.log('[reminder] System resumed — checking for missed reminders.');
+    console.log('[powerMonitor] System resumed — rescheduling reminders and invalidating stale recognizers.');
+
     const now = Date.now();
     reminders.forEach((reminder) => {
       const timeLeft = new Date(reminder.time).getTime() - now;
@@ -457,10 +378,6 @@ if (gotTheLock) {
       }
     });
     saveReminders();
-  });
-
-  powerMonitor.on('resume', () => {
-    console.log('[speech] System resumed — invalidating stale recognizers.');
 
     // Null out the WinRT recognizer so it is recreated fresh on next use
     if (speechRecognizer) {
@@ -494,15 +411,16 @@ if (gotTheLock) {
     args: ["--hidden"],
   })
 
-  try {
-    const regOut = require('child_process').execSync(
-      `reg query "HKCU\\Software\\Microsoft\\Speech_OneCore\\Settings\\OnlineSpeechPrivacy" /v HasAccepted`,
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
-    );
-    onlineSpeechEnabled = /HasAccepted\s+REG_DWORD\s+0x1/i.test(regOut);
-  } catch (_) {
-    onlineSpeechEnabled = false;
-  }
+  onlineSpeechEnabled = await new Promise((resolve) => {
+    const cmd = `reg query "HKCU\\Software\\Microsoft\\Speech_OneCore\\Settings\\OnlineSpeechPrivacy" /v HasAccepted`;
+    exec(cmd, { timeout: 3000, windowsHide: true }, (error, stdout) => {
+      if (error) {
+        resolve(false);
+        return;
+      }
+      resolve(/HasAccepted\s+REG_DWORD\s+0x1/i.test(stdout || ""));
+    });
+  });
 
   const bindingsPath = app.isPackaged
     ? path.join(__dirname, '.winapp', 'bindings')
@@ -1037,6 +955,10 @@ function closeApp() {
 }
 
 function registerIpcHandlers() {
+  ipcMain.on("get-is-packaged", (event) => {
+    event.returnValue = app.isPackaged;
+  });
+
   ipcMain.on("hide-window", () => {
     speechCancelled = true;
     if (speechRecognizer) {
@@ -1422,18 +1344,6 @@ function registerIpcHandlers() {
     shell.openExternal(
       "https://1drv.ms/u/c/cc24422cfecfe7e7/IQBWS7LMFWNHQZS1ZtcdaJTBAVTi4FJjAT7PFbGEfIdZiYk?e=GsGtIg"
     );
-  });
-
-  ipcMain.handle("uninstall-eva-voice", async () => {
-    try {
-      const result = await runElevatedVoiceScript("Uninstall");
-      if (result.success) {
-        return { ...result, installed: getEvaVoiceStatus().installed };
-      }
-      return result;
-    } catch (err) {
-      return { success: false, error: err.message };
-    }
   });
 
   const regionAliases = {
