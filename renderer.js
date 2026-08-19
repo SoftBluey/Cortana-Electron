@@ -65,11 +65,10 @@ let blurCleanupTimer = null;
 let suppressThemeInput = false;
 let wakeTriggered = false;
 
-let timerId = null;
-let timerInterval = null;
+let activeTimerId = null;
+let timerCountdownInterval = null;
 let timerEndTime = null;
 let timerDuration = null;
-
 
 const isPackaged = ipcRenderer.sendSync('get-is-packaged');
 const appRoot = path.resolve(__dirname, isPackaged ? '../assets' : 'assets');
@@ -1436,6 +1435,51 @@ window.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
+    ipcRenderer.on('accent-color-updated', (event, color) => {
+        applyAccentColor(color);
+    });
+
+    ipcRenderer.on('timer-fired', (event, { id, label }) => {
+        // Clean up countdown display
+        if (timerCountdownInterval) {
+            clearInterval(timerCountdownInterval);
+            timerCountdownInterval = null;
+        }
+        activeTimerId = null;
+        timerEndTime = null;
+        timerDuration = null;
+
+        const display = document.getElementById('timer-display');
+        if (display) display.textContent = "Time's up!";
+
+        // Always play the chime — this works even when media is playing
+        // because we use a short Audio object, not the TTS engine
+        const notifyAudio = new Audio(path.join(appRoot, 'notify.wav'));
+        notifyAudio.play().catch(() => {});
+
+        // If the app is busy (mid-query) or hidden, the Windows notification
+        // (fired in main.js) is enough — do NOT interrupt the current state.
+        // Queue a spoken alert for when the app becomes free.
+        if (isBusy || document.hidden) {
+            // Show a brief text update if the timer display is still on screen
+            if (display) {
+                display.textContent = "⏰ Time's up!";
+            }
+            return;
+        }
+
+        // App is idle and visible — speak the alert
+        setStateActive();
+        anim.goToState(AnimationState.SPEAKING_BEGIN);
+        speak("Time's up! Your timer has finished.", () => {
+            isBusy = false;
+            searchBar.disabled = false;
+            searchBar.placeholder = 'Type here to search';
+            anim.goToState(AnimationState.SPEAKING_END,
+                { nextState: AnimationState.TRANSITION_TO_IDLE });
+        });
+    });
+
     await loadAndApplySettings();
     setupTTS();
     refreshEvaVoiceStatus();
@@ -1501,6 +1545,11 @@ async function generateCategorizedResults(query) {
                 icon: PANEL_ICONS.cortana,
                 action: () => {
                     lastQuery = query;
+                    isBusy = true;
+                    setStateActive();
+                    resultsDisplay.innerHTML = '';
+                    requestSound.currentTime = 0;
+                    requestSound.play();
                     executeActionSequence(a.actions);
                 }
             });
@@ -1926,7 +1975,7 @@ async function loadAndApplySettings() {
         const result = await ipcRenderer.invoke('get-accent-color');
         if (result.success) {
             const accentHex = result.color.replace('#', '');
-            applyThemeColor('#' + accentHex.slice(0, 6));
+            applyAccentColor('#' + accentHex.slice(0, 6));
             suppressThemeInput = true;
             themeColorPicker.value = themeColor;
             suppressThemeInput = false;
@@ -2123,11 +2172,15 @@ function applyThemeColor(color) {
     document.documentElement.style.setProperty('--hue-rotate-deg', `${hueDifference}deg`);
 }
 
+function applyAccentColor(color) {
+    applyThemeColor(color);
+}
+
 async function fetchAndApplyAccentColor() {
     const result = await ipcRenderer.invoke('get-accent-color');
     if (result.success) {
         const accentHex = result.color.replace('#', '');
-        applyThemeColor('#' + accentHex.slice(0, 6));
+        applyAccentColor('#' + accentHex.slice(0, 6));
         suppressThemeInput = true;
         themeColorPicker.value = themeColor;
         suppressThemeInput = false;
@@ -3552,11 +3605,13 @@ const commands = [
     {
         regex: /^(?:cancel|stop) (?:the )?timer$/i,
         handler: () => {
-            if (timerId) {
-                clearTimeout(timerId);
-                timerId = null;
-                if (timerInterval) clearInterval(timerInterval);
-                timerInterval = null;
+            if (activeTimerId !== null) {
+                ipcRenderer.send('cancel-timer', activeTimerId);
+                activeTimerId = null;
+                if (timerCountdownInterval) {
+                    clearInterval(timerCountdownInterval);
+                    timerCountdownInterval = null;
+                }
                 timerEndTime = null;
                 timerDuration = null;
                 displayAndSpeak("Timer cancelled.", onActionFinished, {}, false);
@@ -3568,14 +3623,18 @@ const commands = [
     {
         regex: /^how much time (?:is )?left(?: on the timer)?\??$/i,
         handler: () => {
-            if (!timerEndTime) {
+            if (activeTimerId === null) {
                 displayAndSpeak("There's no timer running.", onActionFinished, {}, false);
                 return;
             }
-            const remaining = Math.max(0, timerEndTime - Date.now());
-            const mins = Math.floor(remaining / 60000);
-            const secs = Math.floor((remaining % 60000) / 1000);
-            displayAndSpeak(`${mins} minute${mins !== 1 ? 's' : ''} and ${secs} second${secs !== 1 ? 's' : ''} remaining.`, onActionFinished, {}, false);
+            ipcRenderer.invoke('get-timer-remaining', activeTimerId).then(({ remaining }) => {
+                const mins = Math.floor(remaining / 60000);
+                const secs = Math.floor((remaining % 60000) / 1000);
+                displayAndSpeak(
+                    `${mins} minute${mins !== 1 ? 's' : ''} and ${secs} second${secs !== 1 ? 's' : ''} remaining.`,
+                    onActionFinished, {}, false
+                );
+            });
         }
     },
     {
@@ -3795,7 +3854,12 @@ const commands = [
     {
         regex: /^(what's up|sup|how's it going|how are you)\??$/i,
         handler: () => {
-            ("Not much. What can I do for you?")
+            const responses = [
+                "Not much. What can I do for you?",
+                "Doing well. What's on your mind?",
+                "All good here. What can I help with?"
+            ];
+            const response = responses[Math.floor(Math.random() * responses.length)];
             displayAndSpeak(response, onActionFinished, {}, false);
         }
     },
@@ -3864,23 +3928,27 @@ function wouldCommandMatch(text) {
     return false;
 }
 
-function startTimer(value, unit, ms) {
-    if (timerId) {
-        clearTimeout(timerId);
-        timerId = null;
+async function startTimer(value, unit, ms) {
+    // Cancel any existing timer
+    if (activeTimerId !== null) {
+      ipcRenderer.send('cancel-timer', activeTimerId);
+      activeTimerId = null;
     }
-    if (timerInterval) {
-        clearInterval(timerInterval);
-        timerInterval = null;
+    if (timerCountdownInterval) {
+      clearInterval(timerCountdownInterval);
+      timerCountdownInterval = null;
     }
 
-    timerEndTime = Date.now() + ms;
+    const label = `Your ${value} ${unit}${value !== 1 ? 's' : ''} timer is up!`;
+    const result = await ipcRenderer.invoke('start-timer', { ms, label });
+    activeTimerId = result.id;
+    timerEndTime = result.endTime;
     timerDuration = ms;
 
     anim.goToState(AnimationState.SPEAKING_BEGIN);
     speak(`Timer set for ${value} ${unit}${value !== 1 ? 's' : ''}.`, () => {
-        if (!timerEndTime) return;
-        onActionFinished();
+      if (!timerEndTime) return;
+      onActionFinished();
     });
 
     resultsDisplay.innerHTML = '';
@@ -3892,48 +3960,30 @@ function startTimer(value, unit, ms) {
     timerDisplay.style.fontWeight = 'bold';
     resultsDisplay.appendChild(timerDisplay);
 
-    const updateTimer = () => {
-        const remaining = Math.max(0, timerEndTime - Date.now());
-        if (remaining <= 0) {
-            clearInterval(timerInterval);
-            timerInterval = null;
-            timerId = null;
-            timerEndTime = null;
-            timerDuration = null;
-            const display = document.getElementById('timer-display');
-            if (display) display.textContent = 'Time\'s up!';
-            const notifyAudio = new Audio(path.join(appRoot, 'notify.wav'));
-            notifyAudio.play();
-            anim.goToState(AnimationState.SPEAKING_BEGIN);
-            speak('Time\'s up! Your timer has finished.', () => {
-                isBusy = false;
-                searchBar.disabled = false;
-                searchBar.placeholder = 'Type here to search';
-                anim.goToState(AnimationState.SPEAKING_END, { nextState: AnimationState.TRANSITION_TO_IDLE });
-            });
-            return;
+    const updateDisplay = async () => {
+      const { remaining, active } =
+        await ipcRenderer.invoke('get-timer-remaining', activeTimerId);
+      if (!active || remaining <= 0) {
+        if (timerCountdownInterval) {
+          clearInterval(timerCountdownInterval);
+          timerCountdownInterval = null;
         }
-        const mins = Math.floor(remaining / 60000);
-        const secs = Math.floor((remaining % 60000) / 1000);
-        const display = document.getElementById('timer-display');
-        if (display) {
-            display.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
-        }
+        return;
+      }
+      const mins = Math.floor(remaining / 60000);
+      const secs = Math.floor((remaining % 60000) / 1000);
+      const display = document.getElementById('timer-display');
+      if (display) display.textContent =
+        `${mins}:${secs.toString().padStart(2, '0')}`;
     };
 
-    updateTimer();
-    timerInterval = setInterval(updateTimer, 250);
-    timerId = setTimeout(() => {
-        if (timerInterval) {
-            clearInterval(timerInterval);
-            timerInterval = null;
-        }
-    }, ms + 1000);
+    updateDisplay();
+    timerCountdownInterval = setInterval(updateDisplay, 500);
 
     isBusy = false;
     searchBar.disabled = false;
     searchBar.placeholder = 'Type here to search';
-}
+  }
 
 const UNIT_CONVERSIONS = {
     mm: 0.001, cm: 0.01, m: 1, km: 1000,
@@ -4102,12 +4152,7 @@ async function executeActionSequence(actions) {
             return;
         }
     }
-    // Don't call onActionFinished if the last action was 'speak'
-    // — the speak callback already handles the animation transition.
-    const lastAction = actions[actions.length - 1];
-    if (!lastAction || lastAction.type !== 'speak') {
-        onActionFinished();
-    }
+    onActionFinished();
 }
 
 function renderActionSequenceUI(actions) {

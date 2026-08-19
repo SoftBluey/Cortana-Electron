@@ -259,23 +259,33 @@ body.slim-mode #search-panel {
 }
 
 .choice-button {
-    background-color: #333;
+    background-color: var(--primary-color);
     border: 1px solid transparent;
-    color: white;
-    padding: 10px 15px;
+    color: var(--primary-text-color);
+    padding: 4px 20px;
     margin: 4px;
     border-radius: 0;
     cursor: pointer;
     font-size: 14px;
     width: 85%;
     text-align: center;
-    transition: background-color 0.2s ease-out, border-color 0.2s ease-out;
+    line-height: 1.4;
 }
-
 .choice-button:hover {
-    background-color: var(--primary-color);
-    border-color: var(--primary-color);
-    color: var(--primary-text-color);
+    filter: brightness(1.12);
+}
+.choice-button:active {
+    filter: brightness(0.88);
+}
+.choice-button.neutral {
+    background-color: #1a1a1a;
+    border-color: #555;
+    color: white;
+    filter: none;
+}
+.choice-button.neutral:hover {
+    background-color: #2e2e2e;
+    filter: none;
 }
 
 #animation-container.idle #circle-canvas {
@@ -757,25 +767,24 @@ body.slim-mode #search-panel {
     flex-grow: 1;
     border: none;
     color: white;
-    padding: 12px 0;
+    padding: 4px 0;
     cursor: pointer;
-    font-size: 15px;
+    font-size: 14px;
     border-radius: 0;
-}
-
-.reminder-actions button:hover {
-    filter: brightness(1.2);
+    line-height: 1.4;
 }
 
 #reminder-save-btn,
 #custom-action-save-btn {
     background-color: var(--primary-color);
     color: var(--primary-text-color);
+    padding: 4px 16px;
 }
 
 #reminder-cancel-btn,
 #custom-action-cancel-btn {
     background-color: #5a5a5a;
+    padding: 4px 16px;
 }
 
 #reminder-save-btn:disabled,
@@ -858,22 +867,23 @@ body.slim-mode #search-panel {
 }
 
 .reminder-action-btn {
-    background: #444;
-    border: none;
+    background: #1a1a1a;
+    border: 1px solid #555;
     color: white;
     font-size: 12px;
-    padding: 6px 10px;
+    padding: 4px 10px;
     cursor: pointer;
-    transition: background-color 0.2s ease;
     border-radius: 0;
+    line-height: 1.4;
 }
 
 .reminder-action-btn:hover {
-    background: #555;
+    background: #2e2e2e;
 }
 
 .reminder-action-btn.delete:hover {
     background-color: #c0392b;
+    border-color: #c0392b;
 }
 
 #settings-container {
@@ -1076,15 +1086,15 @@ body.slim-mode #search-panel {
 }
 
 .action-item-browse-btn {
-    padding: 8px 10px;
+    padding: 4px 12px;
     font-size: 14px;
-    background-color: #444;
-    border: 1px solid #888;
+    background-color: #1a1a1a;
+    border: 1px solid #555;
     color: white;
     cursor: pointer;
 }
 .action-item-browse-btn:hover {
-    background-color: #555;
+    background-color: #2e2e2e;
 }
 
 
@@ -1229,19 +1239,21 @@ textarea.settings-text-input::-webkit-scrollbar-thumb:hover {
 }
 
 .metro-style-button {
-    background-color: #333;
-    border: 1px solid #888;
+    background-color: #1a1a1a;
+    border: 1px solid #555;
     color: white;
     cursor: pointer;
     font-size: 14px;
-    padding: 8px 12px;
-    transition: background-color 0.2s ease;
+    padding: 4px 16px;
     border-radius: 0;
     text-align: center;
+    line-height: 1.4;
 }
-
 .metro-style-button:hover {
-    background-color: #444;
+    background-color: #2e2e2e;
+}
+.metro-style-button:active {
+    background-color: #111;
 }
 
 
@@ -1359,29 +1371,37 @@ input:checked + .slider:before {
 
 .settings-button {
     width: 100%;
-    padding: 10px;
-    background-color: #333;
-    border: 1px solid #888;
+    padding: 4px 16px;
+    background-color: #1a1a1a;
+    border: 1px solid #555;
     color: white;
     cursor: pointer;
     font-size: 14px;
-    margin-top: 15px;
-    transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+    margin-top: 12px;
     border-radius: 0;
+    line-height: 1.4;
 }
-
 .settings-button:hover {
-    background-color: #444;
+    background-color: #2e2e2e;
+}
+.settings-button:active {
+    background-color: #111;
 }
 
 .settings-button.danger {
-    color: #e74c3c;
-    border-color: #e74c3c;
+    background-color: #c0392b;
+    border-color: #c0392b;
+    color: white;
+    padding: 4px 16px;
 }
-
 .settings-button.danger:hover {
     background-color: #e74c3c;
+    border-color: #e74c3c;
     color: white;
+}
+.settings-button.danger:active {
+    background-color: #a93226;
+    border-color: #a93226;
 }
 
 #update-status {
@@ -1402,9 +1422,11 @@ input:checked + .slider:before {
 #update-button {
     background-color: var(--primary-color);
     color: var(--primary-text-color);
+    padding: 4px 16px;
 }
 
 #update-button:hover {
+    background-color: var(--primary-color);
     filter: brightness(1.1);
 }
 

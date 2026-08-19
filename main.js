@@ -46,8 +46,12 @@ let isClosing = false;
 let lastHiddenTime = 0;
 
 let applicationCache = new Map();
+let lastAppScanTime = 0;
 
 let reminders = [];
+
+let activeTimers = new Map(); // id -> { timeout, endTime, durationMs }
+let timerIdCounter = 0;
 
 let settings = {
   openAtLogin: true,
@@ -81,6 +85,14 @@ let REMINDERS_FILE;
 let iconPath;
 let assetsPath;
 let onlineSpeechEnabled = false;
+
+function normalizeAccentColor(raw) {
+  if (!raw) return null;
+  // getAccentColor() returns RRGGBBAA (8 hex chars, no #)
+  // Strip the alpha channel and prepend #
+  const hex = raw.replace(/^#/, '');
+  return '#' + hex.substring(0, 6);
+}
 
 const EVA_TTS_DIR = "C:\\Windows\\Speech_OneCore\\Engines\\TTS\\en-US";
 const EVA_REG_TOKEN = "MSTTS_V110_enUS_EvaM";
@@ -397,7 +409,18 @@ if (gotTheLock) {
     }
   });
 
+  systemPreferences.on('accent-color-changed', (event, newColor) => {
+    if (mainWindow && !mainWindow.isDestroyed() && settings.useWindowsAccent) {
+      const normalized = normalizeAccentColor(newColor);
+      if (normalized) mainWindow.webContents.send('accent-color-updated', normalized);
+    }
+  });
+
   scanApplications();
+
+  setInterval(() => {
+    scanApplications();
+  }, 30 * 60 * 1000); // rescan every 30 minutes
 
   let speechStarting = false;
   let speechCancelled = false;
@@ -631,14 +654,20 @@ if (gotTheLock) {
         try { await session.stopAsync(); } catch (_) {}
         sessionEndedResolve();
 
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          if (mainWindow.isVisible()) {
-            mainWindow.webContents.send('wake-listen');
-          } else {
-            mainWindow.webContents.send('wake-slim');
-            showWindow();
+if (mainWindow && !mainWindow.isDestroyed()) {
+            if (mainWindow.isVisible()) {
+              mainWindow.webContents.send('wake-listen');
+            } else {
+              mainWindow.webContents.send('wake-slim');
+              if (settings.useWindowsAccent) {
+                try {
+                  const accent = normalizeAccentColor(systemPreferences.getAccentColor());
+                  if (accent) mainWindow.webContents.send('accent-color-updated', accent);
+                } catch (_) {}
+              }
+              showWindow();
+            }
           }
-        }
 
         try { rec.close(); } catch (_) {}
         rec = null;
@@ -800,7 +829,17 @@ function showWindow() {
       });
     }
     mainWindow.webContents.send('online-speech-status', { enabled: onlineSpeechEnabled });
+    if (settings.useWindowsAccent) {
+      try {
+        const accent = normalizeAccentColor(systemPreferences.getAccentColor());
+        if (accent) mainWindow.webContents.send('accent-color-updated', accent);
+      } catch (_) {}
+    }
     mainWindow.webContents.send('settings-force-close');
+    const timeSinceCache = Date.now() - lastAppScanTime;
+    if (timeSinceCache > 5 * 60 * 1000) {
+      scanApplications();
+    }
   }
 }
 
@@ -859,6 +898,7 @@ async function scanApplications() {
     }
   }
   console.log(`Scanned and cached ${applicationCache.size} applications.`);
+  lastAppScanTime = Date.now();
 }
 
 function fetchDuckDuckGoResults(query) {
@@ -979,7 +1019,7 @@ function registerIpcHandlers() {
   ipcMain.handle("get-accent-color", () => {
     try {
       const accent = systemPreferences.getAccentColor();
-      return { success: true, color: accent };
+      return { success: true, color: normalizeAccentColor(accent) };
     } catch (e) {
       return { success: false };
     }
@@ -1280,6 +1320,46 @@ function registerIpcHandlers() {
       reminders.push(newReminder);
       await saveReminders();
     }
+  });
+
+  ipcMain.handle('start-timer', (event, { ms, label }) => {
+    const id = ++timerIdCounter;
+    const endTime = Date.now() + ms;
+
+    const timeout = setTimeout(() => {
+      activeTimers.delete(id);
+
+      // Always fire a Windows notification regardless of app state
+      if (Notification.isSupported()) {
+        new Notification({
+          title: '⏰ Timer',
+          body: label || "Time's up!",
+          icon: path.join(assetsPath, 'cortana.png'),
+        }).show();
+      }
+
+      // Tell the renderer — it decides whether to speak or just play sound
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('timer-fired', { id, label });
+      }
+    }, ms);
+
+    activeTimers.set(id, { timeout, endTime, durationMs: ms });
+    return { id, endTime };
+  });
+
+  ipcMain.on('cancel-timer', (event, id) => {
+    const t = activeTimers.get(id);
+    if (t) {
+      clearTimeout(t.timeout);
+      activeTimers.delete(id);
+    }
+  });
+
+  ipcMain.handle('get-timer-remaining', (event, id) => {
+    const t = activeTimers.get(id);
+    if (!t) return { remaining: 0, active: false };
+    return { remaining: Math.max(0, t.endTime - Date.now()), active: true };
   });
 
   ipcMain.on(
@@ -1695,6 +1775,14 @@ function createWindow() {
   });
 
   mainWindow.loadFile("index.html");
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (settings.useWindowsAccent) {
+      try {
+        const accent = normalizeAccentColor(systemPreferences.getAccentColor());
+        if (accent) mainWindow.webContents.send('accent-color-updated', accent);
+      } catch (_) {}
+    }
+  });
   mainWindow.on("ready-to-show", () => {
     if (!isSilentStart) {
       showWindow();
