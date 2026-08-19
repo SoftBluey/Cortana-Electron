@@ -7,19 +7,19 @@
   "license": "GPL-3.0",
   "scripts": {
     "start": "electron .",
-    "prestart": "node -e \"const fs=require('fs');if(!fs.existsSync('./.winapp/bindings/index.js')){const{execSync}=require('child_process');execSync('npx winapp restore',{stdio:'inherit'});execSync('node scripts/patch-bindings.js',{stdio:'inherit'})}\"",
-    "postinstall": "electron-builder install-app-deps && node scripts/patch-bindings.js",
-    "generate-bindings": "npx winapp restore && node scripts/patch-bindings.js",
-    "dist": "npx winapp restore && node scripts/patch-bindings.js && electron-builder"
+    "prestart": "node -e \"const fs=require('fs');if(!fs.existsSync('./.winapp/bindings/index.js')){const{execSync}=require('child_process');execSync('npx winapp restore',{stdio:'inherit'})}\"",
+    "postinstall": "electron-builder install-app-deps",
+    "generate-bindings": "npx winapp restore",
+    "dist": "npx winapp restore && electron-builder"
   },
   "dependencies": {
-    "@microsoft/dynwinrt": "0.1.0-preview.18",
+    "@microsoft/dynwinrt": "0.1.0-preview.19",
     "city-timezones": "^1.3.1",
     "gifuct-js": "^2.1.2",
     "node-edge-tts": "^1.2.10"
   },
   "devDependencies": {
-    "@microsoft/dynwinrt-codegen": "0.1.0-preview.18",
+    "@microsoft/dynwinrt-codegen": "0.1.0-preview.19",
     "@microsoft/winappcli": "^0.5.0",
     "electron": "^43.2.0",
     "electron-builder": "^26.15.7"
