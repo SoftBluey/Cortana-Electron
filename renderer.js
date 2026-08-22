@@ -1620,6 +1620,8 @@ async function generateCategorizedResults(query) {
                     } else {
                         displayAndSpeak(result.error || "Sorry, I couldn't get an answer from AI.", onActionFinished, {}, true);
                     }
+                }).catch(() => {
+                    displayAndSpeak("Sorry, I couldn't get an answer from AI.", onActionFinished, {}, true);
                 });
             }
         });
@@ -2586,6 +2588,13 @@ function speakEdge(text, onSpeechEndCallback) {
         currentEdgeAudio = null;
     }
 
+    let callbackInvoked = false;
+    const invokeCallback = () => {
+        if (callbackInvoked) return;
+        callbackInvoked = true;
+        if (onSpeechEndCallback) onSpeechEndCallback();
+    };
+
     ipcRenderer.invoke('synthesize-edge-tts', {
         text,
         voice: edgeVoice,
@@ -2594,29 +2603,32 @@ function speakEdge(text, onSpeechEndCallback) {
     }).then(result => {
         if (!result.success) {
             console.error('Edge TTS failed:', result.error);
-            if (onSpeechEndCallback) onSpeechEndCallback();
+            invokeCallback();
             return;
         }
         const audio = new Audio('file://' + result.filePath.replace(/\\/g, '/'));
         currentEdgeAudio = audio;
-        audio.onended = () => {
+        const cleanup = () => {
             currentEdgeAudio = null;
             try { require('fs').unlinkSync(result.filePath); } catch(e) {}
-            if (onSpeechEndCallback) onSpeechEndCallback();
         };
-        audio.onerror = () => {
-            currentEdgeAudio = null;
-            try { require('fs').unlinkSync(result.filePath); } catch(e) {}
-            if (onSpeechEndCallback) onSpeechEndCallback();
+        audio.onended = () => {
+            cleanup();
+            invokeCallback();
+        };
+        audio.onerror = (err) => {
+            console.error('Edge TTS audio error:', err);
+            cleanup();
+            invokeCallback();
         };
         audio.play().catch(err => {
             console.error('Edge TTS audio play failed:', err);
-            currentEdgeAudio = null;
-            if (onSpeechEndCallback) onSpeechEndCallback();
+            cleanup();
+            invokeCallback();
         });
     }).catch(err => {
         console.error('Edge TTS invoke failed:', err);
-        if (onSpeechEndCallback) onSpeechEndCallback();
+        invokeCallback();
     });
 }
 
@@ -3209,52 +3221,61 @@ function formatDateTimeForInput(date) {
     return `${year}-${month}-${day}T${hours}:${minutes}`;
 }
 
-function onSaveReminder() {
+async function onSaveReminder() {
     const reminder = reminderTextInput.value.trim();
     const timeValue = reminderTimeInput.value;
     
     let soundValue;
     if (editingReminderId && editingReminderSound) {
-        // If we're editing an existing reminder, use the sound that was initially set for this reminder during editing
-        // This preserves the original reminder's sound unless the user somehow changed it in the UI (which isn't currently possible)
         soundValue = editingReminderSound;
     } else {
-        // For new reminders, read directly from the settings input field to ensure we get the latest value
         soundValue = reminderSoundSettingInput.value || "notify.wav";
     }
 
-    if (reminder && timeValue) {
-        const reminderDate = new Date(timeValue);
-        const reminderPayload = { 
-            reminder, 
-            reminderTime: reminderDate.toISOString(),
-            sound: soundValue
-        };
-        let text;
-
-        if (editingReminderId) {
-            ipcRenderer.send('update-reminder', { id: editingReminderId, ...reminderPayload });
-            text = "Done. I've updated your reminder.";
-        } else {
-            ipcRenderer.send('set-reminder', reminderPayload);
-            const friendlyTime = reminderDate.toLocaleString([], formatDateTimeOptions());
-            text = `OK. I'll remind you to "${reminder}" on ${friendlyTime}.`;
-        }
-
-        editingReminderId = null;
-        editingReminderSound = null;
-
-        reminderContainer.classList.remove('visible');
-        animationContainer.style.display = 'block';
-        contentWrapper.style.display = 'block';
-        setStateActive();
-        anim.goToState(AnimationState.SPEAKING_BEGIN);
-
-        displayAndSpeak(text, onActionFinished, {}, false);
-    } else {
+    if (!reminder || !timeValue) {
         const errorText = "Please enter both a reminder and a valid time.";
         displayAndSpeak(errorText, onActionFinished, {}, true);
+        return;
     }
+
+    const reminderDate = new Date(timeValue);
+    const reminderPayload = { 
+        reminder, 
+        reminderTime: reminderDate.toISOString(),
+        sound: soundValue
+    };
+
+    let result;
+    if (editingReminderId) {
+        result = await ipcRenderer.invoke('update-reminder', { id: editingReminderId, ...reminderPayload });
+    } else {
+        result = await ipcRenderer.invoke('set-reminder', reminderPayload);
+    }
+
+    if (!result.success) {
+        const errorText = result.error || 'The reminder could not be saved.';
+        displayAndSpeak(errorText, onActionFinished, {}, true);
+        return;
+    }
+
+    editingReminderId = null;
+    editingReminderSound = null;
+
+    reminderContainer.classList.remove('visible');
+    animationContainer.style.display = 'block';
+    contentWrapper.style.display = 'block';
+    setStateActive();
+    anim.goToState(AnimationState.SPEAKING_BEGIN);
+
+    let text;
+    if (editingReminderId) {
+        text = "Done. I've updated your reminder.";
+    } else {
+        const friendlyTime = reminderDate.toLocaleString([], formatDateTimeOptions());
+        text = `OK. I'll remind you to "${reminder}" on ${friendlyTime}.`;
+    }
+
+    displayAndSpeak(text, onActionFinished, {}, false);
 }
 
 
@@ -3290,8 +3311,8 @@ async function handleOpenApplication(appName, silent = false) {
     const apps = await ipcRenderer.invoke('find-application', appName);
 
     if (apps.length === 0) {
-        const fallbackSuccess = await ipcRenderer.invoke('open-application-fallback', appName);
-        if (fallbackSuccess) {
+        const fallbackResult = await ipcRenderer.invoke('open-application-fallback', appName);
+        if (fallbackResult.success) {
             if (!silent) {
                 const responseText = `I couldn't find "${appName}" in your Start Menu, but I'm opening it directly.`;
                 displayAndSpeak(responseText, onActionFinished, {}, false);
@@ -3929,9 +3950,19 @@ function wouldCommandMatch(text) {
 }
 
 async function startTimer(value, unit, ms) {
+    if (!Number.isFinite(ms) || !Number.isSafeInteger(ms) || ms <= 0) {
+      displayAndSpeak(
+        'Please choose a valid timer duration.',
+        onActionFinished,
+        {},
+        true
+      );
+      return;
+    }
+
     // Cancel any existing timer
     if (activeTimerId !== null) {
-      ipcRenderer.send('cancel-timer', activeTimerId);
+      await ipcRenderer.invoke('cancel-timer', activeTimerId);
       activeTimerId = null;
     }
     if (timerCountdownInterval) {
@@ -3941,6 +3972,17 @@ async function startTimer(value, unit, ms) {
 
     const label = `Your ${value} ${unit}${value !== 1 ? 's' : ''} timer is up!`;
     const result = await ipcRenderer.invoke('start-timer', { ms, label });
+
+    if (!result.success) {
+      displayAndSpeak(
+        result.error || 'Failed to start timer.',
+        onActionFinished,
+        {},
+        true
+      );
+      return;
+    }
+
     activeTimerId = result.id;
     timerEndTime = result.endTime;
     timerDuration = ms;
@@ -3961,6 +4003,7 @@ async function startTimer(value, unit, ms) {
     resultsDisplay.appendChild(timerDisplay);
 
     const updateDisplay = async () => {
+      if (activeTimerId === null) return;
       const { remaining, active } =
         await ipcRenderer.invoke('get-timer-remaining', activeTimerId);
       if (!active || remaining <= 0) {
@@ -4075,10 +4118,10 @@ function processQuery(query) {
             if (result.success) {
                 displayAndSpeak(result.text, onActionFinished, {}, false);
             } else {
-                performWebSearch(query);
+                displayAndSpeak(result.error || "Sorry, I couldn't get an answer from AI.", onActionFinished, {}, true);
             }
         }).catch(() => {
-            performWebSearch(query);
+            displayAndSpeak("Sorry, I couldn't get an answer from AI.", onActionFinished, {}, true);
         });
         return;
     }
