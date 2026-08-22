@@ -3245,6 +3245,9 @@ async function onSaveReminder() {
         sound: soundValue
     };
 
+    const wasEditing = !!editingReminderId;
+
+    anim.goToState(AnimationState.THINKING);
     let result;
     if (editingReminderId) {
         result = await ipcRenderer.invoke('update-reminder', { id: editingReminderId, ...reminderPayload });
@@ -3264,11 +3267,10 @@ async function onSaveReminder() {
     reminderContainer.classList.remove('visible');
     animationContainer.style.display = 'block';
     contentWrapper.style.display = 'block';
-    setStateActive();
-    anim.goToState(AnimationState.SPEAKING_BEGIN);
+    setStateIdle();
 
     let text;
-    if (editingReminderId) {
+    if (wasEditing) {
         text = "Done. I've updated your reminder.";
     } else {
         const friendlyTime = reminderDate.toLocaleString([], formatDateTimeOptions());
@@ -3311,6 +3313,7 @@ async function handleOpenApplication(appName, silent = false) {
     const apps = await ipcRenderer.invoke('find-application', appName);
 
     if (apps.length === 0) {
+        anim.goToState(AnimationState.THINKING);
         const fallbackResult = await ipcRenderer.invoke('open-application-fallback', appName);
         if (fallbackResult.success) {
             if (!silent) {
@@ -3971,6 +3974,8 @@ async function startTimer(value, unit, ms) {
     }
 
     const label = `Your ${value} ${unit}${value !== 1 ? 's' : ''} timer is up!`;
+    
+    anim.goToState(AnimationState.THINKING);
     const result = await ipcRenderer.invoke('start-timer', { ms, label });
 
     if (!result.success) {
@@ -4142,6 +4147,7 @@ function onSearch() {
     searchBar.blur();
     clearTimeout(blurCleanupTimer);
     searchBar.value = '';
+    autoResizeSearchBar();
     resultsDisplay.innerHTML = '';
 
     requestSound.currentTime = 0;

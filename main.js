@@ -48,6 +48,30 @@ const speechState = {
   generation: 0,
 };
 
+function cancelManualSpeech({ stopFallback = true } = {}) {
+  speechState.cancelled = true;
+  speechState.generation += 1;
+  speechState.starting = false;
+
+  if (speechState.recognizer) {
+    try {
+      speechState.recognizer.close();
+    } catch (_) {}
+    speechState.recognizer = null;
+  }
+
+  if (speechState.queryRecognizer) {
+    try {
+      speechState.queryRecognizer.close();
+    } catch (_) {}
+    speechState.queryRecognizer = null;
+  }
+
+  if (stopFallback) {
+    stopSapiFallback();
+  }
+}
+
 const winWidth = 360;
 const winHeight = 640;
 let isSettingsVisible = false;
@@ -582,29 +606,6 @@ if (gotTheLock) {
 
   let powerBlocker = null;
 
-  function cancelManualSpeech({ stopFallback = true } = {}) {
-    speechState.cancelled = true;
-    speechState.generation += 1;
-
-    if (speechState.recognizer) {
-      try {
-        speechState.recognizer.close();
-      } catch (_) {}
-      speechState.recognizer = null;
-    }
-
-    if (speechState.queryRecognizer) {
-      try {
-        speechState.queryRecognizer.close();
-      } catch (_) {}
-      speechState.queryRecognizer = null;
-    }
-
-    if (stopFallback) {
-      stopSapiFallback();
-    }
-  }
-
   function stopSapiFallback() {
     const processToStop = speechState.process;
     speechState.process = null;
@@ -735,43 +736,6 @@ if (gotTheLock) {
     SpeechRecognitionTopicConstraint,
     SpeechRecognitionScenario,
   } = require(bindingsPath);
-
-  function startSapiFallback() {
-    if (speechProcess) return;
-    const scriptPath = app.isPackaged
-      ? path.join(process.resourcesPath, 'speech.ps1')
-      : path.join(__dirname, 'speech.ps1');
-    const ps = spawn('powershell.exe', [
-      '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', scriptPath
-    ]);
-    speechProcess = ps;
-    let buffer = '';
-    ps.stdout.on('data', (d) => {
-      buffer += d.toString();
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-      for (const line of lines) {
-        const t = line.trim();
-        if (!t) continue;
-        if (t === 'READY') {
-          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-ready');
-        } else if (t.startsWith('FINAL:')) {
-          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-result', { final: true, text: t.substring(6).trim() });
-        } else if (t.startsWith('ERROR:')) {
-          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-error', t.substring(6).trim());
-          stopSapiFallback();
-        } else if (t.startsWith('ENGINE:')) {
-          console.log('[speech]', t.trim());
-        }
-      }
-    });
-    ps.stderr.on('data', (d) => { console.error('[speech:SAPI]', d.toString().trim()); });
-    ps.on('close', () => {
-      if (speechState.process === ps) {
-        speechState.process = null;
-      }
-    });
-  }
 
   ipcMain.on('speech-start', async () => {
     if (isSettingsVisible) {
@@ -1759,7 +1723,11 @@ function registerIpcHandlers() {
       console.warn('[open-path] Rejected path with null byte');
       return;
     }
-    shell.openPath(fsPath).catch((err) => {
+    shell.openPath(fsPath).then((result) => {
+      if (result) {
+        console.error(`Failed to open path ${fsPath}:`, result);
+      }
+    }).catch((err) => {
       console.error(`Failed to open path ${fsPath}:`, err);
     });
   });
@@ -1786,7 +1754,7 @@ function registerIpcHandlers() {
     }
 
     if (command.startsWith('ms-settings:')) {
-      const validated = validateExternalUrl(command);
+      const validated = validateExternalUrl(command, ['http:', 'https:', 'ms-settings:']);
       if (validated) {
         shell.openExternal(validated).catch((err) => {
           console.error(`Failed to open URI ${validated}:`, err);
@@ -1807,9 +1775,11 @@ function registerIpcHandlers() {
       'explorer',
     ];
 
-    const baseCommand = command.split(' ')[0].toLowerCase();
+    const parts = command.trim().split(/\s+/);
+    const baseCommand = parts[0].toLowerCase();
     if (knownCommands.includes(baseCommand)) {
-      const child = spawn(command, {
+      const args = parts.slice(1);
+      const child = spawn(baseCommand, args, {
         windowsHide: true,
         detached: false,
         shell: false,
