@@ -48,23 +48,131 @@ const speechState = {
   generation: 0,
 };
 
+function stopSapiFallback() {
+  const processToStop = speechState.process;
+  speechState.process = null;
+
+  if (processToStop) {
+    try {
+      processToStop.kill();
+    } catch (_) {}
+  }
+}
+
+function startSapiFallback(generation) {
+  if (speechState.process || speechState.cancelled) return false;
+
+  const scriptPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'speech.ps1')
+    : path.join(__dirname, 'speech.ps1');
+
+  const ps = spawn('powershell.exe', [
+    '-NoProfile',
+    '-STA',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    scriptPath,
+  ], {
+    windowsHide: true,
+  });
+
+  speechState.process = ps;
+  let buffer = '';
+
+  ps.stdout.on('data', (data) => {
+    if (
+      speechState.cancelled ||
+      generation !== speechState.generation ||
+      speechState.process !== ps
+    ) {
+      return;
+    }
+
+    buffer += data.toString();
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+
+    for (const line of lines) {
+      const text = line.trim();
+      if (!text) continue;
+
+      if (text === 'READY') {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('speech-ready');
+        }
+      } else if (text.startsWith('FINAL:')) {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('speech-result', {
+            final: true,
+            text: text.substring(6).trim(),
+          });
+        }
+      } else if (text.startsWith('ERROR:')) {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send(
+            'speech-error',
+            text.substring(6).trim()
+          );
+        }
+        stopSapiFallback();
+      } else if (text.startsWith('ENGINE:')) {
+        console.log('[speech]', text);
+      }
+    }
+  });
+
+  ps.stderr.on('data', (data) => {
+    if (!speechState.cancelled) {
+      console.error('[speech:SAPI]', data.toString().trim());
+    }
+  });
+
+  ps.on('error', (error) => {
+    if (
+      !speechState.cancelled &&
+      generation === speechState.generation
+    ) {
+      console.error('[speech:SAPI] Failed to start:', error.message);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(
+          'speech-error',
+          'Speech recognition is unavailable. Try restarting the app.'
+        );
+      }
+    }
+  });
+
+  ps.on('close', () => {
+    if (speechState.process === ps) {
+      speechState.process = null;
+    }
+  });
+
+  return true;
+}
+
 function cancelManualSpeech({ stopFallback = true } = {}) {
   speechState.cancelled = true;
   speechState.generation += 1;
   speechState.starting = false;
 
-  if (speechState.recognizer) {
+  const recognizer = speechState.recognizer;
+  speechState.recognizer = null;
+
+  if (recognizer) {
     try {
-      speechState.recognizer.close();
+      recognizer.close();
     } catch (_) {}
-    speechState.recognizer = null;
   }
 
-  if (speechState.queryRecognizer) {
+  const queryRecognizer = speechState.queryRecognizer;
+  speechState.queryRecognizer = null;
+
+  if (queryRecognizer) {
     try {
-      speechState.queryRecognizer.close();
+      queryRecognizer.close();
     } catch (_) {}
-    speechState.queryRecognizer = null;
   }
 
   if (stopFallback) {
@@ -605,110 +713,6 @@ if (gotTheLock) {
   }, 30 * 60 * 1000); // rescan every 30 minutes
 
   let powerBlocker = null;
-
-  function stopSapiFallback() {
-    const processToStop = speechState.process;
-    speechState.process = null;
-
-    if (processToStop) {
-      try {
-        processToStop.kill();
-      } catch (_) {}
-    }
-  }
-
-  function startSapiFallback(generation) {
-    if (speechState.process || speechState.cancelled) return false;
-
-    const scriptPath = app.isPackaged
-      ? path.join(process.resourcesPath, 'speech.ps1')
-      : path.join(__dirname, 'speech.ps1');
-
-    const ps = spawn('powershell.exe', [
-      '-NoProfile',
-      '-STA',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-File',
-      scriptPath,
-    ], {
-      windowsHide: true,
-    });
-
-    speechState.process = ps;
-    let buffer = '';
-
-    ps.stdout.on('data', (data) => {
-      if (
-        speechState.cancelled ||
-        generation !== speechState.generation ||
-        speechState.process !== ps
-      ) {
-        return;
-      }
-
-      buffer += data.toString();
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-
-      for (const line of lines) {
-        const text = line.trim();
-        if (!text) continue;
-
-        if (text === 'READY') {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('speech-ready');
-          }
-        } else if (text.startsWith('FINAL:')) {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('speech-result', {
-              final: true,
-              text: text.substring(6).trim(),
-            });
-          }
-        } else if (text.startsWith('ERROR:')) {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send(
-              'speech-error',
-              text.substring(6).trim()
-            );
-          }
-          stopSapiFallback();
-        } else if (text.startsWith('ENGINE:')) {
-          console.log('[speech]', text);
-        }
-      }
-    });
-
-    ps.stderr.on('data', (data) => {
-      if (!speechState.cancelled) {
-        console.error('[speech:SAPI]', data.toString().trim());
-      }
-    });
-
-    ps.on('error', (error) => {
-      if (
-        !speechState.cancelled &&
-        generation === speechState.generation
-      ) {
-        console.error('[speech:SAPI] Failed to start:', error.message);
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send(
-            'speech-error',
-            'Speech recognition is unavailable. Try restarting the app.'
-          );
-        }
-      }
-    });
-
-    ps.on('close', () => {
-      if (speechState.process === ps) {
-        speechState.process = null;
-      }
-    });
-
-    return true;
-  }
 
   registerIpcHandlers();
 
