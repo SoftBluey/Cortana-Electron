@@ -1,6 +1,6 @@
 {
   "name": "cortana-electron",
-  "version": "7.1.1",
+  "version": "7.1.2",
   "description": "A electron app to bring Cortana back to your desktop!",
   "main": "main.js",
   "author": "BlueySoft",

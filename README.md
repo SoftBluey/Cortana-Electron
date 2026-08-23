@@ -1,3 +1,5 @@
+# THIS IS A TESTING BRANCH. IF YOU ENCOUNTER BUGS HERE, DO NOT BE SURPRISED.
+
 # Electron Cortana, or... Cortana Electron!
 A custom, local Cortana client built with Electron, inspired by the classic design and functionality of Microsoft's original assistant.
 

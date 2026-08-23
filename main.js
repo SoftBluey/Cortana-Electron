@@ -38,6 +38,148 @@ let wakeEnabled = false;
 let wakeRunning = false;
 let wakeRecognizer = null;
 let queryRecognizer = null;
+
+const speechState = {
+  recognizer: null,
+  queryRecognizer: null,
+  process: null,
+  starting: false,
+  cancelled: false,
+  generation: 0,
+};
+
+function stopSapiFallback() {
+  const processToStop = speechState.process;
+  speechState.process = null;
+
+  if (processToStop) {
+    try {
+      processToStop.kill();
+    } catch (_) {}
+  }
+}
+
+function startSapiFallback(generation) {
+  if (speechState.process || speechState.cancelled) return false;
+
+  const scriptPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'speech.ps1')
+    : path.join(__dirname, 'speech.ps1');
+
+  const ps = spawn('powershell.exe', [
+    '-NoProfile',
+    '-STA',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    scriptPath,
+  ], {
+    windowsHide: true,
+  });
+
+  speechState.process = ps;
+  let buffer = '';
+
+  ps.stdout.on('data', (data) => {
+    if (
+      speechState.cancelled ||
+      generation !== speechState.generation ||
+      speechState.process !== ps
+    ) {
+      return;
+    }
+
+    buffer += data.toString();
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+
+    for (const line of lines) {
+      const text = line.trim();
+      if (!text) continue;
+
+      if (text === 'READY') {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('speech-ready');
+        }
+      } else if (text.startsWith('FINAL:')) {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('speech-result', {
+            final: true,
+            text: text.substring(6).trim(),
+          });
+        }
+      } else if (text.startsWith('ERROR:')) {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send(
+            'speech-error',
+            text.substring(6).trim()
+          );
+        }
+        stopSapiFallback();
+      } else if (text.startsWith('ENGINE:')) {
+        console.log('[speech]', text);
+      }
+    }
+  });
+
+  ps.stderr.on('data', (data) => {
+    if (!speechState.cancelled) {
+      console.error('[speech:SAPI]', data.toString().trim());
+    }
+  });
+
+  ps.on('error', (error) => {
+    if (
+      !speechState.cancelled &&
+      generation === speechState.generation
+    ) {
+      console.error('[speech:SAPI] Failed to start:', error.message);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(
+          'speech-error',
+          'Speech recognition is unavailable. Try restarting the app.'
+        );
+      }
+    }
+  });
+
+  ps.on('close', () => {
+    if (speechState.process === ps) {
+      speechState.process = null;
+    }
+  });
+
+  return true;
+}
+
+function cancelManualSpeech({ stopFallback = true } = {}) {
+  speechState.cancelled = true;
+  speechState.generation += 1;
+  speechState.starting = false;
+
+  const recognizer = speechState.recognizer;
+  speechState.recognizer = null;
+
+  if (recognizer) {
+    try {
+      recognizer.close();
+    } catch (_) {}
+  }
+
+  const queryRecognizer = speechState.queryRecognizer;
+  speechState.queryRecognizer = null;
+
+  if (queryRecognizer) {
+    try {
+      queryRecognizer.close();
+    } catch (_) {}
+  }
+
+  if (stopFallback) {
+    stopSapiFallback();
+  }
+}
+
 const winWidth = 360;
 const winHeight = 640;
 let isSettingsVisible = false;
@@ -50,7 +192,7 @@ let lastAppScanTime = 0;
 
 let reminders = [];
 
-let activeTimers = new Map(); // id -> { timeout, endTime, durationMs }
+let activeTimer = null;
 let timerIdCounter = 0;
 
 let settings = {
@@ -76,6 +218,7 @@ let settings = {
   aiSystemPrompt: "You are Cortana, Microsoft's virtual assistant. Be helpful, concise, and friendly. Keep responses brief and conversational. Do not use markdown formatting.",
   aiModel: "gpt-4o-mini",
   aiApiUrl: "https://api.openai.com/v1/chat/completions",
+  aiProvider: "",
   useEverythingSearch: false,
   heyCortana: false,
   everythingPort: 80,
@@ -149,40 +292,177 @@ if (!gotTheLock) {
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
-const scheduleReminder = (reminderData) => {
-  const timeInMs = new Date(reminderData.time).getTime() - Date.now();
-  if (timeInMs > MAX_TIMEOUT_MS) {
-    console.warn('[reminder] Delay exceeds max safe setTimeout value:', timeInMs);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('reminder-schedule-error',
-        'Reminder is too far in the future (maximum is about 24 days). ' +
-        'Please set a closer reminder time.');
-    }
+const REMINDER_CHECKPOINT_MS = Math.min(
+  MAX_TIMEOUT_MS,
+  24 * 60 * 60 * 1000
+);
+
+const MAX_TIMER_MS = 30 * 24 * 60 * 60 * 1000;
+
+function validateReminderInput({ reminder, reminderTime, sound }) {
+  if (typeof reminder !== 'string' || !reminder.trim()) {
+    return { success: false, error: 'Please enter something to be reminded about.' };
+  }
+
+  if (typeof reminderTime !== 'string') {
+    return { success: false, error: 'Please choose a valid reminder time.' };
+  }
+
+  const timestamp = Date.parse(reminderTime);
+  if (!Number.isFinite(timestamp)) {
+    return { success: false, error: 'Please choose a valid reminder time.' };
+  }
+
+  if (timestamp <= Date.now()) {
+    return { success: false, error: 'Reminder time must be in the future.' };
+  }
+
+  if (sound !== undefined && typeof sound !== 'string') {
+    return { success: false, error: 'Invalid reminder sound.' };
+  }
+
+  return {
+    success: true,
+    value: {
+      text: reminder.trim(),
+      time: new Date(timestamp).toISOString(),
+      sound: sound || settings.reminderSound || 'notify.wav',
+    },
+  };
+}
+
+function validateTimerDuration(ms) {
+  if (
+    typeof ms !== 'number' ||
+    !Number.isFinite(ms) ||
+    !Number.isSafeInteger(ms)
+  ) {
+    return {
+      success: false,
+      error: 'Please choose a valid timer duration.',
+    };
+  }
+
+  if (ms <= 0) {
+    return {
+      success: false,
+      error: 'Timer duration must be greater than zero.',
+    };
+  }
+
+  if (ms > MAX_TIMER_MS) {
+    return {
+      success: false,
+      error: 'Timers can be set for up to 30 days.',
+    };
+  }
+
+  return { success: true };
+}
+
+function escapeIcsText(value) {
+  return String(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/\r?\n/g, '\\n')
+    .replace(/,/g, '\\,')
+    .replace(/;/g, '\\;');
+}
+
+function isSafeFallbackAppName(value) {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    value.trim().length <= 260 &&
+    !/[\r\n\0&|<>^%]/.test(value)
+  );
+}
+
+function validateExternalUrl(rawUrl, allowedProtocols = ['http:', 'https:']) {
+  if (typeof rawUrl !== 'string' || rawUrl.length > 4096) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(rawUrl);
+    return allowedProtocols.includes(parsed.protocol)
+      ? parsed.toString()
+      : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+const AI_REQUEST_TIMEOUT_MS = 30_000;
+const AI_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+
+function clearReminderTimeout(reminder) {
+  if (reminder && reminder.timeout) {
+    clearTimeout(reminder.timeout);
+    reminder.timeout = null;
+  }
+}
+
+function fireReminder(reminder) {
+  if (!reminders.some((item) => item.id === reminder.id)) {
     return;
   }
-  if (timeInMs > 0) {
-    const timeout = setTimeout(() => {
-      if (Notification.isSupported()) {
-        new Notification({
-          title: `⏰ Reminder`,
-          body: `It's time for: ${reminderData.text}`,
-          icon: path.join(assetsPath, 'cortana.png'),
-        }).show();
-      }
-      
-      // Since there's no UI to set individual reminder sounds, always use the global setting
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        const soundFile = settings.reminderSound || "notify.wav";
-        mainWindow.webContents.send("play-reminder-sound", soundFile);
-      }
-      
-      reminders = reminders.filter((r) => r.id !== reminderData.id);
-      saveReminders();
-    }, timeInMs);
-    return timeout;
+
+  clearReminderTimeout(reminder);
+
+  if (Notification.isSupported()) {
+    new Notification({
+      title: '⏰ Reminder',
+      body: `It's time for: ${reminder.text}`,
+      icon: path.join(assetsPath, 'cortana.png'),
+    }).show();
   }
-  return null;
-};
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    const soundFile =
+      reminder.sound ||
+      settings.reminderSound ||
+      'notify.wav';
+
+    mainWindow.webContents.send(
+      'play-reminder-sound',
+      soundFile
+    );
+  }
+
+  reminders = reminders.filter((item) => item.id !== reminder.id);
+  saveReminders();
+}
+
+function scheduleReminder(reminder) {
+  clearReminderTimeout(reminder);
+
+  const timestamp = Date.parse(reminder.time);
+  if (!Number.isFinite(timestamp)) {
+    return false;
+  }
+
+  const remaining = timestamp - Date.now();
+
+  if (remaining <= 0) {
+    fireReminder(reminder);
+    return true;
+  }
+
+  const delay = Math.min(remaining, REMINDER_CHECKPOINT_MS);
+
+  reminder.timeout = setTimeout(() => {
+    reminder.timeout = null;
+
+    const nextRemaining = timestamp - Date.now();
+    if (nextRemaining <= 0) {
+      fireReminder(reminder);
+    } else {
+      scheduleReminder(reminder);
+    }
+  }, delay);
+
+  return true;
+}
 
 async function saveReminders() {
   try {
@@ -203,18 +483,46 @@ async function saveReminders() {
 
 async function loadReminders() {
   try {
-    const data = await fs.readFile(REMINDERS_FILE, "utf-8");
-    const loadedReminders = JSON.parse(data);
-    reminders = loadedReminders
-      .map((r) => {
-        const timeout = scheduleReminder(r);
-        return { ...r, timeout };
+    const data = await fs.readFile(REMINDERS_FILE, 'utf8');
+    const parsed = JSON.parse(data);
+
+    if (!Array.isArray(parsed)) {
+      throw new Error('Reminder file must contain an array');
+    }
+
+    const now = Date.now();
+
+    reminders = parsed
+      .filter((item) => {
+        return (
+          item &&
+          typeof item.id === 'string' &&
+          typeof item.text === 'string' &&
+          item.text.trim() &&
+          typeof item.time === 'string' &&
+          Number.isFinite(Date.parse(item.time)) &&
+          Date.parse(item.time) > now
+        );
       })
-      .filter((r) => r.timeout !== null);
+      .map((item) => ({
+        id: item.id,
+        text: item.text.trim(),
+        time: new Date(Date.parse(item.time)).toISOString(),
+        sound:
+          typeof item.sound === 'string'
+            ? item.sound
+            : settings.reminderSound || 'notify.wav',
+        timeout: null,
+      }));
+
+    for (const reminder of reminders) {
+      scheduleReminder(reminder);
+    }
+
     await saveReminders();
   } catch (error) {
-    if (error.code !== "ENOENT") {
-      console.error("Failed to load reminders:", error);
+    if (error.code !== 'ENOENT') {
+      console.error('Failed to load reminders:', error);
     }
     reminders = [];
   }
@@ -357,39 +665,22 @@ if (gotTheLock) {
   await loadSettings();
   await loadReminders();
 
-  powerMonitor.on('resume', () => {
+  powerMonitor.on('resume', async () => {
     console.log('[powerMonitor] System resumed — rescheduling reminders and invalidating stale recognizers.');
 
-    const now = Date.now();
-    reminders.forEach((reminder) => {
-      const timeLeft = new Date(reminder.time).getTime() - now;
+    const reminderSnapshot = [...reminders];
 
-      // Cancel the old (now-stale) timeout
-      if (reminder.timeout) {
-        clearTimeout(reminder.timeout);
-        reminder.timeout = null;
-      }
+    for (const reminder of reminderSnapshot) {
+      clearReminderTimeout(reminder);
 
-      if (timeLeft <= 0) {
-        // Missed while sleeping — fire immediately
-        if (Notification.isSupported()) {
-          new Notification({
-            title: `⏰ Reminder`,
-            body: `It's time for: ${reminder.text}`,
-            icon: path.join(assetsPath, 'cortana.png'),
-          }).show();
-        }
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          const soundFile = settings.reminderSound || 'notify.wav';
-          mainWindow.webContents.send('play-reminder-sound', soundFile);
-        }
-        reminders = reminders.filter((r) => r.id !== reminder.id);
+      if (Date.parse(reminder.time) <= Date.now()) {
+        fireReminder(reminder);
       } else {
-        // Still in the future — reschedule with correct remaining time
-        reminder.timeout = scheduleReminder(reminder);
+        scheduleReminder(reminder);
       }
-    });
-    saveReminders();
+    }
+
+    await saveReminders();
 
     // Null out the WinRT recognizer so it is recreated fresh on next use
     if (speechRecognizer) {
@@ -422,9 +713,6 @@ if (gotTheLock) {
     scanApplications();
   }, 30 * 60 * 1000); // rescan every 30 minutes
 
-  let speechStarting = false;
-  let speechCancelled = false;
-  let speechProcess = null;
   let powerBlocker = null;
 
   registerIpcHandlers();
@@ -454,51 +742,19 @@ if (gotTheLock) {
     SpeechRecognitionScenario,
   } = require(bindingsPath);
 
-  function startSapiFallback() {
-    if (speechProcess) return;
-    const scriptPath = app.isPackaged
-      ? path.join(process.resourcesPath, 'speech.ps1')
-      : path.join(__dirname, 'speech.ps1');
-    const ps = spawn('powershell.exe', [
-      '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', scriptPath
-    ]);
-    speechProcess = ps;
-    let buffer = '';
-    ps.stdout.on('data', (d) => {
-      buffer += d.toString();
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-      for (const line of lines) {
-        const t = line.trim();
-        if (!t) continue;
-        if (t === 'READY') {
-          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-ready');
-        } else if (t.startsWith('FINAL:')) {
-          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-result', { final: true, text: t.substring(6).trim() });
-        } else if (t.startsWith('ERROR:')) {
-          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-error', t.substring(6).trim());
-          stopSapiFallback();
-        } else if (t.startsWith('ENGINE:')) {
-          console.log('[speech]', t.trim());
-        }
-      }
-    });
-    ps.stderr.on('data', (d) => { console.error('[speech:SAPI]', d.toString().trim()); });
-    ps.on('close', () => { speechProcess = null; });
-  }
-
-  function stopSapiFallback() {
-    if (speechProcess) { try { speechProcess.kill(); } catch (_) {} speechProcess = null; }
-  }
-
   ipcMain.on('speech-start', async () => {
     if (isSettingsVisible) {
       if (mainWindow && !mainWindow.isDestroyed())
         mainWindow.webContents.send('speech-force-stop');
       return;
     }
-    if (speechStarting || speechProcess) return;
-    speechStarting = true;
+
+    if (speechState.starting || speechState.process) return;
+
+    const generation = ++speechState.generation;
+    speechState.cancelled = false;
+    speechState.starting = true;
+
     try {
       if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
       if (wakeRecognizer) {
@@ -506,56 +762,88 @@ if (gotTheLock) {
         wakeRecognizer = null;
         wakeRunning = false;
       }
-      if (queryRecognizer) {
-        try { queryRecognizer.close(); } catch (_) {}
-        queryRecognizer = null;
+      if (speechState.queryRecognizer) {
+        try { speechState.queryRecognizer.close(); } catch (_) {}
+        speechState.queryRecognizer = null;
       }
-      if (speechRecognizer) {
-        try { speechRecognizer.close(); } catch (_) {}
-        speechRecognizer = null;
+      if (speechState.recognizer) {
+        try { speechState.recognizer.close(); } catch (_) {}
+        speechState.recognizer = null;
       }
-      speechCancelled = false;
+
       try {
-        speechRecognizer = new SpeechRecognizer();
+        const recognizer = new SpeechRecognizer();
+        speechState.recognizer = recognizer;
+
         const constraint = new SpeechRecognitionTopicConstraint(
           SpeechRecognitionScenario.Dictation, 'dictation');
-        speechRecognizer.constraints.append(constraint);
-        await speechRecognizer.compileConstraintsAsync();
+        recognizer.constraints.append(constraint);
+        await recognizer.compileConstraintsAsync();
+
+        if (
+          speechState.cancelled ||
+          generation !== speechState.generation
+        ) {
+          try {
+            recognizer.close();
+          } catch (_) {}
+          return;
+        }
 
         console.log('[speech] ENGINE:WinRT');
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-ready');
 
-        const result = await speechRecognizer.recognizeAsync();
-        if (speechCancelled) return;
+        const result = await recognizer.recognizeAsync();
+
+        if (
+          speechState.cancelled ||
+          generation !== speechState.generation
+        ) {
+          return;
+        }
 
         const text = result && result.text;
         if (text && mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('speech-result', { final: true, text });
         }
-
-        try { speechRecognizer.close(); } catch (_) {}
-        speechRecognizer = null;
       } catch (e) {
-        if (speechCancelled) return;
-        console.error('[speech] WinRT failed, attempting SAPI fallback:', e.message);
-        if (speechRecognizer) {
-          try { speechRecognizer.close(); } catch (_) {}
-          speechRecognizer = null;
+        if (
+          speechState.cancelled ||
+          generation !== speechState.generation
+        ) {
+          return;
         }
-        try {
-          startSapiFallback();
-          // SAPI will emit speech-ready and speech-result via its stdout handler.
-          // Do NOT send speech-error here — let SAPI try first.
-        } catch (sapiErr) {
-          console.error('[speech] SAPI fallback also failed:', sapiErr.message);
+
+        console.error('[speech] WinRT failed, attempting SAPI fallback:', e.message);
+
+        const started = startSapiFallback(generation);
+        if (!started && !speechState.cancelled) {
           if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('speech-error',
-              'Speech recognition is unavailable. Try restarting the app.');
+            mainWindow.webContents.send(
+              'speech-error',
+              'Speech recognition is unavailable. Try restarting the app.'
+            );
           }
+        }
+      } finally {
+        if (
+          speechState.recognizer &&
+          generation === speechState.generation
+        ) {
+          try {
+            speechState.recognizer.close();
+          } catch (_) {}
+          speechState.recognizer = null;
+        }
+
+        if (generation === speechState.generation) {
+          speechState.starting = false;
         }
       }
     } finally {
-      speechStarting = false;
+      if (speechState.starting && generation === speechState.generation) {
+        speechState.starting = false;
+      }
     }
   });
 
@@ -563,16 +851,7 @@ if (gotTheLock) {
   let wakeBackoff = 0;
 
   ipcMain.on('speech-stop', () => {
-    speechCancelled = true;
-    if (speechRecognizer) {
-      try { speechRecognizer.close(); } catch (e) {}
-      speechRecognizer = null;
-    }
-    if (wakeRecognizer && !wakeRunning) {
-      try { wakeRecognizer.close(); } catch (_) {}
-      wakeRecognizer = null;
-    }
-    stopSapiFallback();
+    cancelManualSpeech({ stopFallback: true });
     if (wakeEnabled && !wakeRunning && !wakeRestartTimer && !isSettingsVisible) {
       wakeBackoff = 0;
       wakeRestartTimer = setTimeout(() => {
@@ -610,10 +889,10 @@ if (gotTheLock) {
     }
   });
 
-  async function startWakeLoop() {
+async function startWakeLoop() {
     if (wakeRunning) return;
     if (isSettingsVisible) return;
-    if (speechStarting || speechRecognizer || speechProcess) {
+    if (speechState.starting || speechState.recognizer || speechState.process) {
       console.log('[wake] Deferring: manual speech active.');
       return;
     }
@@ -654,20 +933,20 @@ if (gotTheLock) {
         try { await session.stopAsync(); } catch (_) {}
         sessionEndedResolve();
 
-if (mainWindow && !mainWindow.isDestroyed()) {
-            if (mainWindow.isVisible()) {
-              mainWindow.webContents.send('wake-listen');
-            } else {
-              mainWindow.webContents.send('wake-slim');
-              if (settings.useWindowsAccent) {
-                try {
-                  const accent = normalizeAccentColor(systemPreferences.getAccentColor());
-                  if (accent) mainWindow.webContents.send('accent-color-updated', accent);
-                } catch (_) {}
-              }
-              showWindow();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          if (mainWindow.isVisible()) {
+            mainWindow.webContents.send('wake-listen');
+          } else {
+            mainWindow.webContents.send('wake-slim');
+            if (settings.useWindowsAccent) {
+              try {
+                const accent = normalizeAccentColor(systemPreferences.getAccentColor());
+                if (accent) mainWindow.webContents.send('accent-color-updated', accent);
+              } catch (_) {}
             }
+            showWindow();
           }
+        }
 
         try { rec.close(); } catch (_) {}
         rec = null;
@@ -677,7 +956,7 @@ if (mainWindow && !mainWindow.isDestroyed()) {
           let qr = null;
           try {
             qr = new SpeechRecognizer();
-            queryRecognizer = qr;
+            speechState.queryRecognizer = qr;
             qr.constraints.append(new SpeechRecognitionTopicConstraint(
               SpeechRecognitionScenario.Dictation, 'dictation'));
             await qr.compileConstraintsAsync();
@@ -691,7 +970,7 @@ if (mainWindow && !mainWindow.isDestroyed()) {
             console.warn('[wake] Query recognition failed:', e.message);
           } finally {
             if (qr) { try { qr.close(); } catch (_) {} }
-            if (queryRecognizer === qr) queryRecognizer = null;
+            if (speechState.queryRecognizer === qr) speechState.queryRecognizer = null;
           }
         }
 
@@ -731,7 +1010,7 @@ if (mainWindow && !mainWindow.isDestroyed()) {
       if (wakeRecognizer === rec) wakeRecognizer = null;
 
       if (wakeEnabled && !wakeRestartTimer && !wakeTriggered
-          && !speechStarting && !speechRecognizer && !speechProcess
+          && !speechState.starting && !speechState.recognizer && !speechState.process
           && !isSettingsVisible) {
 
         const isExpectedEnd = completionStatus === 0
@@ -761,6 +1040,7 @@ if (mainWindow && !mainWindow.isDestroyed()) {
 
   app.on('before-quit', () => {
     wakeRunning = false;
+    cancelManualSpeech({ stopFallback: true });
     if (typeof wakeRestartTimer !== 'undefined' && wakeRestartTimer) {
       clearTimeout(wakeRestartTimer);
       wakeRestartTimer = null;
@@ -769,24 +1049,17 @@ if (mainWindow && !mainWindow.isDestroyed()) {
       try { wakeRecognizer.close(); } catch (_) {}
       wakeRecognizer = null;
     }
-    if (typeof stopSapiFallback === 'function') {
-      try { stopSapiFallback(); } catch (_) {}
-    }
   });
 
   ipcMain.on("set-settings-visibility", (event, visible) => {
     isSettingsVisible = visible;
     if (visible) {
-      speechCancelled = true;
+      cancelManualSpeech({ stopFallback: true });
       if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
-      if (wakeRecognizer) {
+if (wakeRecognizer) {
         wakeRunning = false;
         try { wakeRecognizer.close(); } catch (_) {}
         wakeRecognizer = null;
-      }
-      if (speechRecognizer) {
-        try { speechRecognizer.close(); } catch (_) {}
-        speechRecognizer = null;
       }
       stopSapiFallback();
       if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1000,11 +1273,7 @@ function registerIpcHandlers() {
   });
 
   ipcMain.on("hide-window", () => {
-    speechCancelled = true;
-    if (speechRecognizer) {
-      try { speechRecognizer.close(); } catch (_) {}
-      speechRecognizer = null;
-    }
+    cancelManualSpeech({ stopFallback: true });
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.hide();
     }
@@ -1035,45 +1304,74 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("ask-openai", async (event, query) => {
+    if (typeof query !== 'string' || !query.trim()) {
+      return { success: false, error: 'Empty query.' };
+    }
+
     const apiKey = settings.openaiApiKey;
     let apiUrl = settings.aiApiUrl || "https://api.openai.com/v1/chat/completions";
     const model = settings.aiModel || "gpt-4o-mini";
     const systemPrompt = settings.aiSystemPrompt || "You are a helpful assistant. Be concise and conversational.";
 
+    if (typeof model !== 'string' || !model.trim()) {
+      return { success: false, error: 'Invalid model.' };
+    }
+    if (typeof systemPrompt !== 'string') {
+      return { success: false, error: 'Invalid system prompt.' };
+    }
+
+    let urlObj;
     try {
-      const urlObj = new URL(apiUrl);
+      urlObj = new URL(apiUrl);
       let path = urlObj.pathname.replace(/\/+$/, "");
       if (!path.endsWith("chat/completions")) {
         path = path.replace(/\/v1\/?$/, "");
         path += "/v1/chat/completions";
         apiUrl = urlObj.origin + path + urlObj.search;
+        urlObj = new URL(apiUrl);
       }
     } catch (_) {
-      // Invalid URL, will be caught again below
+      return { success: false, error: 'Invalid AI API URL.' };
+    }
+
+    if (!['http:', 'https:'].includes(urlObj.protocol)) {
+      return { success: false, error: 'AI API URL must use http or https.' };
     }
 
     const isLocal = !apiUrl.includes("openai.com") && !apiUrl.includes("api.openai.com");
     if (!apiKey && !isLocal) {
       return { success: false, error: "No API key configured. Add your key in Settings > AI." };
     }
+
+    const body = JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: query.trim() },
+      ],
+      max_tokens: 500,
+    });
+
+    const headers = {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(body),
+    };
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+
+    const transport = urlObj.protocol === "https:" ? https : http;
+
     try {
-      const urlObj = new URL(apiUrl);
-      const transport = urlObj.protocol === "https:" ? https : http;
-      const body = JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: query },
-        ],
-        max_tokens: 500,
-      });
-      const headers = {
-        "Content-Type": "application/json",
-      };
-      if (apiKey) {
-        headers.Authorization = `Bearer ${apiKey}`;
-      }
       const data = await new Promise((resolve, reject) => {
+        let settled = false;
+
+        const finish = (callback, value) => {
+          if (settled) return;
+          settled = true;
+          callback(value);
+        };
+
         const req = transport.request(
           {
             hostname: urlObj.hostname,
@@ -1083,25 +1381,89 @@ function registerIpcHandlers() {
             headers,
           },
           (res) => {
-            let responseData = "";
-            res.on("data", (chunk) => (responseData += chunk));
-            res.on("end", () => {
-              try {
-                resolve(JSON.parse(responseData));
-              } catch (e) {
-                reject(new Error("Invalid response from API"));
+            let responseData = '';
+            let responseBytes = 0;
+
+            res.on('data', (chunk) => {
+              responseBytes += chunk.length;
+
+              if (responseBytes > AI_MAX_RESPONSE_BYTES) {
+                req.destroy();
+                finish(
+                  reject,
+                  new Error('AI provider response was too large.')
+                );
+                return;
               }
+
+              responseData += chunk;
+            });
+
+            res.on('end', () => {
+              if (settled) return;
+
+              let parsed;
+              try {
+                parsed = responseData
+                  ? JSON.parse(responseData)
+                  : null;
+              } catch (_) {
+                finish(
+                  reject,
+                  new Error(
+                    `AI provider returned an invalid response${
+                      res.statusCode ? ` (HTTP ${res.statusCode})` : ''
+                    }.`
+                  )
+                );
+                return;
+              }
+
+              if (
+                typeof res.statusCode === 'number' &&
+                (res.statusCode < 200 || res.statusCode >= 300)
+              ) {
+                const providerMessage =
+                  parsed &&
+                  parsed.error &&
+                  typeof parsed.error.message === 'string'
+                    ? parsed.error.message
+                    : `AI provider returned HTTP ${res.statusCode}.`;
+
+                finish(reject, new Error(providerMessage));
+                return;
+              }
+
+              finish(resolve, parsed);
             });
           }
         );
-        req.on("error", reject);
+
+        req.setTimeout(AI_REQUEST_TIMEOUT_MS, () => {
+          req.destroy(
+            new Error('AI provider request timed out.')
+          );
+        });
+
+        req.on('error', (error) => {
+          finish(reject, error);
+        });
+
         req.write(body);
         req.end();
       });
-      if (data.choices && data.choices[0]) {
+
+      if (
+        data &&
+        Array.isArray(data.choices) &&
+        data.choices[0] &&
+        data.choices[0].message &&
+        typeof data.choices[0].message.content === 'string'
+      ) {
         return { success: true, text: data.choices[0].message.content.trim() };
       }
-      return { success: false, error: data.error?.message || "No response from API" };
+
+      return { success: false, error: 'AI provider returned an unexpected response format.' };
     } catch (error) {
       return { success: false, error: error.message };
     }
@@ -1112,20 +1474,71 @@ function registerIpcHandlers() {
   });
 
   ipcMain.on("set-setting", async (event, { key, value }) => {
-    if (key in settings) {
-      settings[key] = value;
-      if (key === "openAtLogin") {
-        app.setLoginItemSettings({
-          openAtLogin: value,
-          args: ["--hidden"],
-        });
-      }
-      if (key === "isMovable") {
-        app.relaunch();
-        app.exit();
-      }
-      await saveSettings();
+    if (!key || !(key in settings)) {
+      return;
     }
+
+    const validKeys = {
+      openAtLogin: (v) => typeof v === 'boolean',
+      preferredVoice: (v) => typeof v === 'string',
+      searchEngine: (v) => typeof v === 'string',
+      themeColor: (v) => typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v),
+      useWindowsAccent: (v) => typeof v === 'boolean',
+      customActions: (v) => Array.isArray(v),
+      isMovable: (v) => typeof v === 'boolean',
+      pitch: (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0.5 && v <= 2,
+      rate: (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0.5 && v <= 2,
+      idleGreetingMode: (v) => typeof v === 'string',
+      specificIdleGreeting: (v) => typeof v === 'string',
+      customIdleGreeting: (v) => typeof v === 'string',
+      reminderSound: (v) => typeof v === 'string',
+      ttsEngine: (v) => typeof v === 'string',
+      edgeVoice: (v) => typeof v === 'string',
+      timeFormat: (v) => typeof v === 'string',
+      weatherUnits: (v) => typeof v === 'string',
+      openaiApiKey: (v) => typeof v === 'string',
+      aiEnabled: (v) => typeof v === 'boolean',
+      aiSystemPrompt: (v) => typeof v === 'string',
+      aiModel: (v) => typeof v === 'string',
+      aiApiUrl: (v) => typeof v === 'string',
+      aiProvider: (v) => typeof v === 'string' && [
+        '',
+        'openai',
+        'ollama',
+        'lmstudio',
+        'groq',
+        'together',
+        'openrouter',
+        'perplexity',
+        'xai',
+        'mistral',
+        'google-gemini',
+        'deepseek',
+        'custom',
+      ].includes(v),
+      useEverythingSearch: (v) => typeof v === 'boolean',
+      heyCortana: (v) => typeof v === 'boolean',
+      everythingPort: (v) => typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 65535,
+    };
+
+    const validator = validKeys[key];
+    if (validator && !validator(value)) {
+      console.warn(`[set-setting] Invalid value for ${key}:`, value);
+      return;
+    }
+
+    settings[key] = value;
+    if (key === "openAtLogin") {
+      app.setLoginItemSettings({
+        openAtLogin: value,
+        args: ["--hidden"],
+      });
+    }
+    if (key === "isMovable") {
+      app.relaunch();
+      app.exit();
+    }
+    await saveSettings();
   });
 
   ipcMain.on("set-custom-actions", async (event, actions) => {
@@ -1249,32 +1662,100 @@ function registerIpcHandlers() {
     });
   }
 
-  ipcMain.handle("open-application-fallback", async (event, appName) => {
-    const sanitizedAppName = appName.replace(/"/g, "");
-    return new Promise((resolve) => {
-      exec(`start "" "${sanitizedAppName}"`, (error) => {
-        if (error) {
-          console.error(`Fallback failed to open app ${appName}:`, error);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send("command-failed", {
-              command: "open-application",
-            });
-          }
-          resolve(false);
-        } else {
-          resolve(true);
+  ipcMain.handle(
+  'open-application-fallback',
+  async (event, appName) => {
+    if (!isSafeFallbackAppName(appName)) {
+      return {
+        success: false,
+        error: 'Invalid application name.',
+      };
+    }
+
+    const target = appName.trim();
+
+    return await new Promise((resolve) => {
+      const child = spawn(
+        'cmd.exe',
+        ['/d', '/s', '/c', 'start', '', target],
+        {
+          windowsHide: true,
+          detached: false,
+          shell: false,
         }
+      );
+
+      let finished = false;
+      const finish = (result) => {
+        if (finished) return;
+        finished = true;
+        resolve(result);
+      };
+
+      child.on('error', (error) => {
+        console.error(
+          `Fallback failed to open app ${target}:`,
+          error
+        );
+
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('command-failed', {
+            command: 'open-application',
+          });
+        }
+
+        finish({
+          success: false,
+          error: 'Application could not be opened.',
+        });
       });
+
+      child.on('exit', (code) => {
+        finish(
+          code === 0
+            ? { success: true }
+            : {
+                success: false,
+                error: 'Application could not be opened.',
+              }
+        );
+      });
+    });
+  }
+);
+
+  ipcMain.on("open-external-link", (event, url) => {
+    const validated = validateExternalUrl(url);
+    if (!validated) {
+      console.warn('[open-external-link] Rejected invalid URL:', url);
+      return;
+    }
+    shell.openExternal(validated).catch((err) => {
+      console.error(`Failed to open external link ${validated}:`, err);
     });
   });
 
   ipcMain.on("open-path", (event, fsPath) => {
-    shell.openPath(fsPath).catch((err) => {
+    if (typeof fsPath !== 'string' || !fsPath.trim()) {
+      return;
+    }
+    if (fsPath.includes('\0')) {
+      console.warn('[open-path] Rejected path with null byte');
+      return;
+    }
+    shell.openPath(fsPath).then((result) => {
+      if (result) {
+        console.error(`Failed to open path ${fsPath}:`, result);
+      }
+    }).catch((err) => {
       console.error(`Failed to open path ${fsPath}:`, err);
     });
   });
 
   ipcMain.on("run-command", (event, command) => {
+    if (typeof command !== 'string' || !command.trim() || command.length > 4096) {
+      return;
+    }
     exec(command, (error) => {
       if (error) {
         console.error(`Failed to execute command "${command}":`, error);
@@ -1288,17 +1769,48 @@ function registerIpcHandlers() {
   });
 
   ipcMain.on("run-special-command", (event, command) => {
-    if (command.startsWith('ms-')) {
-      shell.openExternal(command).catch((err) => {
-        console.error(`Failed to open URI ${command}:`, err);
-      });
-    } else {
-      exec(`start "" "${command}"`, (error) => {
-        if (error) {
-          console.error(`Failed to execute special command "${command}":`, error);
-        }
-      });
+    if (typeof command !== 'string' || !command.trim() || command.length > 4096) {
+      return;
     }
+
+    if (command.startsWith('ms-settings:')) {
+      const validated = validateExternalUrl(command, ['http:', 'https:', 'ms-settings:']);
+      if (validated) {
+        shell.openExternal(validated).catch((err) => {
+          console.error(`Failed to open URI ${validated}:`, err);
+        });
+      }
+      return;
+    }
+
+    const knownCommands = [
+      'control',
+      'taskmgr',
+      'cmd',
+      'powershell',
+      'notepad',
+      'calc',
+      'mspaint',
+      'snippingtool',
+      'explorer',
+    ];
+
+    const parts = command.trim().split(/\s+/);
+    const baseCommand = parts[0].toLowerCase();
+    if (knownCommands.includes(baseCommand)) {
+      const args = parts.slice(1);
+      const child = spawn(baseCommand, args, {
+        windowsHide: true,
+        detached: false,
+        shell: false,
+      });
+      child.on('error', (error) => {
+        console.error(`Failed to execute special command "${command}":`, error);
+      });
+      return;
+    }
+
+    console.warn('[run-special-command] Rejected unknown command:', command);
   });
 
   ipcMain.handle("show-open-dialog", async (event, options) => {
@@ -1307,29 +1819,70 @@ function registerIpcHandlers() {
     return result;
   });
 
-  ipcMain.on("set-reminder", async (event, { reminder, reminderTime, sound }) => {
-    const newReminder = {
-      id: crypto.randomUUID(),
-      text: reminder,
-      time: reminderTime,
-      sound: sound,
-      timeout: null,
-    };
-    newReminder.timeout = scheduleReminder(newReminder);
-    if (newReminder.timeout) {
+  ipcMain.handle('set-reminder', async (event, payload) => {
+    try {
+      const validation = validateReminderInput(payload || {});
+      if (!validation.success) return validation;
+
+      const newReminder = {
+        id: crypto.randomUUID(),
+        ...validation.value,
+        timeout: null,
+      };
+
       reminders.push(newReminder);
-      await saveReminders();
+
+      try {
+        await saveReminders();
+        scheduleReminder(newReminder);
+      } catch (error) {
+        reminders = reminders.filter(
+          (item) => item.id !== newReminder.id
+        );
+        clearReminderTimeout(newReminder);
+        throw error;
+      }
+
+      return {
+        success: true,
+        reminder: {
+          id: newReminder.id,
+          text: newReminder.text,
+          time: newReminder.time,
+          sound: newReminder.sound,
+        },
+      };
+    } catch (error) {
+      console.error('Failed to create reminder:', error);
+      return {
+        success: false,
+        error: 'The reminder could not be saved.',
+      };
     }
   });
 
-  ipcMain.handle('start-timer', (event, { ms, label }) => {
+  ipcMain.handle('start-timer', (event, payload) => {
+    const ms = payload && payload.ms;
+    const label =
+      payload && typeof payload.label === 'string'
+        ? payload.label
+        : '';
+
+    const validation = validateTimerDuration(ms);
+    if (!validation.success) return validation;
+
+    if (activeTimer) {
+      clearTimeout(activeTimer.timeout);
+      activeTimer = null;
+    }
+
     const id = ++timerIdCounter;
     const endTime = Date.now() + ms;
 
     const timeout = setTimeout(() => {
-      activeTimers.delete(id);
+      if (!activeTimer || activeTimer.id !== id) return;
+      activeTimer = null;
 
-      // Always fire a Windows notification regardless of app state
       if (Notification.isSupported()) {
         new Notification({
           title: '⏰ Timer',
@@ -1338,54 +1891,87 @@ function registerIpcHandlers() {
         }).show();
       }
 
-      // Tell the renderer — it decides whether to speak or just play sound
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('timer-fired', { id, label });
       }
     }, ms);
 
-    activeTimers.set(id, { timeout, endTime, durationMs: ms });
-    return { id, endTime };
+    activeTimer = {
+      id,
+      timeout,
+      endTime,
+      durationMs: ms,
+      label,
+    };
+
+    return {
+      success: true,
+      id,
+      endTime,
+    };
   });
 
-  ipcMain.on('cancel-timer', (event, id) => {
-    const t = activeTimers.get(id);
-    if (t) {
-      clearTimeout(t.timeout);
-      activeTimers.delete(id);
+  ipcMain.handle('cancel-timer', (event, id) => {
+    if (activeTimer && activeTimer.id === id) {
+      clearTimeout(activeTimer.timeout);
+      activeTimer = null;
+      return { success: true };
     }
+    return { success: false, error: 'Timer not found or already cancelled.' };
   });
 
   ipcMain.handle('get-timer-remaining', (event, id) => {
-    const t = activeTimers.get(id);
-    if (!t) return { remaining: 0, active: false };
-    return { remaining: Math.max(0, t.endTime - Date.now()), active: true };
+    if (!activeTimer || activeTimer.id !== id) {
+      return { remaining: 0, active: false };
+    }
+    return { remaining: Math.max(0, activeTimer.endTime - Date.now()), active: true };
   });
 
-  ipcMain.on(
+  ipcMain.handle(
     "update-reminder",
     async (event, { id, reminder, reminderTime, sound }) => {
       const reminderIndex = reminders.findIndex((r) => r.id === id);
-      if (reminderIndex !== -1) {
-        const existingReminder = reminders[reminderIndex];
-        if (existingReminder.timeout) clearTimeout(existingReminder.timeout);
-
-        const updatedReminder = {
-          ...existingReminder,
-          text: reminder,
-          time: reminderTime,
-          sound: sound,
-        };
-
-        updatedReminder.timeout = scheduleReminder(updatedReminder);
-        if (updatedReminder.timeout) {
-          reminders[reminderIndex] = updatedReminder;
-        } else {
-          reminders.splice(reminderIndex, 1);
-        }
-
-        await saveReminders();
+      if (reminderIndex === -1) {
+        return { success: false, error: 'Reminder not found.' };
       }
+
+      const validation = validateReminderInput({ reminder, reminderTime, sound });
+      if (!validation.success) return validation;
+
+      const existingReminder = reminders[reminderIndex];
+      const originalReminder = { ...existingReminder };
+
+      clearReminderTimeout(existingReminder);
+
+      const updatedReminder = {
+        ...existingReminder,
+        text: validation.value.text,
+        time: validation.value.time,
+        sound: validation.value.sound,
+      };
+
+      reminders[reminderIndex] = updatedReminder;
+
+      try {
+        await saveReminders();
+        scheduleReminder(updatedReminder);
+      } catch (error) {
+        reminders[reminderIndex] = originalReminder;
+        clearReminderTimeout(updatedReminder);
+        scheduleReminder(originalReminder);
+        console.error('Failed to update reminder:', error);
+        return { success: false, error: 'The reminder could not be updated.' };
+      }
+
+      return {
+        success: true,
+        reminder: {
+          id: updatedReminder.id,
+          text: updatedReminder.text,
+          time: updatedReminder.time,
+          sound: updatedReminder.sound,
+        },
+      };
     }
   );
 
@@ -1656,10 +2242,15 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
   ipcMain.handle("create-calendar-event", async (event, { title, dateTime }) => {
     try {
       const startDate = new Date(dateTime);
+      if (!Number.isFinite(startDate.getTime())) {
+        return { success: false, error: 'Invalid date/time.' };
+      }
       const endDate = new Date(startDate.getTime() + 60 * 60000);
       const pad = (n) => n.toString().padStart(2, "0");
       const fmt = (d) =>
         `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+
+      const safeTitle = escapeIcsText(title);
 
       const ics = [
         "BEGIN:VCALENDAR",
@@ -1668,7 +2259,7 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
         "BEGIN:VEVENT",
         `DTSTART:${fmt(startDate)}`,
         `DTEND:${fmt(endDate)}`,
-        `SUMMARY:${title}`,
+        `SUMMARY:${safeTitle}`,
         "END:VEVENT",
         "END:VCALENDAR",
       ].join("\r\n");

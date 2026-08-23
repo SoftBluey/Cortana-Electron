@@ -816,6 +816,23 @@ function applyMovableModeStyles(isMovable) {
     }
 }
 
+function autoResizeSearchBar() {
+    if (!searchBar.value) {
+        searchBar.style.height = '';
+        return;
+    }
+
+    searchBar.style.height = 'auto';
+    searchBar.style.height =
+        Math.min(searchBar.scrollHeight, 145) + 'px';
+}
+
+function clearSearchBar() {
+    searchBar.value = '';
+    searchBar.style.height = '';
+    autoResizeSearchBar();
+}
+
 window.addEventListener('DOMContentLoaded', async () => {
     try {
     appContainer = document.getElementById('app-container');
@@ -994,7 +1011,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         if (animationContainer.className === 'idle') return;
         blurCleanupTimer = setTimeout(() => {
             hideSearchPanel();
-            searchBar.value = '';
+            clearSearchBar();
             searchBar.placeholder = 'Type here to search';
             setStateIdle();
         }, 200);
@@ -1015,11 +1032,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     let speechActive = false;
     let speechFinal = '';
     let speechShuffleTimer = null;
-
-    function autoResizeSearchBar() {
-        searchBar.style.height = 'auto';
-        searchBar.style.height = Math.min(searchBar.scrollHeight, 145) + 'px';
-    }
 
     function speechShuffle() {
         const chars = 'abcdefghijklmnopqrstuvwxyz';
@@ -1078,9 +1090,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         speechActive = false;
         if (speechShuffleTimer) { clearInterval(speechShuffleTimer); speechShuffleTimer = null; }
         searchBar.style.color = '';
-        searchBar.value = '';
+        clearSearchBar();
         searchBar.placeholder = 'Type here to search';
-        autoResizeSearchBar();
         micBtn.classList.remove('listening');
         ipcRenderer.send('speech-stop');
         offSound.play();
@@ -1107,14 +1118,12 @@ window.addEventListener('DOMContentLoaded', async () => {
 
         const query = speechFinal.trim();
         if (!query) {
-            searchBar.value = '';
-            autoResizeSearchBar();
+            clearSearchBar();
             setStateIdle();
             return;
         }
 
-        searchBar.value = '';
-        autoResizeSearchBar();
+        clearSearchBar();
         const categories = await generateCategorizedResults(query);
         let topItem = null;
         for (const cat of categories) {
@@ -1206,9 +1215,8 @@ window.addEventListener('DOMContentLoaded', async () => {
             speechActive = false;
             if (speechShuffleTimer) { clearInterval(speechShuffleTimer); speechShuffleTimer = null; }
             searchBar.style.color = '';
-            searchBar.value = '';
+            clearSearchBar();
             searchBar.placeholder = 'Type here to search';
-            autoResizeSearchBar();
             micBtn.classList.remove('listening');
         }
         window.speechSynthesis.cancel();
@@ -1620,6 +1628,8 @@ async function generateCategorizedResults(query) {
                     } else {
                         displayAndSpeak(result.error || "Sorry, I couldn't get an answer from AI.", onActionFinished, {}, true);
                     }
+                }).catch(() => {
+                    displayAndSpeak("Sorry, I couldn't get an answer from AI.", onActionFinished, {}, true);
                 });
             }
         });
@@ -1784,7 +1794,7 @@ function showSearchPanel(categories) {
                 e.stopPropagation();
                 clearTimeout(blurCleanupTimer);
                 hideSearchPanel();
-                searchBar.value = '';
+                clearSearchBar();
                 item.action();
                 searchIcon.src = cortanaIcon;
             });
@@ -1851,7 +1861,7 @@ function onSearchKeyDown(event) {
             const enterItems = allPanelItems;
             hideSearchPanel();
             if (enterIndex >= 0 && enterIndex < enterItems.length) {
-                searchBar.value = '';
+                clearSearchBar();
                 enterItems[enterIndex].action();
                 searchIcon.src = cortanaIcon;
             } else {
@@ -1862,7 +1872,7 @@ function onSearchKeyDown(event) {
         case 'Escape':
             event.preventDefault();
             hideSearchPanel();
-            searchBar.value = '';
+            clearSearchBar();
             searchBar.placeholder = 'Type here to search';
             setStateIdle();
             break;
@@ -2051,6 +2061,24 @@ async function loadAndApplySettings() {
     aiModelInput.value = settings.aiModel || 'gpt-4o-mini';
     aiApiUrlInput.value = settings.aiApiUrl || 'https://api.openai.com/v1/chat/completions';
     aiSystemPromptInput.value = settings.aiSystemPrompt || '';
+
+    let aiProvider = settings.aiProvider || '';
+    if (!aiProvider) {
+        const currentUrl = settings.aiApiUrl || '';
+        const matchedPreset = Object.keys(AI_PRESETS).find(
+            (key) => AI_PRESETS[key].url === currentUrl
+        );
+        if (matchedPreset) {
+            aiProvider = matchedPreset;
+        } else if (currentUrl) {
+            aiProvider = 'custom';
+        } else {
+            aiProvider = '';
+        }
+    }
+    aiPresetSelect.value = aiProvider;
+    updateAIProviderUI(aiPresetSelect.value);
+
     updateAIUI();
 }
 
@@ -2410,24 +2438,39 @@ const AI_PRESETS = {
 
 function onPresetChanged() {
     const val = aiPresetSelect.value;
-    const isCustom = val === 'custom';
+    ipcRenderer.send('set-setting', { key: 'aiProvider', value: val });
+
+    if (val === 'custom') {
+        updateAIProviderUI(val);
+        showSavedToast();
+        return;
+    }
+
     const preset = AI_PRESETS[val];
-
-    const showLocalOrCustom = isCustom || preset?.local;
-    aiCustomFields.style.display = isCustom ? 'block' : 'none';
-    aiModelItem.style.display = showLocalOrCustom ? '' : 'none';
-    aiApiUrlItem.style.display = showLocalOrCustom ? '' : 'none';
-
     if (preset) {
         aiApiUrlInput.value = preset.url;
         aiModelInput.value = preset.local ? '' : preset.model;
-        openaiApiKeyInput.placeholder = preset.keyHint || 'No API key needed';
         ipcRenderer.send('set-setting', { key: 'aiApiUrl', value: preset.url });
         if (aiModelInput.value) {
             ipcRenderer.send('set-setting', { key: 'aiModel', value: aiModelInput.value });
         }
     }
+    updateAIProviderUI(val);
     showSavedToast();
+}
+
+function updateAIProviderUI(provider) {
+    const preset = AI_PRESETS[provider];
+    const isCustom = provider === 'custom';
+    const showLocalOrCustom = isCustom || preset?.local;
+
+    aiCustomFields.style.display = isCustom ? 'block' : 'none';
+    aiModelItem.style.display = showLocalOrCustom ? '' : 'none';
+    aiApiUrlItem.style.display = showLocalOrCustom ? '' : 'none';
+
+    openaiApiKeyInput.placeholder =
+        preset?.keyHint ||
+        (preset?.local ? 'No API key needed' : 'sk-...');
 }
 
 function onOpenAIKeyChanged() {
@@ -2586,6 +2629,13 @@ function speakEdge(text, onSpeechEndCallback) {
         currentEdgeAudio = null;
     }
 
+    let callbackInvoked = false;
+    const invokeCallback = () => {
+        if (callbackInvoked) return;
+        callbackInvoked = true;
+        if (onSpeechEndCallback) onSpeechEndCallback();
+    };
+
     ipcRenderer.invoke('synthesize-edge-tts', {
         text,
         voice: edgeVoice,
@@ -2594,29 +2644,32 @@ function speakEdge(text, onSpeechEndCallback) {
     }).then(result => {
         if (!result.success) {
             console.error('Edge TTS failed:', result.error);
-            if (onSpeechEndCallback) onSpeechEndCallback();
+            invokeCallback();
             return;
         }
         const audio = new Audio('file://' + result.filePath.replace(/\\/g, '/'));
         currentEdgeAudio = audio;
-        audio.onended = () => {
+        const cleanup = () => {
             currentEdgeAudio = null;
             try { require('fs').unlinkSync(result.filePath); } catch(e) {}
-            if (onSpeechEndCallback) onSpeechEndCallback();
         };
-        audio.onerror = () => {
-            currentEdgeAudio = null;
-            try { require('fs').unlinkSync(result.filePath); } catch(e) {}
-            if (onSpeechEndCallback) onSpeechEndCallback();
+        audio.onended = () => {
+            cleanup();
+            invokeCallback();
+        };
+        audio.onerror = (err) => {
+            console.error('Edge TTS audio error:', err);
+            cleanup();
+            invokeCallback();
         };
         audio.play().catch(err => {
             console.error('Edge TTS audio play failed:', err);
-            currentEdgeAudio = null;
-            if (onSpeechEndCallback) onSpeechEndCallback();
+            cleanup();
+            invokeCallback();
         });
     }).catch(err => {
         console.error('Edge TTS invoke failed:', err);
-        if (onSpeechEndCallback) onSpeechEndCallback();
+        invokeCallback();
     });
 }
 
@@ -2743,7 +2796,7 @@ async function performWebSearch(query) {
     loadingP.textContent = `Searching the web for "${query}"...`;
     resultsDisplay.appendChild(loadingP);
     searchBar.disabled = false;
-    searchBar.value = '';
+    clearSearchBar();
     searchBar.placeholder = 'Type here to search';
 
     const result = await ipcRenderer.invoke('search-web', query);
@@ -2799,7 +2852,7 @@ function hideSearchResults() {
     if (!searchResultsActive) return;
     searchResultsActive = false;
     searchBar.placeholder = 'Type here to search';
-    searchBar.value = '';
+    clearSearchBar();
     searchIcon.src = cortanaIcon;
     setStateIdle();
 }
@@ -3118,6 +3171,59 @@ function showReminderUI(options = {}) {
     }
 }
 
+function parseReminderRequest(fullText) {
+    const text = fullText.trim();
+
+    const timeFirst = text.match(
+        /^(?:in|at|on)\s+(.+?)\s+to\s+(.+)$/i
+    );
+
+    if (timeFirst) {
+        const parsedDate = parseDateTime(timeFirst[1].trim());
+        if (parsedDate) {
+            return {
+                reminderText: timeFirst[2].trim(),
+                timeText: formatDateTimeForInput(parsedDate),
+            };
+        }
+    }
+
+    const dayTime = text.match(
+        /^(.+?)\s+\b(tomorrow|tonight|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b\s+(?:at|on|in)\s+(.+)$/i
+    );
+
+    if (dayTime && dayTime[1].trim()) {
+        const parsedDate = parseDateTime(
+            `${dayTime[2]} ${dayTime[3].trim()}`.trim()
+        );
+        if (parsedDate) {
+            return {
+                reminderText: dayTime[1].trim(),
+                timeText: formatDateTimeForInput(parsedDate),
+            };
+        }
+    }
+
+    const textFirst = text.match(
+        /^(.+?)\s+(?:in|at|on)\s+(.+)$/i
+    );
+
+    if (textFirst) {
+        const parsedDate = parseDateTime(textFirst[2].trim());
+        if (parsedDate) {
+            return {
+                reminderText: textFirst[1].trim(),
+                timeText: formatDateTimeForInput(parsedDate),
+            };
+        }
+    }
+
+    return {
+        reminderText: text,
+        timeText: '',
+    };
+}
+
 function parseDateTime(text) {
     const now = new Date();
     let date = new Date(now);
@@ -3209,52 +3315,76 @@ function formatDateTimeForInput(date) {
     return `${year}-${month}-${day}T${hours}:${minutes}`;
 }
 
-function onSaveReminder() {
+async function onSaveReminder() {
     const reminder = reminderTextInput.value.trim();
     const timeValue = reminderTimeInput.value;
-    
+
     let soundValue;
     if (editingReminderId && editingReminderSound) {
-        // If we're editing an existing reminder, use the sound that was initially set for this reminder during editing
-        // This preserves the original reminder's sound unless the user somehow changed it in the UI (which isn't currently possible)
         soundValue = editingReminderSound;
     } else {
-        // For new reminders, read directly from the settings input field to ensure we get the latest value
         soundValue = reminderSoundSettingInput.value || "notify.wav";
     }
 
-    if (reminder && timeValue) {
-        const reminderDate = new Date(timeValue);
-        const reminderPayload = { 
-            reminder, 
-            reminderTime: reminderDate.toISOString(),
-            sound: soundValue
-        };
-        let text;
-
-        if (editingReminderId) {
-            ipcRenderer.send('update-reminder', { id: editingReminderId, ...reminderPayload });
-            text = "Done. I've updated your reminder.";
-        } else {
-            ipcRenderer.send('set-reminder', reminderPayload);
-            const friendlyTime = reminderDate.toLocaleString([], formatDateTimeOptions());
-            text = `OK. I'll remind you to "${reminder}" on ${friendlyTime}.`;
-        }
-
+    const closeReminderForm = () => {
         editingReminderId = null;
         editingReminderSound = null;
-
         reminderContainer.classList.remove('visible');
         animationContainer.style.display = 'block';
         contentWrapper.style.display = 'block';
-        setStateActive();
-        anim.goToState(AnimationState.SPEAKING_BEGIN);
+        searchBar.disabled = false;
+        searchBar.placeholder = 'Type here to search';
+        clearSearchBar();
+    };
 
-        displayAndSpeak(text, onActionFinished, {}, false);
-    } else {
-        const errorText = "Please enter both a reminder and a valid time.";
-        displayAndSpeak(errorText, onActionFinished, {}, true);
+    if (!reminder || !timeValue) {
+        closeReminderForm();
+        setStateActive();
+        displayAndSpeak("Please enter both a reminder and a valid time.", onActionFinished, {}, true);
+        return;
     }
+
+    const reminderDate = new Date(timeValue);
+    const reminderPayload = {
+        reminder,
+        reminderTime: reminderDate.toISOString(),
+        sound: soundValue
+    };
+
+    const wasEditing = !!editingReminderId;
+
+    anim.goToState(AnimationState.THINKING);
+    let result;
+    try {
+        if (editingReminderId) {
+            result = await ipcRenderer.invoke('update-reminder', { id: editingReminderId, ...reminderPayload });
+        } else {
+            result = await ipcRenderer.invoke('set-reminder', reminderPayload);
+        }
+    } catch (error) {
+        console.error('Failed to save reminder:', error);
+        result = { success: false, error: null };
+    }
+
+    if (!result.success) {
+        closeReminderForm();
+        setStateActive();
+        displayAndSpeak(result.error || 'The reminder could not be saved.', onActionFinished, {}, true);
+        return;
+    }
+
+    closeReminderForm();
+    setStateActive();
+
+    let text;
+    if (wasEditing) {
+        text = "Done. I've updated your reminder.";
+    } else {
+        const friendlyTime = reminderDate.toLocaleString([], formatDateTimeOptions());
+        text = `OK. I'll remind you to "${reminder}" on ${friendlyTime}.`;
+    }
+
+    displayAndSpeak(text, onActionFinished, {}, false);
 }
 
 
@@ -3290,8 +3420,9 @@ async function handleOpenApplication(appName, silent = false) {
     const apps = await ipcRenderer.invoke('find-application', appName);
 
     if (apps.length === 0) {
-        const fallbackSuccess = await ipcRenderer.invoke('open-application-fallback', appName);
-        if (fallbackSuccess) {
+        anim.goToState(AnimationState.THINKING);
+        const fallbackResult = await ipcRenderer.invoke('open-application-fallback', appName);
+        if (fallbackResult.success) {
             if (!silent) {
                 const responseText = `I couldn't find "${appName}" in your Start Menu, but I'm opening it directly.`;
                 displayAndSpeak(responseText, onActionFinished, {}, false);
@@ -3447,21 +3578,13 @@ const commands = [
     },
     {
         regex: /^(?:remind me(?: to)?|create a reminder(?: for)?)\s(.+)/i,
-        handler: (match) => {
-            let reminderText = '';
-            let timeText = '';
-            const fullReminderText = match[1].trim();
-            const timeExtractionMatch = fullReminderText.match(/(.+)( at | on | in )(.+)/i);
-            reminderText = fullReminderText;
-            if (timeExtractionMatch) {
-                const potentialText = timeExtractionMatch[1].trim();
-                const potentialTime = timeExtractionMatch[3].trim();
-                const parsedDate = parseDateTime(potentialTime);
-                if (parsedDate) {
-                    reminderText = potentialText;
-                    timeText = formatDateTimeForInput(parsedDate);
-                }
-            }
+        handler: (match, originalQuery) => {
+            const source = (originalQuery || match[0]).trim();
+            const stripped = source.replace(
+                /^(?:remind me(?: to)?|create a reminder(?: for)?)\s+/i,
+                ''
+            );
+            const { reminderText, timeText } = parseReminderRequest(stripped);
             showReminderUI({ initialText: reminderText, initialTime: timeText });
         }
     },
@@ -3647,12 +3770,26 @@ const commands = [
                 return;
             }
             const friendlyTime = parsedDate.toLocaleString([], formatDateTimeOptions());
-            ipcRenderer.send('set-reminder', {
+            anim.goToState(AnimationState.THINKING);
+            ipcRenderer.invoke('set-reminder', {
                 reminder: 'Alarm',
                 reminderTime: parsedDate.toISOString(),
                 sound: 'notify.wav'
+            }).then(result => {
+                if (result && result.success) {
+                    displayAndSpeak(`Alarm set for ${friendlyTime}.`, onActionFinished, {}, false);
+                } else {
+                    displayAndSpeak(
+                        (result && result.error) || "Sorry, I couldn't set that alarm.",
+                        onActionFinished,
+                        {},
+                        true
+                    );
+                }
+            }).catch((error) => {
+                console.error('Failed to set alarm:', error);
+                displayAndSpeak("Sorry, I couldn't set that alarm.", onActionFinished, {}, true);
             });
-            displayAndSpeak(`Alarm set for ${friendlyTime}.`, onActionFinished, {}, false);
         }
     },
     {
@@ -3777,7 +3914,7 @@ const commands = [
                 displayAndSpeak("Sorry, I can't convert between those units.", onActionFinished, {}, true);
                 return;
             }
-            displayAndSpeak(`${value} ${from} is ${result.toFixed(2)} ${to}.`, onActionFinished, { showWebLink: true }, false);
+            displayAndSpeak(`${value} ${from} is ${result.toFixed(2)} ${formatUnitLabel(result, to)}.`, onActionFinished, { showWebLink: true }, false);
         }
     },
     {
@@ -3929,9 +4066,19 @@ function wouldCommandMatch(text) {
 }
 
 async function startTimer(value, unit, ms) {
+    if (!Number.isFinite(ms) || !Number.isSafeInteger(ms) || ms <= 0) {
+      displayAndSpeak(
+        'Please choose a valid timer duration.',
+        onActionFinished,
+        {},
+        true
+      );
+      return;
+    }
+
     // Cancel any existing timer
     if (activeTimerId !== null) {
-      ipcRenderer.send('cancel-timer', activeTimerId);
+      await ipcRenderer.invoke('cancel-timer', activeTimerId);
       activeTimerId = null;
     }
     if (timerCountdownInterval) {
@@ -3940,7 +4087,20 @@ async function startTimer(value, unit, ms) {
     }
 
     const label = `Your ${value} ${unit}${value !== 1 ? 's' : ''} timer is up!`;
+    
+    anim.goToState(AnimationState.THINKING);
     const result = await ipcRenderer.invoke('start-timer', { ms, label });
+
+    if (!result.success) {
+      displayAndSpeak(
+        result.error || 'Failed to start timer.',
+        onActionFinished,
+        {},
+        true
+      );
+      return;
+    }
+
     activeTimerId = result.id;
     timerEndTime = result.endTime;
     timerDuration = ms;
@@ -3961,6 +4121,7 @@ async function startTimer(value, unit, ms) {
     resultsDisplay.appendChild(timerDisplay);
 
     const updateDisplay = async () => {
+      if (activeTimerId === null) return;
       const { remaining, active } =
         await ipcRenderer.invoke('get-timer-remaining', activeTimerId);
       if (!active || remaining <= 0) {
@@ -4035,6 +4196,17 @@ function convertUnit(value, from, to) {
     return (value * fromBase) / toBase;
 }
 
+function formatUnitLabel(rawResult, unit) {
+    const displayed = Number(Number(rawResult).toFixed(2));
+    if (Math.abs(displayed) === 1) return unit;
+
+    const pluralMap = {
+        inch: 'inches',
+        foot: 'feet',
+    };
+    return pluralMap[unit] || `${unit}s`;
+}
+
 function processQuery(query) {
     webLinkContainer.style.display = 'none';
     webLinkContainer.style.opacity = '0';
@@ -4059,7 +4231,7 @@ function processQuery(query) {
     for (const command of commands) {
         const match = lowerCaseQuery.match(command.regex);
         if (match) {
-            command.handler(match);
+            command.handler(match, query);
             return;
         }
     }
@@ -4075,10 +4247,10 @@ function processQuery(query) {
             if (result.success) {
                 displayAndSpeak(result.text, onActionFinished, {}, false);
             } else {
-                performWebSearch(query);
+                displayAndSpeak(result.error || "Sorry, I couldn't get an answer from AI.", onActionFinished, {}, true);
             }
         }).catch(() => {
-            performWebSearch(query);
+            displayAndSpeak("Sorry, I couldn't get an answer from AI.", onActionFinished, {}, true);
         });
         return;
     }
@@ -4098,7 +4270,7 @@ function onSearch() {
     setStateActive();
     searchBar.blur();
     clearTimeout(blurCleanupTimer);
-    searchBar.value = '';
+    clearSearchBar();
     resultsDisplay.innerHTML = '';
 
     requestSound.currentTime = 0;
