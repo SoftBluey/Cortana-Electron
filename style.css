@@ -1121,6 +1121,14 @@ body.slim-mode #search-panel {
     font-size: 15px;
 }
 
+.speech-device-name {
+    min-width: 0;
+    max-width: 60%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .setting-sub-item {
     display: none;
     padding-left: 15px;

@@ -353,6 +353,29 @@
                   </div>
                 </div>
                 <div class="settings-section">
+                  <h2>Speech Recognition</h2>
+                  <p class="setting-warning" style="display:block;">
+                    Windows speech recognition always uses the system default
+                    microphone.
+                  </p>
+                  <div class="setting-item">
+                    <label>Microphone</label>
+                    <span id="speech-input-device" class="speech-device-name">Detecting...</span>
+                  </div>
+                  <div class="setting-item">
+                    <label>Recognition status</label>
+                    <span id="speech-recognition-status">Idle</span>
+                  </div>
+                  <div class="setting-item">
+                    <label>Last recognition event</label>
+                    <span id="speech-last-event">None</span>
+                  </div>
+                  <div class="setting-item" style="flex-direction:column; align-items:flex-start; gap:6px;">
+                    <label>Recent recognition errors</label>
+                    <div id="speech-error-log" style="font-size:12px; opacity:0.85; width:100%;">None</div>
+                  </div>
+                </div>
+                <div class="settings-section">
                   <h2>Advanced</h2>
                   <button id="reset-voice-btn" class="settings-button">
                     Reset Voice Settings

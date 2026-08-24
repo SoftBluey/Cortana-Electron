@@ -30,6 +30,8 @@ let aiToggle, openaiApiKeyInput, openaiApiKeyContainer;
 let aiModelInput, aiApiUrlInput, aiSystemPromptInput, aiPresetSelect, aiCustomFields, aiModelItem, aiApiUrlItem;
 let useAccentToggle;
 let heyCortanaToggle;
+let speechDeviceEl, speechStatusEl, speechLastEventEl, speechErrorLogEl;
+const speechDiagnostics = { status: 'Idle', lastEvent: 'None', errors: [] };
 
 let _stopSpeechFromOutside = null;
 
@@ -69,6 +71,8 @@ let activeTimerId = null;
 let timerCountdownInterval = null;
 let timerEndTime = null;
 let timerDuration = null;
+let activeTimerLabel = null;
+let timerPanelInterval = null;
 
 const isPackaged = ipcRenderer.sendSync('get-is-packaged');
 const appRoot = path.resolve(__dirname, isPackaged ? '../assets' : 'assets');
@@ -942,6 +946,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     evaVoiceStatus = document.getElementById('eva-voice-status');
     installEvaVoiceBtn = document.getElementById('install-eva-voice-btn');
 
+    speechDeviceEl = document.getElementById('speech-input-device');
+    speechStatusEl = document.getElementById('speech-recognition-status');
+    speechLastEventEl = document.getElementById('speech-last-event');
+    speechErrorLogEl = document.getElementById('speech-error-log');
+
     ttsEngineSelect = document.getElementById('tts-engine-select');
     edgeVoiceSelect = document.getElementById('edge-voice-select');
     edgeVoiceContainer = document.getElementById('edge-voice-container');
@@ -1042,6 +1051,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
 
     function flashMicError() {
+        setSpeechDiagnosticStatus('Error');
         micBtn.classList.add('error');
         setTimeout(() => micBtn.classList.remove('error'), 1200);
     }
@@ -1056,6 +1066,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         isBusy = false;
         speechActive = true;
         speechFinal = '';
+        setSpeechDiagnosticStatus('Listening');
         clearTimeout(blurCleanupTimer);
         micBtn.classList.add('listening');
         anim.goToState(AnimationState.LISTENING_BEGIN);
@@ -1088,6 +1099,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     function stopSpeechRecognition() {
         speechActive = false;
+        setSpeechDiagnosticStatus('Idle');
         if (speechShuffleTimer) { clearInterval(speechShuffleTimer); speechShuffleTimer = null; }
         searchBar.style.color = '';
         clearSearchBar();
@@ -1109,6 +1121,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     async function submitVoiceSearch() {
         speechActive = false;
+        setSpeechDiagnosticStatus('Idle');
         if (speechShuffleTimer) { clearInterval(speechShuffleTimer); speechShuffleTimer = null; }
         searchBar.style.color = '';
         micBtn.classList.remove('listening');
@@ -1146,6 +1159,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         if (data.final) {
             const fullText = (data.text || '').trim();
             if (!fullText) { submitVoiceSearch(); return; }
+            recordSpeechEvent(fullText);
+            setSpeechDiagnosticStatus('Recognised');
             const words = fullText.split(/\s+/);
             let wordIndex = 0;
             speechFinal = '';
@@ -1174,6 +1189,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     ipcRenderer.on('speech-error', (event, message) => {
         if (!speechActive) return;
+        recordSpeechError(message || 'Speech error');
         console.error('[speech]', message || 'Speech error');
         searchBar.placeholder = message || 'Speech error';
         setTimeout(() => { searchBar.placeholder = 'Type here to search'; }, 5000);
@@ -1456,6 +1472,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         activeTimerId = null;
         timerEndTime = null;
         timerDuration = null;
+        activeTimerLabel = null;
+        stopTimerPanelInterval();
 
         const display = document.getElementById('timer-display');
         if (display) display.textContent = "Time's up!";
@@ -1890,6 +1908,56 @@ function updatePanelSelection() {
     });
 }
 
+function renderSpeechErrors() {
+    if (!speechErrorLogEl) return;
+    if (speechDiagnostics.errors.length === 0) {
+        speechErrorLogEl.textContent = 'None';
+        return;
+    }
+    speechErrorLogEl.innerHTML = '';
+    speechDiagnostics.errors.forEach(entry => {
+        const p = document.createElement('div');
+        p.textContent = entry;
+        speechErrorLogEl.appendChild(p);
+    });
+}
+
+function setSpeechDiagnosticStatus(status) {
+    speechDiagnostics.status = status;
+    if (speechStatusEl) speechStatusEl.textContent = status;
+}
+
+function recordSpeechEvent(text) {
+    speechDiagnostics.lastEvent = `${new Date().toLocaleTimeString()} - "${text}"`;
+    if (speechLastEventEl) speechLastEventEl.textContent = speechDiagnostics.lastEvent;
+}
+
+function recordSpeechError(message) {
+    speechDiagnostics.errors.unshift(`${new Date().toLocaleTimeString()} - ${message}`);
+    speechDiagnostics.errors = speechDiagnostics.errors.slice(0, 5);
+    renderSpeechErrors();
+}
+
+async function refreshSpeechDiagnostics() {
+    let deviceLabel = 'Default input device';
+    try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const defaultInput =
+            devices.find(d => d.kind === 'audioinput' && d.deviceId === 'default') ||
+            devices.find(d => d.kind === 'audioinput');
+        if (defaultInput && defaultInput.label) {
+            deviceLabel = defaultInput.label.replace(/^default\s*-\s*/i, '');
+        }
+    } catch (_) {}
+    if (speechDeviceEl) {
+        speechDeviceEl.textContent = deviceLabel;
+        speechDeviceEl.title = deviceLabel;
+    }
+    if (speechStatusEl) speechStatusEl.textContent = speechDiagnostics.status;
+    if (speechLastEventEl) speechLastEventEl.textContent = speechDiagnostics.lastEvent;
+    renderSpeechErrors();
+}
+
 async function showSettingsUI() {
     _stopSpeechFromOutside?.();
     animationContainer.style.display = 'none';
@@ -1902,6 +1970,7 @@ async function showSettingsUI() {
 
     // Refresh all settings when opening settings UI to ensure they're current
     await loadAndApplySettings();
+    refreshSpeechDiagnostics();
 
     searchBar.disabled = true;
     searchBar.placeholder = 'Unavailable...';
@@ -2735,6 +2804,7 @@ function setStateIdle() {
     anim.goToState(AnimationState.IDLE);
 
     if (!isBusy) {
+        stopTimerPanelInterval();
         resultsDisplay.innerHTML = '';
         if (timerEndTime) {
             const timerDisplay = document.createElement('p');
@@ -3171,6 +3241,57 @@ function showReminderUI(options = {}) {
     }
 }
 
+const temporalNumberWords = {
+    'zero': 0,
+    'one': 1,
+    'two': 2,
+    'three': 3,
+    'four': 4,
+    'five': 5,
+    'six': 6,
+    'seven': 7,
+    'eight': 8,
+    'nine': 9,
+    'ten': 10,
+    'eleven': 11,
+    'twelve': 12,
+    'thirteen': 13,
+    'fourteen': 14,
+    'fifteen': 15,
+    'sixteen': 16,
+    'seventeen': 17,
+    'eighteen': 18,
+    'nineteen': 19,
+    'twenty': 20,
+    'thirty': 30,
+    'forty': 40,
+    'fifty': 50,
+    'sixty': 60
+};
+
+function parseTemporalNumberWords(sequence) {
+    const words = sequence.toLowerCase().split(/[\s-]+/).filter(Boolean);
+    if (!words.length) return null;
+    let total = 0;
+    for (const word of words) {
+        if (!(word in temporalNumberWords)) return null;
+        total += temporalNumberWords[word];
+    }
+    return total;
+}
+
+function normalizeTemporalNumberWords(text) {
+    const wordPattern = Object.keys(temporalNumberWords).join('|');
+    const pattern = new RegExp(
+        `\\b((?:${wordPattern})(?:[\\s-](?:${wordPattern}))*)\\s+(seconds?|minutes?|hours?|days?)\\b`,
+        'gi'
+    );
+    return text.replace(pattern, (match, value, unit) => {
+        const parsed = parseTemporalNumberWords(value);
+        return parsed === null ? match : `${parsed} ${unit.toLowerCase()}`;
+    });
+}
+
 function parseReminderRequest(fullText) {
     const text = fullText.trim();
 
@@ -3204,6 +3325,18 @@ function parseReminderRequest(fullText) {
         }
     }
 
+    const timeOnly = text.match(/^(?:in|at|on)\s+(.+)$/i)
+        || text.match(/^(tomorrow|tonight|today)(?:\s+(?:at|on|in)\s+(.+))?$/i);
+    if (timeOnly) {
+        const parsedDate = parseDateTime(text);
+        if (parsedDate) {
+            return {
+                reminderText: '',
+                timeText: formatDateTimeForInput(parsedDate),
+            };
+        }
+    }
+
     const textFirst = text.match(
         /^(.+?)\s+(?:in|at|on)\s+(.+)$/i
     );
@@ -3228,6 +3361,7 @@ function parseDateTime(text) {
     const now = new Date();
     let date = new Date(now);
     text = text.toLowerCase();
+    text = normalizeTemporalNumberWords(text);
     let timeFound = false;
     let hasSpecificHour = false;
 
@@ -3393,6 +3527,9 @@ async function handleOpenApplication(appName, silent = false) {
     const specialCommands = {
         'settings': 'ms-settings:',
         'windows settings': 'ms-settings:',
+        'windows update': 'ms-settings:windowsupdate',
+        'update & security': 'ms-settings:windowsupdate',
+        'update and security': 'ms-settings:windowsupdate',
         'control panel': 'control',
         'task manager': 'taskmgr',
         'command prompt': 'cmd',
@@ -3559,6 +3696,118 @@ async function showReminders() {
     });
 }
 
+function stopTimerPanelInterval() {
+    if (timerPanelInterval) {
+        clearInterval(timerPanelInterval);
+        timerPanelInterval = null;
+    }
+}
+
+function cancelActiveTimer() {
+    if (activeTimerId !== null) {
+        ipcRenderer.send('cancel-timer', activeTimerId);
+        activeTimerId = null;
+    }
+    if (timerCountdownInterval) {
+        clearInterval(timerCountdownInterval);
+        timerCountdownInterval = null;
+    }
+    timerEndTime = null;
+    timerDuration = null;
+    activeTimerLabel = null;
+}
+
+function showTimersPanel() {
+    stopTimerPanelInterval();
+    resultsDisplay.innerHTML = '';
+
+    const finishPanelSpeech = () => {
+        isBusy = false;
+        searchBar.disabled = false;
+        searchBar.placeholder = 'Type here to search';
+        anim.goToState(AnimationState.SPEAKING_END, { nextState: AnimationState.TRANSITION_TO_IDLE });
+    };
+
+    if (activeTimerId === null) {
+        const emptyP = document.createElement('p');
+        emptyP.className = 'fade-in-item';
+        emptyP.textContent = "You don't have any timers running.";
+        resultsDisplay.appendChild(emptyP);
+        anim.goToState(AnimationState.SPEAKING_BEGIN);
+        speak("You don't have any timers running.", finishPanelSpeech);
+        return;
+    }
+
+    const title = document.createElement('p');
+    title.className = 'fade-in-item reminder-list-title';
+    title.textContent = 'Here are your timers.';
+    resultsDisplay.appendChild(title);
+
+    const list = document.createElement('div');
+    list.className = 'reminder-list';
+
+    const item = document.createElement('div');
+    item.className = 'reminder-list-item fade-in-item';
+
+    const textContainer = document.createElement('div');
+    textContainer.className = 'reminder-text-container';
+
+    const text = document.createElement('span');
+    text.className = 'reminder-text';
+    text.textContent = activeTimerLabel || 'Timer';
+
+    const time = document.createElement('span');
+    time.className = 'reminder-time';
+
+    textContainer.appendChild(text);
+    textContainer.appendChild(time);
+
+    const actions = document.createElement('div');
+    actions.className = 'reminder-item-actions';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.className = 'reminder-action-btn delete';
+    cancelBtn.onclick = () => {
+        cancelActiveTimer();
+        stopTimerPanelInterval();
+        item.style.animation = 'fadeOut 0.3s forwards';
+        setTimeout(() => showTimersPanel(), 300);
+    };
+
+    actions.appendChild(cancelBtn);
+    item.appendChild(textContainer);
+    item.appendChild(actions);
+    list.appendChild(item);
+    resultsDisplay.appendChild(list);
+
+    const updateRemaining = (info) => {
+        if (!info || !info.active) return;
+        const mins = Math.floor(info.remaining / 60000);
+        const secs = Math.floor((info.remaining % 60000) / 1000);
+        time.textContent = `${mins}:${secs.toString().padStart(2, '0')} remaining`;
+    };
+
+    ipcRenderer.invoke('get-timer-remaining', activeTimerId)
+        .then(updateRemaining)
+        .catch(() => {});
+    timerPanelInterval = setInterval(() => {
+        if (activeTimerId === null) {
+            stopTimerPanelInterval();
+            return;
+        }
+        ipcRenderer.invoke('get-timer-remaining', activeTimerId)
+            .then(info => {
+                if (!info.active) { stopTimerPanelInterval(); return; }
+                updateRemaining(info);
+            })
+            .catch(() => stopTimerPanelInterval());
+    }, 500);
+
+    anim.goToState(AnimationState.SPEAKING_BEGIN);
+    speak(`You have a timer running: ${activeTimerLabel || 'timer'}.`, finishPanelSpeech);
+}
+
 const commands = [
     {
         regex: /^(drum ?roll)(,)?( please)?(!|\.|\?)?$/i,
@@ -3594,12 +3843,6 @@ const commands = [
             displayAndSpeak("Sure, what would you like me to remind you about?", () => {
                 showReminderUI({});
             }, {}, false);
-        }
-    },
-    {
-        regex: /^(open|launch|start|run) (.+)/i,
-        handler: (match) => {
-            handleOpenApplication(match[2].trim());
         }
     },
     {
@@ -3713,9 +3956,14 @@ const commands = [
         }
     },
     {
-        regex: /^(?:set|start) a timer (?:for )?(?:about )?(\d+)\s*(minute|min|second|sec|hour|hr)s?\s*$/i,
+        regex: new RegExp(
+            `^(?:set|start) a timer (?:for )?(?:about )?(\\d+|(?:${Object.keys(temporalNumberWords).join('|')})(?:[\\s-](?:${Object.keys(temporalNumberWords).join('|')}))*)\\s*(minute|min|second|sec|hour|hr)s?\\s*$`,
+            'i'
+        ),
         handler: (match) => {
-            const value = parseInt(match[1]);
+            const value = /^\d+$/.test(match[1])
+                ? parseInt(match[1], 10)
+                : parseTemporalNumberWords(match[1]);
             const unit = match[2].toLowerCase();
             let ms;
             if (unit.startsWith('min')) ms = value * 60000;
@@ -3726,21 +3974,20 @@ const commands = [
         }
     },
     {
-        regex: /^(?:cancel|stop) (?:the )?timer$/i,
+        regex: /^(?:cancel|stop|delete)(?: the)? timer$/i,
         handler: () => {
             if (activeTimerId !== null) {
-                ipcRenderer.send('cancel-timer', activeTimerId);
-                activeTimerId = null;
-                if (timerCountdownInterval) {
-                    clearInterval(timerCountdownInterval);
-                    timerCountdownInterval = null;
-                }
-                timerEndTime = null;
-                timerDuration = null;
+                cancelActiveTimer();
                 displayAndSpeak("Timer cancelled.", onActionFinished, {}, false);
             } else {
                 displayAndSpeak("There's no timer running.", onActionFinished, {}, false);
             }
+        }
+    },
+    {
+        regex: /^\s*(?:(?:what|which)\s+timers?\s+do\s+i\s+have|what\s+(?:are|is)\s+my\s+timers?|what'?s\s+my\s+timers?|my\s+timers?|show\s+(?:my\s+)?timers?|list\s+(?:my\s+)?timers?|(?:active|current)\s+timers?|check\s+(?:my\s+)?timers?|how\s+long\s+is\s+left(?:\s+on\s+(?:the\s+|my\s+)?timers?)?|how\s+much\s+time\s+(?:is\s+)?left|timers?\s+status)\s*[!.?]*\s*$/i,
+        handler: () => {
+            showTimersPanel();
         }
     },
     {
@@ -3950,6 +4197,12 @@ const commands = [
         }
     },
     {
+        regex: /^(open|launch|start|run) (.+)/i,
+        handler: (match) => {
+            handleOpenApplication(match[2].trim());
+        }
+    },
+    {
         regex: /^(?:what is |tell me about |who (?:is|was) |define )(.+)$|^what does (.+) mean\??$/i,
         handler: (match) => {
             const topic = (match[1] || match[2] || '').trim().replace(/[?!.]+$/, '');
@@ -4104,6 +4357,7 @@ async function startTimer(value, unit, ms) {
     activeTimerId = result.id;
     timerEndTime = result.endTime;
     timerDuration = ms;
+    activeTimerLabel = `${value} ${unit}${value !== 1 ? 's' : ''}`;
 
     anim.goToState(AnimationState.SPEAKING_BEGIN);
     speak(`Timer set for ${value} ${unit}${value !== 1 ? 's' : ''}.`, () => {
