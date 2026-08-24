@@ -3985,7 +3985,7 @@ const commands = [
         }
     },
     {
-        regex: /^(?:what|which) timers? do i have$|^what are my timers?$|^my timers?$|^show(?: my)? timers?$|^list(?: my)? timers?$|^(?:active|current) timers?$/i,
+        regex: /^\s*(?:(?:what|which)\s+timers?\s+do\s+i\s+have|what\s+(?:are|is)\s+my\s+timers?|what'?s\s+my\s+timers?|my\s+timers?|show\s+(?:my\s+)?timers?|list\s+(?:my\s+)?timers?|(?:active|current)\s+timers?|check\s+(?:my\s+)?timers?|how\s+long\s+is\s+left(?:\s+on\s+(?:the\s+|my\s+)?timers?)?|how\s+much\s+time\s+(?:is\s+)?left|timers?\s+status)\s*[!.?]*\s*$/i,
         handler: () => {
             showTimersPanel();
         }
