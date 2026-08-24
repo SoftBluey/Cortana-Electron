@@ -3729,6 +3729,10 @@ function showTimersPanel() {
     };
 
     if (activeTimerId === null) {
+        const emptyP = document.createElement('p');
+        emptyP.className = 'fade-in-item';
+        emptyP.textContent = "You don't have any timers running.";
+        resultsDisplay.appendChild(emptyP);
         anim.goToState(AnimationState.SPEAKING_BEGIN);
         speak("You don't have any timers running.", finishPanelSpeech);
         return;
@@ -3981,7 +3985,7 @@ const commands = [
         }
     },
     {
-        regex: /^(?:what|which) timers? do i have$|^show(?: my)? timers?$|^list(?: my)? timers?$/i,
+        regex: /^(?:what|which) timers? do i have$|^what are my timers?$|^my timers?$|^show(?: my)? timers?$|^list(?: my)? timers?$|^(?:active|current) timers?$/i,
         handler: () => {
             showTimersPanel();
         }
