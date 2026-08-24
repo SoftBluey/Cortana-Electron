@@ -3171,6 +3171,57 @@ function showReminderUI(options = {}) {
     }
 }
 
+const temporalNumberWords = {
+    'zero': 0,
+    'one': 1,
+    'two': 2,
+    'three': 3,
+    'four': 4,
+    'five': 5,
+    'six': 6,
+    'seven': 7,
+    'eight': 8,
+    'nine': 9,
+    'ten': 10,
+    'eleven': 11,
+    'twelve': 12,
+    'thirteen': 13,
+    'fourteen': 14,
+    'fifteen': 15,
+    'sixteen': 16,
+    'seventeen': 17,
+    'eighteen': 18,
+    'nineteen': 19,
+    'twenty': 20,
+    'thirty': 30,
+    'forty': 40,
+    'fifty': 50,
+    'sixty': 60
+};
+
+function parseTemporalNumberWords(sequence) {
+    const words = sequence.toLowerCase().split(/[\s-]+/).filter(Boolean);
+    if (!words.length) return null;
+    let total = 0;
+    for (const word of words) {
+        if (!(word in temporalNumberWords)) return null;
+        total += temporalNumberWords[word];
+    }
+    return total;
+}
+
+function normalizeTemporalNumberWords(text) {
+    const wordPattern = Object.keys(temporalNumberWords).join('|');
+    const pattern = new RegExp(
+        `\\b((?:${wordPattern})(?:[\\s-](?:${wordPattern}))*)\\s+(seconds?|minutes?|hours?|days?)\\b`,
+        'gi'
+    );
+    return text.replace(pattern, (match, value, unit) => {
+        const parsed = parseTemporalNumberWords(value);
+        return parsed === null ? match : `${parsed} ${unit.toLowerCase()}`;
+    });
+}
+
 function parseReminderRequest(fullText) {
     const text = fullText.trim();
 
@@ -3228,6 +3279,7 @@ function parseDateTime(text) {
     const now = new Date();
     let date = new Date(now);
     text = text.toLowerCase();
+    text = normalizeTemporalNumberWords(text);
     let timeFound = false;
     let hasSpecificHour = false;
 
@@ -3393,6 +3445,9 @@ async function handleOpenApplication(appName, silent = false) {
     const specialCommands = {
         'settings': 'ms-settings:',
         'windows settings': 'ms-settings:',
+        'windows update': 'ms-settings:windowsupdate',
+        'update & security': 'ms-settings:windowsupdate',
+        'update and security': 'ms-settings:windowsupdate',
         'control panel': 'control',
         'task manager': 'taskmgr',
         'command prompt': 'cmd',
@@ -3713,9 +3768,14 @@ const commands = [
         }
     },
     {
-        regex: /^(?:set|start) a timer (?:for )?(?:about )?(\d+)\s*(minute|min|second|sec|hour|hr)s?\s*$/i,
+        regex: new RegExp(
+            `^(?:set|start) a timer (?:for )?(?:about )?(\\d+|(?:${Object.keys(temporalNumberWords).join('|')})(?:[\\s-](?:${Object.keys(temporalNumberWords).join('|')}))*)\\s*(minute|min|second|sec|hour|hr)s?\\s*$`,
+            'i'
+        ),
         handler: (match) => {
-            const value = parseInt(match[1]);
+            const value = /^\d+$/.test(match[1])
+                ? parseInt(match[1], 10)
+                : parseTemporalNumberWords(match[1]);
             const unit = match[2].toLowerCase();
             let ms;
             if (unit.startsWith('min')) ms = value * 60000;
