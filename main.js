@@ -37,7 +37,9 @@ let speechRecognizer = null;
 let wakeEnabled = false;
 let wakeRunning = false;
 let wakeRecognizer = null;
-let queryRecognizer = null;
+let wakeRestartTimer = null;
+let wakeRetryAttempt = 0;
+let wakeGeneration = 0;
 
 const speechState = {
   recognizer: null,
@@ -528,73 +530,207 @@ async function loadReminders() {
   }
 }
 
-async function loadSettings() {
-  try {
-    let data = await fs.readFile(SETTINGS_FILE, "utf-8");
+const VALID_ENUMS = {
+  searchEngine: ['bing', 'duckduckgo', 'google'],
+  ttsEngine: ['edge', 'system'],
+  timeFormat: ['12', '24'],
+  weatherUnits: ['metric', 'imperial'],
+  idleGreetingMode: ['random', 'specific', 'custom'],
+  aiProvider: ['', 'openai', 'ollama', 'lmstudio', 'groq', 'together', 'openrouter', 'perplexity', 'xai', 'mistral', 'google-gemini', 'deepseek', 'custom'],
+};
 
-    // Handle empty file
-    if (!data || data.trim() === '') {
-      throw new Error('Settings file is empty');
+function validateSettingValue(key, value) {
+  if (key in VALID_ENUMS) {
+    if (!VALID_ENUMS[key].includes(value)) {
+      return false;
     }
-
-    // Gracefully handle trailing data after valid JSON (common file corruption).
-    // Walk backwards from the last '}' until JSON.parse succeeds.
-    let parsed;
-    let bracePos = data.length;
-    let iterations = 0;
-    const maxIterations = 100; // Prevent infinite loop
-    while (iterations < maxIterations) {
-      bracePos = data.lastIndexOf("}", bracePos - 1);
-      if (bracePos === -1) break;
-      try {
-        parsed = JSON.parse(data.slice(0, bracePos + 1));
-        break;
-      } catch (_) {}
-      iterations++;
-    }
-    if (!parsed) {
-      try {
-        parsed = JSON.parse(data);
-      } catch (e) {
-        throw new Error('Settings file contains invalid JSON');
-      }
-    }
-    
-    // Validate that parsed data is an object
-    if (typeof parsed !== 'object' || parsed === null) {
-      throw new Error('Settings file contains invalid data');
-    }
-    
-    settings = { ...settings, ...parsed };
-  } catch (error) {
-    if (error.code !== "ENOENT") {
-      console.error("Failed to load settings, using defaults:", error);
-      // If settings file is corrupted, back it up and create new one
-      if (error instanceof SyntaxError || error.message === 'Settings file contains invalid data' || error.message === 'Settings file contains invalid JSON' || error.message === 'Settings file is empty') {
-        try {
-          const backupFile = SETTINGS_FILE + '.backup';
-          await fs.copyFile(SETTINGS_FILE, backupFile);
-          console.log(`Corrupted settings backed up to ${backupFile}`);
-        } catch (backupError) {
-          console.error("Failed to backup corrupted settings:", backupError);
-        }
-      }
-    }
-    await saveSettings();
   }
+
+  if (key === 'preferredVoice' || key === 'edgeVoice') {
+    if (typeof value !== 'string') return false;
+  }
+
+  if (key === 'customIdleGreeting' || key === 'specificIdleGreeting') {
+    if (typeof value !== 'string') return false;
+    if (value.length > 512) return false;
+  }
+
+  if (key === 'reminderSound') {
+    if (typeof value !== 'string') return false;
+    const ext = value.split('.').pop().toLowerCase();
+    if (ext && !['wav', 'mp3', 'ogg', 'm4a', 'aac'].includes(ext)) {
+      return false;
+    }
+  }
+
+  if (key === 'aiModel') {
+    if (typeof value !== 'string') return false;
+    if (value.length > 128) return false;
+  }
+
+  if (key === 'aiApiUrl') {
+    if (typeof value !== 'string') return false;
+    try {
+      const parsed = new URL(value);
+      if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  if (key === 'aiSystemPrompt') {
+    if (typeof value !== 'string') return false;
+    if (value.length > 2048) return false;
+  }
+
+  if (key === 'openaiApiKey') {
+    if (typeof value !== 'string') return false;
+    if (value.length > 512) return false;
+    // Check for embedded credentials in URL style
+    if (value.includes(':')) {
+      const parts = value.split(':');
+      if (parts[0].length <= 2) return false; // likely sk-... format
+    }
+  }
+
+  if (key === 'pitch') {
+    if (typeof value !== 'number') return false;
+    if (value < 0.1 || value > 2.0) return false;
+  }
+
+  if (key === 'rate') {
+    if (typeof value !== 'number') return false;
+    if (value < 0.1 || value > 2.0) return false;
+  }
+
+  return true;
 }
 
-function compareVersions(v1, v2) {
-  const v1Parts = v1.split(".").map(Number);
-  const v2Parts = v2.split(".").map(Number);
+function atomicWriteFile(filePath, data) {
+  const tempPath = filePath + '.tmp.' + Date.now() + '.' + crypto.randomUUID().slice(0, 8);
+  return fs.writeFile(tempPath, data).then(() => {
+    return fs.rename(tempPath, filePath);
+  }).catch((err) => {
+    try { fssync.unlinkSync(tempPath); } catch (_) {}
+    throw err;
+  });
+}
 
-  for (let i = 0; i < Math.max(v1Parts.length, v2Parts.length); i++) {
-    const v1Part = v1Parts[i] || 0;
-    const v2Part = v2Parts[i] || 0;
-    if (v1Part > v2Part) return 1;
-    if (v1Part < v2Part) return -1;
+function loadValidatedSettings(rawData) {
+  let parsed;
+  try {
+    parsed = JSON.parse(rawData);
+  } catch (_) {
+    return { success: false, error: 'Invalid JSON' };
   }
-  return 0;
+
+  if (typeof parsed !== 'object' || parsed === null) {
+    return { success: false, error: 'Settings must be an object' };
+  }
+
+  // Validate each known key, ignore unknown keys
+  const recovered = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (validateSettingValue(key, value)) {
+      recovered[key] = value;
+    }
+  }
+
+  return { success: true, data: recovered };
+}
+
+function generateUniqueBackupName(basePath) {
+  return basePath + '.backup.' + Date.now() + '.' + crypto.randomUUID().slice(0, 8);
+}
+
+async function loadSettings() {
+  let data;
+  try {
+    data = await fs.readFile(SETTINGS_FILE, "utf-8");
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      // No settings file exists yet; start fresh with defaults
+      await saveSettings();
+      return;
+    }
+    throw error;
+  }
+
+  // Handle empty file - treat as corrupt
+  if (!data || data.trim() === '') {
+    // Back up the empty/missing file and restore defaults
+    try {
+      const backupName = generateUniqueBackupName(SETTINGS_FILE);
+      await fssync.copyFile(SETTINGS_FILE, backupName);
+    } catch (_) {}
+    await restoreDefaults();
+    return;
+  }
+
+  const validationResult = loadValidatedSettings(data);
+
+  if (!validationResult.success) {
+    // File has invalid JSON or structure - try partial recovery
+    try {
+      const backupName = generateUniqueBackupName(SETTINGS_FILE);
+      await fssync.copyFile(SETTINGS_FILE, backupName);
+      console.log(`Corrupted settings backed up to ${backupName}`);
+    } catch (_) {}
+
+    // Attempt to recover the valid portion
+    const recovered = loadValidatedSettings(data);
+    if (recovered.success && Object.keys(recovered.data).length > 0) {
+      settings = { ...settings, ...recovered.data };
+    } else {
+      await restoreDefaults();
+      return;
+    }
+  } else {
+    // Valid settings - merge with defaults, preserving unknown keys behavior
+    settings = { ...settings, ...validationResult.data };
+  }
+
+  // Ensure defaults are applied for any missing keys
+  await saveSettings();
+}
+
+function restoreDefaults() {
+  settings = {
+    openAtLogin: true,
+    preferredVoice: "Microsoft Zira Desktop",
+    searchEngine: "bing",
+    themeColor: "#0078d7",
+    useWindowsAccent: false,
+    customActions: [],
+    isMovable: false,
+    pitch: 1,
+    rate: 1,
+    idleGreetingMode: "random",
+    specificIdleGreeting: "What's on your mind?",
+    customIdleGreeting: "",
+    reminderSound: "notify.wav",
+    ttsEngine: "edge",
+    edgeVoice: "en-US-JennyNeural",
+    timeFormat: "12",
+    weatherUnits: "metric",
+    openaiApiKey: "",
+    aiEnabled: false,
+    aiSystemPrompt: "You are Cortana, Microsoft's virtual assistant. Be helpful, concise, and friendly. Keep responses brief and conversational. Do not use markdown formatting.",
+    aiModel: "gpt-4o-mini",
+    aiApiUrl: "https://api.openai.com/v1/chat/completions",
+    aiProvider: "",
+    useEverythingSearch: false,
+    heyCortana: false,
+    everythingPort: 80,
+};
+}
+
+async function saveSettings() {
+  try {
+    await atomicWriteFile(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+  } catch (error) {
+    console.error("Failed to save settings:", error);
+  }
 }
 
 async function checkForUpdates() {
@@ -763,19 +899,31 @@ if (gotTheLock) {
     ? path.join(__dirname, '.winapp', 'bindings')
     : '#winapp/bindings';
   let SpeechRecognizer, SpeechRecognitionTopicConstraint, SpeechRecognitionScenario;
+  let winRTBindingsAvailable = false;
   try {
     const bindings = require(bindingsPath);
     SpeechRecognizer = bindings.SpeechRecognizer;
     SpeechRecognitionTopicConstraint = bindings.SpeechRecognitionTopicConstraint;
     SpeechRecognitionScenario = bindings.SpeechRecognitionScenario;
+    winRTBindingsAvailable = true;
     console.log('[speech] WinRT bindings loaded successfully');
   } catch (err) {
     console.error('[speech] Failed to load WinRT bindings:', err.message);
-    // Disable Hey Cortana and speech recognition if bindings fail
+    winRTBindingsAvailable = false;
+  }
+
+  // When WinRT bindings are unavailable, disable Hey Cortana and persist the setting
+  if (!winRTBindingsAvailable) {
     wakeEnabled = false;
     settings.heyCortana = false;
+    // Stop any powerSaveBlocker since Hey Cortana can't run
+    if (powerBlocker) {
+      require('electron').powerSaveBlocker.stop(powerBlocker);
+      powerBlocker = null;
+    }
+    // Notify renderer of speech capabilities status
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('speech-error', 'Speech recognition unavailable: ' + err.message);
+      mainWindow.webContents.send('speech-capabilities', { winRTAvailable: false, fallback: 'sapi' });
     }
   }
 
@@ -815,7 +963,20 @@ if (gotTheLock) {
 
       // Check if WinRT bindings are available
       if (!SpeechRecognizer || !SpeechRecognitionTopicConstraint || !SpeechRecognitionScenario) {
-        throw new Error('WinRT speech bindings not available');
+        // Attempt SAPI fallback for manual voice recognition
+        console.log('[speech] WinRT not available, attempting SAPI fallback');
+        const started = startSapiFallback(generation);
+        if (!started && !speechState.cancelled) {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send(
+              'speech-capabilities',
+              { winRTAvailable: false, fallback: 'sapi unavailable' }
+            );
+          }
+        }
+        // Don't throw - allow SAPI fallback to handle it
+        // If SAPI also fails, the error will be sent in startSapiFallback
+        return;
       }
 
       try {
@@ -906,10 +1067,28 @@ if (gotTheLock) {
     }
   });
 
+ipcMain.handle('get-speech-capabilities', async () => {
+    return { winRTAvailable: !!winRTBindingsAvailable, fallback: winRTBindingsAvailable ? undefined : 'sapi' };
+  });
+
   ipcMain.on('hey-cortana-toggle', async (event, enabled) => {
     wakeEnabled = enabled;
     if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
     if (enabled) {
+      if (!winRTBindingsAvailable) {
+        console.warn('[hey-cortana] Hey Cortana cannot be enabled: WinRT bindings unavailable');
+        wakeEnabled = false;
+        settings.heyCortana = false;
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('speech-capabilities', { winRTAvailable: false, fallback: 'sapi' });
+          mainWindow.webContents.send('hey-cortana-status', { enabled: false, reason: 'WinRT bindings unavailable' });
+        }
+        if (powerBlocker) {
+          require('electron').powerSaveBlocker.stop(powerBlocker);
+          powerBlocker = null;
+        }
+        return;
+      }
       if (!powerBlocker) powerBlocker = require('electron').powerSaveBlocker.start('prevent-app-suspension');
       if (!wakeRunning) startWakeLoop(0);
     }
@@ -922,10 +1101,10 @@ if (gotTheLock) {
               await wakeRecognizer.continuousRecognitionSession.stopAsync();
             } catch (_) {}
           }
-          wakeRecognizer.close();
         } catch (_) {}
-        wakeRecognizer = null;
+        wakeRecognizer.close();
       }
+      wakeRecognizer = null;
       if (powerBlocker) {
         require('electron').powerSaveBlocker.stop(powerBlocker);
         powerBlocker = null;
@@ -940,14 +1119,25 @@ async function startWakeLoop(backoff = 0) {
       console.log('[wake] Deferring: manual speech active.');
       return;
     }
+
+    // Use generation token to prevent stale restarts
+    const generation = ++wakeGeneration;
+    const token = generation;
+
     // Check if WinRT bindings are available
     if (!SpeechRecognizer || !SpeechRecognitionTopicConstraint || !SpeechRecognitionScenario) {
       console.warn('[wake] WinRT bindings not available, cannot start wake loop');
       wakeRunning = false;
+      wakeRetryAttempt = 0; // Reset retry attempt when bindings unavailable
+      // Notify renderer
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('speech-capabilities', { winRTAvailable: false, fallback: 'sapi' });
+      }
       return;
     }
 
     wakeRunning = true;
+    wakeRetryAttempt = 0; // Reset retry attempt on healthy session start
     let wakeTriggered = false;
     let rec = null;
     let completionStatus = null;
@@ -968,6 +1158,8 @@ async function startWakeLoop(backoff = 0) {
       const session = rec.continuousRecognitionSession;
 
       session.onResultGenerated(async (sender, args) => {
+        // Verify generation token to prevent stale callbacks
+        if (generation !== token) return;
         if (!wakeRunning || wakeTriggered) return;
         let text = '';
         try {
@@ -1026,14 +1218,19 @@ async function startWakeLoop(backoff = 0) {
 
         if (wakeEnabled && !wakeRestartTimer && !isSettingsVisible) {
           wakeRestartTimer = setTimeout(() => {
-            wakeRestartTimer = null;
-            if (wakeEnabled && !isSettingsVisible) startWakeLoop();
+            // Verify generation token before restarting
+            if (wakeGeneration === token && wakeEnabled && !isSettingsVisible) {
+              wakeRestartTimer = null;
+              startWakeLoop(0);
+            }
           }, 1000);
         }
       });
 
       session.onCompleted((sender, args) => {
         if (wakeTriggered) return;
+        // Verify generation token
+        if (generation !== token) return;
         completionStatus = (args && args.status != null) ? args.status : null;
         console.warn('[wake] ContinuousRecognitionSession ended (status ' + completionStatus + ')');
         wakeRunning = false;
@@ -1055,53 +1252,83 @@ async function startWakeLoop(backoff = 0) {
       wakeRunning = false;
       completionStatus = 'error';
       console.error('[wake] Fatal wake loop error:', outerErr.message || outerErr);
-    } finally {
-      if (rec) { try { rec.close(); } catch (_) {} }
-      if (wakeRecognizer === rec) wakeRecognizer = null;
-
-      if (wakeEnabled && !wakeRestartTimer && !wakeTriggered
-          && !speechState.starting && !speechState.recognizer && !speechState.process
-          && !isSettingsVisible) {
-
-        const isExpectedEnd = completionStatus === 0
-                           || completionStatus === 5
-                           || completionStatus === 7;
-
-        if (isExpectedEnd) {
-          backoff = 0;
-          console.log('[wake] Restarting in 1000ms');
-          wakeRestartTimer = setTimeout(() => {
+      // Increment retry attempt on failure
+      wakeRetryAttempt++;
+      const delay = Math.min(500 * Math.pow(2, wakeRetryAttempt), 30000);
+      console.warn('[wake] Session failed; retrying in ' + delay + 'ms (attempt ' + wakeRetryAttempt + ')');
+      if (wakeEnabled && !wakeRestartTimer) {
+        wakeRestartTimer = setTimeout(() => {
+          // Verify generation token before retry
+          if (wakeGeneration === token) {
             wakeRestartTimer = null;
-            if (wakeEnabled && !isSettingsVisible) startWakeLoop(backoff);
-          }, 1000);
-        } else {
-          const delay = Math.min(5000 * Math.pow(2, backoff), 30000);
-          backoff++;
-          console.warn('[wake] Session ended abnormally (status ' +
-            completionStatus + '); retrying in ' + delay + 'ms');
-          wakeRestartTimer = setTimeout(() => {
-            wakeRestartTimer = null;
-            if (wakeEnabled && !isSettingsVisible) startWakeLoop(backoff);
-          }, delay);
-        }
+            startWakeLoop(backoff);
+          }
+        }, delay);
       }
+    } finally {
+      // Only reset running state if this session wasn't replaced by a newer generation
+      if (wakeGeneration === token) {
+        if (rec) { try { rec.close(); } catch (_) {} }
+        if (wakeRecognizer === rec) wakeRecognizer = null;
+      }
+    }
+
+    // Expected session end: short restart delay only if wake is still enabled
+    // and manual recognition/settings are inactive
+    if (wakeEnabled && !wakeRestartTimer && !wakeTriggered
+        && !speechState.starting && !speechState.recognizer && !speechState.process
+        && !isSettingsVisible) {
+      console.log('[wake] Expected session end; restarting in 1000ms');
+      wakeRestartTimer = setTimeout(() => {
+        wakeRestartTimer = null;
+        // Verify generation token before restarting
+        if (wakeGeneration === token) {
+          startWakeLoop(0);
+        }
+      }, 1000);
     }
   }
 
   app.on('before-quit', () => {
+    app.isQuitting = true;
     wakeRunning = false;
     cancelManualSpeech({ stopFallback: true });
+    // Stop any powerSaveBlocker
+    if (powerBlocker) {
+      require('electron').powerSaveBlocker.stop(powerBlocker);
+      powerBlocker = null;
+    }
     // Notify renderer to cancel any ongoing speech synthesis
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('speech-force-stop');
     }
-    if (typeof wakeRestartTimer !== 'undefined' && wakeRestartTimer) {
+    // Clear wake restart timer
+    if (wakeRestartTimer) {
       clearTimeout(wakeRestartTimer);
       wakeRestartTimer = null;
     }
-    if (typeof wakeRecognizer !== 'undefined' && wakeRecognizer) {
+    // Stop and close the recognizer/session
+    if (wakeRecognizer) {
+      if (wakeRecognizer.continuousRecognitionSession) {
+        (async () => { try { await wakeRecognizer.continuousRecognitionSession.stopAsync(); } catch (_) {} })();
+      }
       try { wakeRecognizer.close(); } catch (_) {}
       wakeRecognizer = null;
+    }
+    wakeRunning = false;
+    // Clear reminder and timer timeouts
+    reminders.forEach((reminder) => {
+      if (reminder.timeout) clearTimeout(reminder.timeout);
+    });
+    // Clear active timer
+    if (activeTimer) {
+      clearTimeout(activeTimer.timeout);
+      activeTimer = null;
+    }
+    // Destroy the tray
+    if (tray) {
+      tray.destroy();
+      tray = null;
     }
   });
 
@@ -1229,7 +1456,9 @@ async function scanApplications() {
 
 function fetchDuckDuckGoResults(query) {
   return new Promise((resolve, reject) => {
-    const postData = `q=${encodeURIComponent(query)}`;
+    // Limit query length
+    const safeQuery = query.length > 1024 ? query.slice(0, 1024) : query;
+    const postData = `q=${encodeURIComponent(safeQuery)}`;
     const options = {
       hostname: "html.duckduckgo.com",
       path: "/html/",
@@ -1241,8 +1470,20 @@ function fetchDuckDuckGoResults(query) {
       },
     };
     const req = https.request(options, (res) => {
+      // Validate HTTP status code
+      if (res.statusCode !== 200) {
+        reject(new Error(`DuckDuckGo request failed with status ${res.statusCode}`));
+        return;
+      }
       let data = "";
-      res.on("data", (chunk) => (data += chunk));
+      res.on("data", (chunk) => {
+        // Limit response size
+        if ((data += chunk).length > 1_000_000) {
+          req.destroy();
+          reject(new Error('DuckDuckGo response was too large.'));
+          return;
+        }
+      });
       res.on("end", () => {
         try {
           const results = parseDuckDuckGoHTML(data);
@@ -1253,6 +1494,11 @@ function fetchDuckDuckGoResults(query) {
       });
     });
     req.on("error", reject);
+    // Add request timeout
+    req.setTimeout(10000, () => {
+      req.destroy();
+      reject(new Error('DuckDuckGo request timed out.'));
+    });
     req.write(postData);
     req.end();
   });
@@ -1334,9 +1580,6 @@ function registerIpcHandlers() {
   });
 
   ipcMain.on("close-app", closeApp);
-  ipcMain.on("open-external-link", (event, url) => {
-    shell.openExternal(url);
-  });
 
   ipcMain.handle("get-accent-color", () => {
     try {
@@ -1527,57 +1770,56 @@ function registerIpcHandlers() {
   });
 
   ipcMain.on("set-setting", async (event, { key, value }) => {
-    if (!key || !(key in settings)) {
-      return;
-    }
+    if (!key) return;
 
-    const validKeys = {
-      openAtLogin: (v) => typeof v === 'boolean',
-      preferredVoice: (v) => typeof v === 'string',
-      searchEngine: (v) => typeof v === 'string',
-      themeColor: (v) => typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v),
-      useWindowsAccent: (v) => typeof v === 'boolean',
-      customActions: (v) => Array.isArray(v),
-      isMovable: (v) => typeof v === 'boolean',
-      pitch: (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0.5 && v <= 2,
-      rate: (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0.5 && v <= 2,
-      idleGreetingMode: (v) => typeof v === 'string',
-      specificIdleGreeting: (v) => typeof v === 'string',
-      customIdleGreeting: (v) => typeof v === 'string',
-      reminderSound: (v) => typeof v === 'string',
-      ttsEngine: (v) => typeof v === 'string',
-      edgeVoice: (v) => typeof v === 'string',
-      timeFormat: (v) => typeof v === 'string',
-      weatherUnits: (v) => typeof v === 'string',
-      openaiApiKey: (v) => typeof v === 'string',
-      aiEnabled: (v) => typeof v === 'boolean',
-      aiSystemPrompt: (v) => typeof v === 'string',
-      aiModel: (v) => typeof v === 'string',
-      aiApiUrl: (v) => typeof v === 'string',
-      aiProvider: (v) => typeof v === 'string' && [
-        '',
-        'openai',
-        'ollama',
-        'lmstudio',
-        'groq',
-        'together',
-        'openrouter',
-        'perplexity',
-        'xai',
-        'mistral',
-        'google-gemini',
-        'deepseek',
-        'custom',
-      ].includes(v),
-      useEverythingSearch: (v) => typeof v === 'boolean',
-      heyCortana: (v) => typeof v === 'boolean',
-      everythingPort: (v) => typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 65535,
-    };
-
-    const validator = validKeys[key];
-    if (validator && !validator(value)) {
-      console.warn(`[set-setting] Invalid value for ${key}:`, value);
-      return;
+    // Handle known enum keys using shared validation
+    if (key in VALID_ENUMS) {
+      if (!validateSettingValue(key, value)) {
+        console.warn(`[set-setting] Invalid value for ${key}:`, value);
+        return;
+      }
+    } else if (key === 'openaiApiKey') {
+      // Special: validate api key length and format
+      if (typeof value !== 'string' || value.length > 512) {
+        console.warn(`[set-setting] Invalid value for ${key}:`, value);
+        return;
+      }
+      // Check for embedded credentials in URL style
+      if (value.includes(':')) {
+        const parts = value.split(':');
+        if (parts[0].length <= 2) {
+          console.warn(`[set-setting] Invalid value for ${key}: likely malformed key`, value);
+          return;
+        }
+      }
+    } else if (key === 'pitch') {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0.1 || value > 2.0) {
+        console.warn(`[set-setting] Invalid value for ${key}:`, value);
+        return;
+      }
+    } else if (key === 'rate') {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0.1 || value > 2.0) {
+        console.warn(`[set-setting] Invalid value for ${key}:`, value);
+        return;
+      }
+    } else if (key === 'reminderSound') {
+      if (typeof value !== 'string') {
+        console.warn(`[set-setting] Invalid value for ${key}:`, value);
+        return;
+      }
+      const ext = value.split('.').pop().toLowerCase();
+      if (ext && !['wav', 'mp3', 'ogg', 'm4a', 'aac'].includes(ext)) {
+        console.warn(`[set-setting] Invalid value for ${key}: unsupported audio extension`, value);
+        return;
+      }
+    } else {
+      // For other keys, do basic type validation
+      const expectedType = typeof settings[key];
+      if (expectedType === 'undefined' || value === undefined) return;
+      if (typeof value !== expectedType) {
+        console.warn(`[set-setting] Invalid type for ${key}:`, value);
+        return;
+      }
     }
 
     settings[key] = value;
@@ -1594,11 +1836,78 @@ function registerIpcHandlers() {
     await saveSettings();
   });
 
-  ipcMain.on("set-custom-actions", async (event, actions) => {
-    if (Array.isArray(actions)) {
-      settings.customActions = actions;
-      await saveSettings();
+  const MAX_CUSTOM_ACTIONS = 50;
+const MAX_TRIGGER_LENGTH = 256;
+const MAX_ACTION_COUNT_PER_SEQUENCE = 20;
+const VALID_ACTION_TYPES = new Set(['speak', 'open_app', 'open_url', 'play_sound', 'run_command']);
+
+function validateActionObject(action) {
+  if (typeof action !== 'object' || action === null) return false;
+
+  const requiredKeys = new Set(['type', 'value']);
+  const optionalKeys = new Set(['trigger']);
+  const allowedKeys = new Set(['type', 'value', 'trigger']);
+
+  const keys = Object.keys(action);
+  for (const key of keys) {
+    if (!allowedKeys.has(key)) return false;
+  }
+
+  if (!requiredKeys.has('type')) return false;
+  if (!requiredKeys.has('value')) return false;
+  if (typeof action.type !== 'string') return false;
+  if (typeof action.value !== 'string') return false;
+  if (!VALID_ACTION_TYPES.has(action.type)) return false;
+
+  if (action.trigger !== undefined) {
+    if (typeof action.trigger !== 'string') return false;
+    if (action.trigger.length === 0) return false;
+    if (action.trigger.length > MAX_TRIGGER_LENGTH) return false;
+    if (hasControlChars(action.trigger)) return false;
+  }
+
+  if (action.type === 'open_url') {
+    if (!action.value.startsWith('http:') && !action.value.startsWith('https:')) {
+      return false;
     }
+  } else if (action.type === 'open_app' || action.type === 'play_sound') {
+    if (!isSafeFallbackAppName(action.value)) return false;
+  } else if (action.type === 'run_command') {
+    if (action.value.length > 4096) return false;
+    if (hasControlChars(action.value)) return false;
+  } else if (action.type === 'speak') {
+    if (action.value.length > 4096) return false;
+    if (hasControlChars(action.value)) return false;
+  }
+
+  return true;
+}
+
+function validateCustomActions(actions) {
+  if (!Array.isArray(actions)) return false;
+  if (actions.length === 0) return true;
+  if (actions.length > MAX_CUSTOM_ACTIONS) return false;
+
+  for (const action of actions) {
+    if (!validateActionObject(action)) return false;
+    if (action.actions) {
+      if (!Array.isArray(action.actions)) return false;
+      if (action.actions.length > MAX_ACTION_COUNT_PER_SEQUENCE) return false;
+      for (const subAction of action.actions) {
+        if (!validateActionObject(subAction)) return false;
+      }
+    }
+  }
+  return true;
+}
+
+ipcMain.handle("set-custom-actions", async (event, actions) => {
+    if (!validateCustomActions(actions)) {
+      return { success: false, error: 'Invalid custom actions format.' };
+    }
+    settings.customActions = actions;
+    await saveSettings();
+    return { success: true };
   });
 
   ipcMain.on("reset-all-settings", async () => {
@@ -1693,24 +2002,43 @@ function registerIpcHandlers() {
 
   function queryEverything(query, port) {
     return new Promise((resolve, reject) => {
+      // Validate port - must be a valid port number
+      const effectivePort = port && Number.isInteger(port) && port > 0 && port <= 65535 ? port : 80;
       const encodedQuery = encodeURIComponent(query);
+      // Limit query length
+      const safeQuery = query.length > 256 ? query.slice(0, 256) : query;
       const urlPath = `/?search=${encodedQuery}&json=1&count=10&path_column=1&sort=date_modified&ascending=0`;
-      const req = http.request(
-        { hostname: "localhost", port: port || 80, path: urlPath, method: "GET" },
-        (res) => {
-          let data = "";
-          res.on("data", (chunk) => (data += chunk));
-          res.on("end", () => {
-            try {
-              resolve(JSON.parse(data));
-            } catch (e) {
-              reject(e);
-            }
-          });
-        }
-      );
+      // Everything Search must remain limited to loopback hosts
+      const options = {
+        hostname: "localhost",
+        port: effectivePort,
+        path: urlPath,
+        method: "GET",
+      };
+      const req = http.request(options, (res) => {
+        let data = "";
+        res.on("data", (chunk) => {
+          // Limit response size
+          if ((data += chunk).length > 1_000_000) {
+            req.destroy();
+            reject(new Error('Everything response was too large.'));
+            return;
+          }
+        });
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(data));
+          } catch (e) {
+            reject(e);
+          }
+        });
+      });
       req.on("error", reject);
-      req.setTimeout(2000, () => { req.destroy(); reject(new Error("Timeout")); });
+      // Add request timeout
+      req.setTimeout(2000, () => {
+        req.destroy();
+        reject(new Error('Everything request timed out.'));
+      });
       req.end();
     });
   }
@@ -1788,25 +2116,38 @@ function registerIpcHandlers() {
     });
   });
 
-  ipcMain.on("open-path", (event, fsPath) => {
-    if (typeof fsPath !== 'string' || !fsPath.trim()) {
+  const MAX_PATH_LENGTH = 4096;
+
+function isPathControlValue(fsPath) {
+  return !fsPath || /[\0-\x1f\x7f]/.test(fsPath);
+}
+
+ipcMain.on("open-path", (event, fsPath) => {
+    if (typeof fsPath !== 'string' || !fsPath.trim() || fsPath.length > MAX_PATH_LENGTH) {
       return;
     }
-    if (fsPath.includes('\0')) {
-      console.warn('[open-path] Rejected path with null byte');
+    if (isPathControlValue(fsPath)) {
+      console.warn('[open-path] Rejected path with control characters');
       return;
     }
-    shell.openPath(fsPath).then((result) => {
+    const normalizedPath = path.resolve(fsPath);
+    shell.openPath(normalizedPath).then((result) => {
       if (result) {
-        console.error(`Failed to open path ${fsPath}:`, result);
+        console.error(`Failed to open path ${normalizedPath}:`, result);
       }
     }).catch((err) => {
-      console.error(`Failed to open path ${fsPath}:`, err);
+      console.error(`Failed to open path ${normalizedPath}:`, err);
     });
   });
 
-  ipcMain.on("run-command", (event, command) => {
-    if (typeof command !== 'string' || !command.trim() || command.length > 4096) {
+  const MAX_COMMAND_LENGTH = 4096;
+
+function hasControlChars(str) {
+  return /[\0-\x1f\x7f]/.test(str);
+}
+
+ipcMain.on("run-command", (event, command) => {
+    if (typeof command !== 'string' || !command.trim() || command.length > MAX_COMMAND_LENGTH || hasControlChars(command)) {
       return;
     }
     exec(command, (error) => {
@@ -1821,17 +2162,85 @@ function registerIpcHandlers() {
     });
   });
 
-  ipcMain.on("run-special-command", (event, command) => {
+  const MS_SETTINGS_URI_WHITELIST = new Set([
+  'ms-settings:display',
+  'ms-settings:sound',
+  'ms-settings:notifications',
+  'ms-settings:quiethours',
+  'ms-settings:powersleep',
+  'ms-settings:battery',
+  'ms-settings:storagesense',
+  'ms-settings:tabletmode',
+  'ms-settings:multitasking',
+  'ms-settings:clipboard',
+  'ms-settings:bluetooth',
+  'ms-settings:printers',
+  'ms-settings:mousetouchpad',
+  'ms-settings:devices-touchpad',
+  'ms-settings:typing',
+  'ms-settings:pen',
+  'ms-settings:autoPlay',
+  'ms-settings:usb',
+  'ms-settings:network',
+  'ms-settings:network-wifi',
+  'ms-settings:network-ethernet',
+  'ms-settings:network-vpn',
+  'ms-settings:network-airplanemode',
+  'ms-settings:network-mobilehotspot',
+  'ms-settings:datausage',
+  'ms-settings:network-proxy',
+  'ms-settings:personalization',
+  'ms-settings:personalization-background',
+  'ms-settings:personalization-colors',
+  'ms-settings:lockscreen',
+  'ms-settings:themes',
+  'ms-settings:fonts',
+  'ms-settings:personalization-start',
+  'ms-settings:taskbar',
+  'ms-settings:appsfeatures',
+  'ms-settings:defaultapps',
+  'ms-settings:maps',
+  'ms-settings:videoplayback',
+  'ms-settings:accounts',
+  'ms-settings:yourinfo',
+  'ms-settings:emailandaccounts',
+  'ms-settings:signinoptions',
+  'ms-settings:workplace',
+  'ms-settings:otherusers',
+  'ms-settings:dateandtime',
+  'ms-settings:regionlanguage',
+  'ms-settings:speech',
+  'ms-settings:gaming-gamebar',
+  'ms-settings:gaming-gamedvr',
+  'ms-settings:gaming-gamemode',
+  'ms-settings:easeofaccess',
+  'ms-settings:easeofaccess-narrator',
+  'ms-settings:easeofaccess-magnifier',
+  'ms-settings:easeofaccess-highcontrast',
+  'ms-settings:easeofaccess-closedcaptioning',
+  'ms-settings:easeofaccess-keyboard',
+  'ms-settings:cortana',
+  'ms-settings:search',
+  'ms-settings:privacy',
+  'ms-settings:windowsupdate',
+  'ms-settings:backup',
+  'ms-settings:troubleshoot',
+  'ms-settings:recovery',
+  'ms-settings:about',
+]);
+
+ipcMain.on("run-special-command", (event, command) => {
     if (typeof command !== 'string' || !command.trim() || command.length > 4096) {
       return;
     }
 
     if (command.startsWith('ms-settings:')) {
-      const validated = validateExternalUrl(command, ['http:', 'https:', 'ms-settings:']);
-      if (validated) {
-        shell.openExternal(validated).catch((err) => {
-          console.error(`Failed to open URI ${validated}:`, err);
+      if (MS_SETTINGS_URI_WHITELIST.has(command)) {
+        shell.openExternal(command).catch((err) => {
+          console.error(`Failed to open URI ${command}:`, err);
         });
+      } else {
+        console.warn('[run-special-command] Rejected unrecognized ms-settings: URI:', command);
       }
       return;
     }
@@ -1851,7 +2260,7 @@ function registerIpcHandlers() {
     const parts = command.trim().split(/\s+/);
     const baseCommand = parts[0].toLowerCase();
     if (knownCommands.includes(baseCommand)) {
-      const args = parts.slice(1);
+      const args = parts.slice(1).filter((arg) => arg && !/[\0-\x1f\x7f]/.test(arg));
       const child = spawn(baseCommand, args, {
         windowsHide: true,
         detached: false,
@@ -1866,8 +2275,15 @@ function registerIpcHandlers() {
     console.warn('[run-special-command] Rejected unknown command:', command);
   });
 
-  ipcMain.handle("show-open-dialog", async (event, options) => {
+  const SHOW_DIALOG_OPERATIONS = {
+  reminderAudio: { properties: ['openFile'], filters: [{ name: 'Audio Files', extensions: ['wav', 'mp3', 'ogg', 'm4a', 'aac'] }] },
+  application: { properties: ['openFile'], filters: [{ name: 'Applications', extensions: ['exe', 'lnk'] }] },
+  default: { properties: ['openFile'], filters: [{ name: 'Files', extensions: ['*'] }] },
+};
+
+ipcMain.handle("show-open-dialog", async (event, operation) => {
     if (!mainWindow) return;
+    const options = SHOW_DIALOG_OPERATIONS[operation] || SHOW_DIALOG_OPERATIONS.default;
     const result = await dialog.showOpenDialog(mainWindow, options);
     return result;
   });
@@ -1924,6 +2340,7 @@ function registerIpcHandlers() {
     const validation = validateTimerDuration(ms);
     if (!validation.success) return validation;
 
+    // Reject creation of a second timer - only one timer is supported
     if (activeTimer) {
       clearTimeout(activeTimer.timeout);
       activeTimer = null;
@@ -1964,13 +2381,27 @@ function registerIpcHandlers() {
     };
   });
 
-  ipcMain.handle('cancel-timer', (event, id) => {
+  ipcMain.handle('cancel-timer', async (event, id) => {
     if (activeTimer && activeTimer.id === id) {
       clearTimeout(activeTimer.timeout);
       activeTimer = null;
       return { success: true };
     }
     return { success: false, error: 'Timer not found or already cancelled.' };
+  });
+
+  ipcMain.handle('get-active-timer', () => {
+    if (!activeTimer) {
+      return { id: null, label: '', remaining: 0, active: false, endTime: 0 };
+    }
+    const remaining = Math.max(0, activeTimer.endTime - Date.now());
+    return {
+      id: activeTimer.id,
+      label: activeTimer.label,
+      remaining: remaining,
+      active: true,
+      endTime: activeTimer.endTime,
+    };
   });
 
   ipcMain.handle('get-timer-remaining', (event, id) => {
@@ -2182,10 +2613,53 @@ function registerIpcHandlers() {
     ];
   });
 
-  ipcMain.handle("synthesize-edge-tts", async (event, { text, voice, pitch, rate }) => {
+  const MAX_TTS_TEXT_LENGTH = 4096;
+const VALID_TTS_VOICES = [
+  "en-US-JennyNeural",
+  "en-US-GuyNeural",
+  "en-US-AriaNeural",
+  "en-US-AndrewNeural",
+  "en-US-EmmaNeural",
+  "en-US-BrianNeural",
+  "en-US-ChristopherNeural",
+  "en-US-EricNeural",
+  "en-US-MichelleNeural",
+  "en-GB-SoniaNeural",
+  "en-GB-RyanNeural",
+  "en-AU-NatashaNeural",
+  "en-AU-WilliamNeural",
+  "en-IE-ConnorNeural",
+  "en-IN-NeerjaNeural",
+  "en-IN-PrabhatNeural",
+];
+
+ipcMain.handle("synthesize-edge-tts", async (event, { text, voice, pitch, rate }) => {
     try {
+      // Validate text
+      if (typeof text !== 'string' || !text.trim()) {
+        return { success: false, error: 'Text must be a non-empty string.' };
+      }
+      if (text.length > MAX_TTS_TEXT_LENGTH) {
+        return { success: false, error: `Text exceeds maximum length of ${MAX_TTS_TEXT_LENGTH} characters.` };
+      }
+
+      // Validate voice
+      if (typeof voice !== 'string' || !VALID_TTS_VOICES.includes(voice)) {
+        return { success: false, error: `Invalid voice. Supported voices: ${VALID_TTS_VOICES.join(', ')}` };
+      }
+
+      // Validate pitch
+      if (typeof pitch !== 'number' || !Number.isFinite(pitch) || pitch < 0.1 || pitch > 2.0) {
+        return { success: false, error: 'Pitch must be between 0.1 and 2.0.' };
+      }
+
+      // Validate rate
+      if (typeof rate !== 'number' || !Number.isFinite(rate) || rate < 0.1 || rate > 2.0) {
+        return { success: false, error: 'Rate must be between 0.1 and 2.0.' };
+      }
+
       const tempDir = os.tmpdir();
-      const outFile = path.join(tempDir, `cortana-tts-${Date.now()}.mp3`);
+      const outFile = path.join(tempDir, `cortana-tts-${crypto.randomUUID()}.mp3`);
 
       const pitchVal = Math.round((pitch - 1) * 100);
       const pitchStr = pitch !== undefined && pitch !== 1
@@ -2198,8 +2672,8 @@ function registerIpcHandlers() {
         : "default";
 
       const tts = new EdgeTTS({
-        voice: voice || "en-US-JennyNeural",
-        lang: (voice || "en-US-JennyNeural").split("-").slice(0, 2).join("-"),
+        voice: voice,
+        lang: voice.split("-").slice(0, 2).join("-"),
         outputFormat: "audio-24khz-96kbitrate-mono-mp3",
         pitch: pitchStr,
         rate: rateStr,
@@ -2252,10 +2726,21 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
       const ua = `Cortana/${app.getVersion()} (https://github.com/SoftBluey/Cortana-Electron)`;
       const fetchJson = (url) => new Promise((resolve, reject) => {
         const req = https.get(url, { headers: { "User-Agent": ua } }, (res) => {
-          if (res.statusCode !== 200) { reject(new Error(`HTTP ${res.statusCode}`)); return; }
+          // Validate HTTP status code - follow only redirects we expect
+          if (res.statusCode !== 200 && res.statusCode !== 302) {
+            reject(new Error(`HTTP ${res.statusCode}`));
+            return;
+          }
           let data = "";
           res.on("data", (chunk) => (data += chunk));
-          res.on("end", () => { try { resolve(JSON.parse(data)); } catch(e) { reject(new Error("Invalid JSON response")); } });
+          res.on("end", () => {
+            // Do not follow redirects automatically - let the caller handle
+            if (res.statusCode === 302) {
+              reject(new Error('Wikipedia redirect received - unexpected response'));
+              return;
+            }
+            try { resolve(JSON.parse(data)); } catch(e) { reject(new Error("Invalid JSON response")); }
+          });
         });
         req.on("error", reject);
         req.setTimeout(8000, () => { req.destroy(); reject(new Error("Timeout")); });
@@ -2345,8 +2830,9 @@ function createWindow() {
     focusable: true,
     show: false,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: false,
     },
   };
 
@@ -2358,7 +2844,13 @@ function createWindow() {
     winOptions.y = y + screenHeight - winHeight;
   }
 
-  mainWindow = new BrowserWindow(winOptions);
+  mainWindow = new BrowserWindow({
+    ...winOptions,
+    webPreferences: {
+      ...winOptions.webPreferences,
+      preload: path.join(__dirname, 'preload.js'),
+    },
+  });
   if (settings.isMovable) {
     mainWindow.setMenu(null);
   }
