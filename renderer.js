@@ -2691,11 +2691,17 @@ function speak(text, onSpeechEndCallback) {
 }
 
 let currentEdgeAudio = null;
+let currentEdgeFilePath = null;
 
 function speakEdge(text, onSpeechEndCallback) {
     if (currentEdgeAudio) {
         currentEdgeAudio.pause();
         currentEdgeAudio = null;
+    }
+    // Clean up previous temp file if any
+    if (currentEdgeFilePath) {
+        try { require('fs').unlinkSync(currentEdgeFilePath); } catch(e) {}
+        currentEdgeFilePath = null;
     }
 
     let callbackInvoked = false;
@@ -2716,11 +2722,15 @@ function speakEdge(text, onSpeechEndCallback) {
             invokeCallback();
             return;
         }
+        currentEdgeFilePath = result.filePath;
         const audio = new Audio('file://' + result.filePath.replace(/\\/g, '/'));
         currentEdgeAudio = audio;
         const cleanup = () => {
             currentEdgeAudio = null;
-            try { require('fs').unlinkSync(result.filePath); } catch(e) {}
+            if (currentEdgeFilePath) {
+                try { require('fs').unlinkSync(currentEdgeFilePath); } catch(e) {}
+                currentEdgeFilePath = null;
+            }
         };
         audio.onended = () => {
             cleanup();
@@ -2787,6 +2797,10 @@ function setStateIdle() {
     if (currentEdgeAudio) {
         currentEdgeAudio.pause();
         currentEdgeAudio = null;
+    }
+    if (currentEdgeFilePath) {
+        try { require('fs').unlinkSync(currentEdgeFilePath); } catch(e) {}
+        currentEdgeFilePath = null;
     }
     requestSound.pause();
     requestSound.currentTime = 0;
@@ -3712,6 +3726,7 @@ function cancelActiveTimer() {
         clearInterval(timerCountdownInterval);
         timerCountdownInterval = null;
     }
+    stopTimerPanelInterval();
     timerEndTime = null;
     timerDuration = null;
     activeTimerLabel = null;
@@ -4338,6 +4353,7 @@ async function startTimer(value, unit, ms) {
       clearInterval(timerCountdownInterval);
       timerCountdownInterval = null;
     }
+    stopTimerPanelInterval();
 
     const label = `Your ${value} ${unit}${value !== 1 ? 's' : ''} timer is up!`;
     
@@ -4534,6 +4550,11 @@ function onSearch() {
 
 async function executeActionSequence(actions) {
     for (const action of actions) {
+        // Validate action has required fields
+        if (!action || !action.type || !action.value) {
+            console.warn('Skipping invalid action:', action);
+            continue;
+        }
         try {
             switch (action.type) {
                 case 'speak':
@@ -4709,12 +4730,47 @@ function createActionItemUI(action, index, isLastItem) {
     return itemDiv;
 }
 
+function sanitizeActionValue(type, value) {
+    if (typeof value !== 'string') return '';
+    const trimmed = value.trim();
+    
+    switch (type) {
+        case 'speak':
+            // Limit speech text length and remove potentially harmful characters
+            return trimmed.slice(0, 5000);
+        case 'open_app':
+            // Validate path - only allow alphanumeric, spaces, dots, dashes, underscores, backslashes, colons
+            return trimmed.slice(0, 260).replace(/[<>|&^%]/g, '');
+        case 'open_url':
+            // Validate URL
+            try {
+                const url = new URL(trimmed);
+                if (['http:', 'https:'].includes(url.protocol)) {
+                    return url.toString();
+                }
+            } catch (_) {}
+            return '';
+        case 'play_sound':
+            // Allow file paths and URLs
+            return trimmed.slice(0, 260);
+        case 'run_command':
+            // Limit command length and remove dangerous characters
+            return trimmed.slice(0, 4096).replace(/[\x00-\x1F\x7F]/g, '');
+        default:
+            return trimmed.slice(0, 4096);
+    }
+}
+
 function getCurrentActionsFromForm() {
     const actionItems = actionSequenceList.querySelectorAll('.action-item');
-    return Array.from(actionItems).map(item => ({
-        type: item.querySelector('.action-item-type-select').value,
-        value: item.querySelector('.action-item-value-input').value
-    }));
+    return Array.from(actionItems).map(item => {
+        const type = item.querySelector('.action-item-type-select').value;
+        const rawValue = item.querySelector('.action-item-value-input').value;
+        return {
+            type,
+            value: sanitizeActionValue(type, rawValue)
+        };
+    });
 }
 
 function moveAction(index, direction) {

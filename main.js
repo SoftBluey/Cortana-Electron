@@ -532,19 +532,33 @@ async function loadSettings() {
   try {
     let data = await fs.readFile(SETTINGS_FILE, "utf-8");
 
+    // Handle empty file
+    if (!data || data.trim() === '') {
+      throw new Error('Settings file is empty');
+    }
+
     // Gracefully handle trailing data after valid JSON (common file corruption).
     // Walk backwards from the last '}' until JSON.parse succeeds.
     let parsed;
     let bracePos = data.length;
-    while (true) {
+    let iterations = 0;
+    const maxIterations = 100; // Prevent infinite loop
+    while (iterations < maxIterations) {
       bracePos = data.lastIndexOf("}", bracePos - 1);
       if (bracePos === -1) break;
       try {
         parsed = JSON.parse(data.slice(0, bracePos + 1));
         break;
       } catch (_) {}
+      iterations++;
     }
-    if (!parsed) parsed = JSON.parse(data);
+    if (!parsed) {
+      try {
+        parsed = JSON.parse(data);
+      } catch (e) {
+        throw new Error('Settings file contains invalid JSON');
+      }
+    }
     
     // Validate that parsed data is an object
     if (typeof parsed !== 'object' || parsed === null) {
@@ -556,7 +570,7 @@ async function loadSettings() {
     if (error.code !== "ENOENT") {
       console.error("Failed to load settings, using defaults:", error);
       // If settings file is corrupted, back it up and create new one
-      if (error instanceof SyntaxError || error.message === 'Settings file contains invalid data') {
+      if (error instanceof SyntaxError || error.message === 'Settings file contains invalid data' || error.message === 'Settings file contains invalid JSON' || error.message === 'Settings file is empty') {
         try {
           const backupFile = SETTINGS_FILE + '.backup';
           await fs.copyFile(SETTINGS_FILE, backupFile);
@@ -691,11 +705,23 @@ if (gotTheLock) {
     // Stop any stale SAPI process — it will restart on next mic press
     stopSapiFallback();
 
-    // If Hey Cortana was running, let the existing wake loop self-heal.
-    // The wakeRecognizer will have already ended (status 5/7) and the
-    // backoff restart timer will relaunch it automatically.
-    // We just make sure it isn't stuck in wakeRunning=true.
-    if (wakeRunning && !wakeRecognizer) {
+    // Restart Hey Cortana if it was enabled
+    if (wakeEnabled) {
+      if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
+      if (wakeRecognizer) {
+        try {
+          if (wakeRecognizer.continuousRecognitionSession) {
+            try { await wakeRecognizer.continuousRecognitionSession.stopAsync(); } catch (_) {}
+          }
+          wakeRecognizer.close();
+        } catch (_) {}
+        wakeRecognizer = null;
+      }
+      wakeRunning = false;
+      // Restart wake loop with fresh backoff
+      startWakeLoop(0);
+    } else if (wakeRunning && !wakeRecognizer) {
+      // If Hey Cortana wasn't enabled but wakeRunning is stuck, reset it
       wakeRunning = false;
     }
   });
@@ -736,11 +762,22 @@ if (gotTheLock) {
   const bindingsPath = app.isPackaged
     ? path.join(__dirname, '.winapp', 'bindings')
     : '#winapp/bindings';
-  const {
-    SpeechRecognizer,
-    SpeechRecognitionTopicConstraint,
-    SpeechRecognitionScenario,
-  } = require(bindingsPath);
+  let SpeechRecognizer, SpeechRecognitionTopicConstraint, SpeechRecognitionScenario;
+  try {
+    const bindings = require(bindingsPath);
+    SpeechRecognizer = bindings.SpeechRecognizer;
+    SpeechRecognitionTopicConstraint = bindings.SpeechRecognitionTopicConstraint;
+    SpeechRecognitionScenario = bindings.SpeechRecognitionScenario;
+    console.log('[speech] WinRT bindings loaded successfully');
+  } catch (err) {
+    console.error('[speech] Failed to load WinRT bindings:', err.message);
+    // Disable Hey Cortana and speech recognition if bindings fail
+    wakeEnabled = false;
+    settings.heyCortana = false;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('speech-error', 'Speech recognition unavailable: ' + err.message);
+    }
+  }
 
   ipcMain.on('speech-start', async () => {
     if (isSettingsVisible) {
@@ -758,6 +795,11 @@ if (gotTheLock) {
     try {
       if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
       if (wakeRecognizer) {
+        try { 
+          if (wakeRecognizer.continuousRecognitionSession) {
+            try { await wakeRecognizer.continuousRecognitionSession.stopAsync(); } catch (_) {}
+          }
+        } catch (_) {}
         try { wakeRecognizer.close(); } catch (_) {}
         wakeRecognizer = null;
         wakeRunning = false;
@@ -769,6 +811,11 @@ if (gotTheLock) {
       if (speechState.recognizer) {
         try { speechState.recognizer.close(); } catch (_) {}
         speechState.recognizer = null;
+      }
+
+      // Check if WinRT bindings are available
+      if (!SpeechRecognizer || !SpeechRecognitionTopicConstraint || !SpeechRecognitionScenario) {
+        throw new Error('WinRT speech bindings not available');
       }
 
       try {
@@ -848,15 +895,13 @@ if (gotTheLock) {
   });
 
   let wakeRestartTimer = null;
-  let wakeBackoff = 0;
 
   ipcMain.on('speech-stop', () => {
     cancelManualSpeech({ stopFallback: true });
     if (wakeEnabled && !wakeRunning && !wakeRestartTimer && !isSettingsVisible) {
-      wakeBackoff = 0;
       wakeRestartTimer = setTimeout(() => {
         wakeRestartTimer = null;
-        if (wakeEnabled && !isSettingsVisible) startWakeLoop();
+        if (wakeEnabled && !isSettingsVisible) startWakeLoop(0);
       }, 500);
     }
   });
@@ -866,13 +911,12 @@ if (gotTheLock) {
     if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
     if (enabled) {
       if (!powerBlocker) powerBlocker = require('electron').powerSaveBlocker.start('prevent-app-suspension');
-      if (!wakeRunning) startWakeLoop();
+      if (!wakeRunning) startWakeLoop(0);
     }
     if (!enabled) {
       wakeRunning = false;
       if (wakeRecognizer) {
         try {
-          // Try to stop continuous session first if available
           if (wakeRecognizer.continuousRecognitionSession) {
             try {
               await wakeRecognizer.continuousRecognitionSession.stopAsync();
@@ -889,11 +933,17 @@ if (gotTheLock) {
     }
   });
 
-async function startWakeLoop() {
+async function startWakeLoop(backoff = 0) {
     if (wakeRunning) return;
     if (isSettingsVisible) return;
     if (speechState.starting || speechState.recognizer || speechState.process) {
       console.log('[wake] Deferring: manual speech active.');
+      return;
+    }
+    // Check if WinRT bindings are available
+    if (!SpeechRecognizer || !SpeechRecognitionTopicConstraint || !SpeechRecognitionScenario) {
+      console.warn('[wake] WinRT bindings not available, cannot start wake loop');
+      wakeRunning = false;
       return;
     }
 
@@ -992,7 +1042,7 @@ async function startWakeLoop() {
 
       console.log('[wake] Starting continuous recognition session...');
       await session.startAsync();
-      wakeBackoff = 0;
+      backoff = 0;
       console.log('[wake] Continuous session active — listening for Hey Cortana.');
 
       await sessionEndedPromise;
@@ -1018,20 +1068,20 @@ async function startWakeLoop() {
                            || completionStatus === 7;
 
         if (isExpectedEnd) {
-          wakeBackoff = 0;
+          backoff = 0;
           console.log('[wake] Restarting in 1000ms');
           wakeRestartTimer = setTimeout(() => {
             wakeRestartTimer = null;
-            if (wakeEnabled && !isSettingsVisible) startWakeLoop();
+            if (wakeEnabled && !isSettingsVisible) startWakeLoop(backoff);
           }, 1000);
         } else {
-          const delay = Math.min(5000 * Math.pow(2, wakeBackoff), 30000);
-          wakeBackoff++;
+          const delay = Math.min(5000 * Math.pow(2, backoff), 30000);
+          backoff++;
           console.warn('[wake] Session ended abnormally (status ' +
             completionStatus + '); retrying in ' + delay + 'ms');
           wakeRestartTimer = setTimeout(() => {
             wakeRestartTimer = null;
-            if (wakeEnabled && !isSettingsVisible) startWakeLoop();
+            if (wakeEnabled && !isSettingsVisible) startWakeLoop(backoff);
           }, delay);
         }
       }
@@ -1041,6 +1091,10 @@ async function startWakeLoop() {
   app.on('before-quit', () => {
     wakeRunning = false;
     cancelManualSpeech({ stopFallback: true });
+    // Notify renderer to cancel any ongoing speech synthesis
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('speech-force-stop');
+    }
     if (typeof wakeRestartTimer !== 'undefined' && wakeRestartTimer) {
       clearTimeout(wakeRestartTimer);
       wakeRestartTimer = null;
@@ -1067,8 +1121,7 @@ if (wakeRecognizer) {
       }
     } else if (wakeEnabled) {
       if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
-      wakeBackoff = 0;
-      if (!wakeRunning) startWakeLoop();
+      if (!wakeRunning) startWakeLoop(0);
     }
   });
 
@@ -1077,7 +1130,7 @@ if (wakeRecognizer) {
   if (settings.heyCortana) {
     wakeEnabled = true;
     setTimeout(() => {
-      if (!wakeRunning) startWakeLoop();
+      if (!wakeRunning) startWakeLoop(0);
     }, 3000);
   }
 
