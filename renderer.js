@@ -1,20 +1,7 @@
+const { ipcRenderer } = require('electron');
 const path = require('path');
 const https = require('https');
 const { parseGIF, decompressFrames } = require('gifuct-js');
-
-// IPC bridge: prefer window.cortanaAPI (exposed by preload.js) for context-isolated communication
-// Fall back to direct ipcRenderer only if cortanaAPI is not available
-const cortanaAPI = (window && window.cortanaAPI)
-  ? {
-      send: (channel, ...args) => window.cortanaAPI.send(channel, ...args),
-      invoke: (channel, ...args) => window.cortanaAPI.invoke(channel, ...args),
-      on: (channel, listener) => {
-        const remove = window.cortanaAPI.on(channel, listener);
-        return remove ? () => { /* removed by preload */ } : () => {};
-      },
-      sendSync: (_channel, ..._args) => { console.warn('cortanaAPI.sendSync not available'); return undefined; }
-    }
-  : null;
 
 window.onerror = (msg, src, line, col, err) => {
     console.error('[renderer] Uncaught:', msg, src, line, err && err.stack);
@@ -79,92 +66,6 @@ let everythingPort = 80;
 let blurCleanupTimer = null;
 let suppressThemeInput = false;
 let wakeTriggered = false;
-
-// Centralized renderer helpers for consistent cleanup
-
-function cancelCurrentSpeech() {
-    speechActive = false;
-    setSpeechDiagnosticStatus('Idle');
-    if (speechShuffleTimer) { clearInterval(speechShuffleTimer); speechShuffleTimer = null; }
-    window.speechSynthesis.cancel();
-    if (currentEdgeAudio) {
-        currentEdgeAudio.pause();
-        currentEdgeAudio = null;
-    }
-    if (currentEdgeFilePath) {
-        // Generation-based cleanup handled in speakEdge
-        currentEdgeFilePath = null;
-    }
-    clearTimeout(finishSpeakingTimeout);
-    finishSpeakingTimeout = null;
-    if (micBtnBusy) { micBtnBusy = false; }
-    searchBar.style.color = '';
-    clearSearchBar();
-    searchBar.placeholder = 'Type here to search';
-    micBtn.classList.remove('listening');
-    isBusy = false;
-}
-
-function stopListeningUI() {
-    if (speechShuffleTimer) { clearInterval(speechShuffleTimer); speechShuffleTimer = null; }
-    searchBar.style.color = '';
-    clearSearchBar();
-    searchBar.placeholder = 'Type here to search';
-    micBtn.classList.remove('listening');
-}
-
-function clearTimerIntervals() {
-    if (timerCountdownInterval) {
-        clearInterval(timerCountdownInterval);
-        timerCountdownInterval = null;
-    }
-    stopTimerPanelInterval();
-}
-
-function returnToIdle() {
-    isBusy = false;
-    searchIcon.src = cortanaIcon;
-    if (settingsContainer.classList.contains('visible')) return;
-    if (animationContainer.className === 'idle' && document.activeElement === searchBar) return;
-    
-    if (searchResultsActive) {
-        searchResultsActive = false;
-    }
-    
-    editingReminderId = null;
-    editingReminderSound = null;
-    reminderContainer.classList.remove('visible');
-    animationContainer.style.display = 'block';
-    contentWrapper.style.display = 'block';
-    
-    clearTimeout(finishSpeakingTimeout);
-    window.speechSynthesis.cancel();
-    
-    // Edge TTS: let generation-based cleanup handle it
-    if (currentEdgeAudio) {
-        currentEdgeAudio = null;
-    }
-    
-    requestSound.pause();
-    requestSound.currentTime = 0;
-    drumrollSound.pause();
-    drumrollSound.currentTime = 0;
-    
-    animationContainer.className = 'idle';
-    if (document.activeElement === searchBar || searchPanel.classList.contains('visible')) {
-        searchIcon.src = searchIconPng;
-    } else {
-        searchIcon.src = cortanaIcon;
-    }
-    anim.goToState(AnimationState.IDLE);
-    
-    if (!isBusy) {
-        stopTimerPanelInterval();
-        resultsDisplay.innerHTML = '';
-    }
-}
-
-let activeTimerId = null;
 
 let activeTimerId = null;
 let timerCountdownInterval = null;
@@ -232,43 +133,6 @@ const ANIMATION_FILES = {
   idle_mid: 'circle_idle_mid.gif',
   idle_end: 'circle_idle_end.gif',
 };
-
-// Validate that all animation file references exist at startup
-function validateAnimationAssets() {
-  const requiredFiles = Object.values(ANIMATION_FILES);
-  const specialFiles = SPECIAL_ANIMATIONS.map((a) => [a.start, a.loop]).flat();
-  const allFiles = [...requiredFiles, ...specialFiles];
-
-  for (const file of allFiles) {
-    const filePath = path.join(appRoot, file);
-    try {
-      fssync.accessSync(filePath);
-    } catch (_) {
-      console.warn(`[animation] Missing asset file: ${file}`);
-    }
-  }
-}
-
-// Validate that all SPECIAL_ANIMATIONS file references exist
-function validateSpecialAnimationAssets() {
-  for (const anim of SPECIAL_ANIMATIONS) {
-    const startPath = path.join(appRoot, anim.start);
-    const loopPath = path.join(appRoot, anim.loop);
-    try {
-      fssync.accessSync(startPath);
-    } catch (_) {
-      console.warn(`[animation] Missing special animation start file: ${anim.name} (${anim.start})`);
-    }
-    try {
-      fssync.accessSync(loopPath);
-    } catch (_) {
-      console.warn(`[animation] Missing special animation loop file: ${anim.name} (${anim.loop})`);
-    }
-  }
-}
-
-validateAnimationAssets();
-validateSpecialAnimationAssets();
 
 const SPECIAL_ANIMATIONS = [
   { name: 'Birthday', start: 'bday_start.gif', loop: 'bday_static.gif' },
@@ -599,7 +463,7 @@ class AnimationManager {
     try {
       await this.renderer.load(path.join(appRoot, file));
     } catch (e) {
-      console.warn(`Failed to load animation file ${file}:`, e.message);
+      console.warn(`Failed to load animation file ${file}:`, e && e.message);
       return;
     }
     if (generation !== this._generation) return;
@@ -1149,35 +1013,35 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchBar.addEventListener('input', onSearchInput);
     searchBar.addEventListener('input', autoResizeSearchBar);
     searchBar.addEventListener('keydown', onSearchKeyDown);
-searchBar.addEventListener('blur', () => {
-    if (speechActive) {
-        cancelCurrentSpeech();
-        searchBar.placeholder = 'Type here to search';
-        return;
-    }
-    if (!searchPanel.classList.contains('visible')) {
-        searchIcon.src = cortanaIcon;
-    }
-    if (animationContainer.className === 'idle') return;
-    blurCleanupTimer = setTimeout(() => {
-        hideSearchPanel();
-        clearSearchBar();
-        searchBar.placeholder = 'Type here to search';
-        returnToIdle();
-    }, 200);
-    offSound.play();
-});
+    searchBar.addEventListener('blur', () => {
+        if (speechActive) {
+            stopSpeechRecognition();
+            searchBar.placeholder = 'Type here to search';
+            return;
+        }
+        if (!searchPanel.classList.contains('visible')) {
+            searchIcon.src = cortanaIcon;
+        }
+        if (animationContainer.className === 'idle') return;
+        blurCleanupTimer = setTimeout(() => {
+            hideSearchPanel();
+            clearSearchBar();
+            searchBar.placeholder = 'Type here to search';
+            setStateIdle();
+        }, 200);
+        offSound.play();
+    });
 
-searchBar.addEventListener('focus', () => {
-    if (speechActive) {
-        cancelCurrentSpeech();
-    }
-    searchIcon.src = searchIconPng;
-    if (animationContainer.className === 'active') {
-        returnToIdle();
-        return;
-    }
-});
+    searchBar.addEventListener('focus', () => {
+        if (speechActive) {
+            stopSpeechRecognition();
+        }
+        searchIcon.src = searchIconPng;
+        if (animationContainer.className === 'active') {
+            setStateIdle();
+            return;
+        }
+    });
 
     let speechActive = false;
     let speechFinal = '';
@@ -1238,14 +1102,23 @@ searchBar.addEventListener('focus', () => {
         ipcRenderer.send('speech-start');
     }
 
-function stopSpeechRecognition() {
-    cancelCurrentSpeech();
-    if (document.body.classList.contains('slim-mode')) {
-        document.body.classList.remove('slim-mode');
-        ipcRenderer.send('close-app');
-        return;
+    function stopSpeechRecognition() {
+        speechActive = false;
+        setSpeechDiagnosticStatus('Idle');
+        if (speechShuffleTimer) { clearInterval(speechShuffleTimer); speechShuffleTimer = null; }
+        searchBar.style.color = '';
+        clearSearchBar();
+        searchBar.placeholder = 'Type here to search';
+        micBtn.classList.remove('listening');
+        ipcRenderer.send('speech-stop');
+        offSound.play();
+        if (document.body.classList.contains('slim-mode')) {
+            document.body.classList.remove('slim-mode');
+            ipcRenderer.send('close-app');
+            return;
+        }
+        setStateIdle();
     }
-}
 
     _stopSpeechFromOutside = () => {
         if (speechActive) stopSpeechRecognition();
@@ -1264,7 +1137,7 @@ function stopSpeechRecognition() {
         const query = speechFinal.trim();
         if (!query) {
             clearSearchBar();
-            returnToIdle();
+            setStateIdle();
             return;
         }
 
@@ -1329,21 +1202,6 @@ function stopSpeechRecognition() {
         stopSpeechRecognition();
     });
 
-    ipcRenderer.on('speech-capabilities', (event, { winRTAvailable, fallback }) => {
-        const warningEl = document.getElementById('speech-warning');
-        if (!warningEl) return;
-        if (!winRTAvailable && fallback) {
-            warningEl.textContent = fallback === 'sapi'
-                ? 'Voice recognition using SAPI fallback. Hey Cortana is unavailable.'
-                : 'Speech recognition unavailable. Hey Cortana requires WinRT bindings.';
-            warningEl.style.display = 'block';
-            heyCortanaEnabled = false;
-            if (heyCortanaToggle) heyCortanaToggle.checked = false;
-        } else {
-            warningEl.style.display = 'none';
-        }
-    });
-
     micBtn.addEventListener('mousedown', (e) => {
         e.preventDefault();
         if (settingsContainer.classList.contains('visible')) return;
@@ -1374,8 +1232,6 @@ function stopSpeechRecognition() {
     });
 
     ipcRenderer.on('speech-force-stop', () => {
-        cancelCurrentSpeech();
-
         if (speechActive) {
             speechActive = false;
             if (speechShuffleTimer) { clearInterval(speechShuffleTimer); speechShuffleTimer = null; }
@@ -1482,7 +1338,6 @@ function stopSpeechRecognition() {
           ipcRenderer.invoke('check-everything').then(ok => {
             const warning = document.getElementById('everything-warning');
             if (warning) {
-              warning.setAttribute('aria-live', 'polite');
               warning.textContent = ok ? 'Everything HTTP server is reachable.' : 'Cannot reach Everything HTTP server. Check that it is enabled in Everything options.';
               warning.style.color = ok ? 'green' : '#e74c3c';
             }
@@ -1511,7 +1366,10 @@ function stopSpeechRecognition() {
     
     if (reminderSoundBrowseSettingBtn) {
         reminderSoundBrowseSettingBtn.addEventListener('click', () => {
-            ipcRenderer.invoke('show-open-dialog', 'reminderAudio').then(result => {
+            ipcRenderer.invoke('show-open-dialog', { 
+                properties: ['openFile'],
+                filters: [{ name: 'Audio Files', extensions: ['wav', 'mp3', 'ogg', 'm4a', 'aac'] }]
+            }).then(result => {
                 if (!result.canceled && result.filePaths.length > 0) {
                     // Store the full file path to allow custom sounds from anywhere
                     const fullPath = result.filePaths[0];
@@ -1562,7 +1420,7 @@ function stopSpeechRecognition() {
 
     ipcRenderer.on('go-idle-and-close', () => {
         if (!appContainer.classList.contains('visible')) return;
-        cancelCurrentSpeech();
+        if (speechActive) stopSpeechRecognition();
 
         const onAnimationEnd = () => {
             if (!appContainer.classList.contains('visible')) {
@@ -1591,7 +1449,7 @@ function stopSpeechRecognition() {
         playReminderSound(soundFile);
         setTimeout(() => {
             isBusy = false;
-            // Don't full idle transition - just release busy state
+            setStateIdle();
         }, 4000);
     });
 
@@ -1602,7 +1460,6 @@ function stopSpeechRecognition() {
     ipcRenderer.on('online-speech-status', (event, { enabled }) => {
         const banner = document.getElementById('online-speech-warning');
         if (banner) {
-            banner.setAttribute('aria-live', 'polite');
             banner.style.display = enabled ? 'none' : 'flex';
         }
     });
@@ -1658,34 +1515,6 @@ function stopSpeechRecognition() {
     setupTTS();
     refreshEvaVoiceStatus();
 
-    // Synchronize timer state from main process
-    ipcRenderer.invoke('get-active-timer').then(timer => {
-        if (timer.active) {
-            activeTimerId = timer.id;
-            timerEndTime = timer.endTime;
-            timerDuration = timer.remaining;
-            activeTimerLabel = timer.label;
-        }
-    });
-
-    // Synchronize speech capabilities status with main process
-    ipcRenderer.invoke('get-speech-capabilities').then(cap => {
-        if (!cap.winRTAvailable && cap.fallback) {
-            const warningEl = document.getElementById('speech-warning');
-            if (warningEl) {
-                warningEl.textContent = cap.fallback === 'sapi'
-                    ? 'Voice recognition using SAPI fallback. Hey Cortana is unavailable.'
-                    : 'Speech recognition unavailable. Hey Cortana requires WinRT bindings.';
-                warningEl.style.display = 'block';
-                heyCortanaEnabled = false;
-                if (heyCortanaToggle) heyCortanaToggle.checked = false;
-            }
-        } else {
-            const warningEl = document.getElementById('speech-warning');
-            if (warningEl) warningEl.style.display = 'none';
-        }
-    });
-
     animationContainer.className = 'idle';
     if (!entranceReceived) {
         appContainer.classList.add('visible');
@@ -1708,15 +1537,6 @@ function stopSpeechRecognition() {
         ipcRenderer.send('renderer-error', e.message + '\n' + (e.stack || ''));
     }
 });
-
-function normalizeQuery(query) {
-    if (typeof query !== 'string') return '';
-    return query
-        .toLowerCase()
-        .replace(/[\.,-\?!\s]+/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-}
 
 // Search panel functionality
 const PANEL_ICONS = {
@@ -1741,7 +1561,7 @@ async function onSearchInput(event) {
 
 async function generateCategorizedResults(query) {
     const categories = [];
-    const lowerQuery = normalizeQuery(query);
+    const lowerQuery = query.toLowerCase();
 
     const customActionItems = [];
     for (const a of customActions) {
@@ -1918,31 +1738,15 @@ async function generateCategorizedResults(query) {
 
 function generateWebSuggestions(query) {
     return new Promise((resolve) => {
-        // Limit query length
-        const safeQuery = query.length > 256 ? query.slice(0, 256) : query;
-        const url = `https://suggestqueries.google.com/complete/search?client=chrome&q=${encodeURIComponent(safeQuery)}`;
+        const url = `https://suggestqueries.google.com/complete/search?client=chrome&q=${encodeURIComponent(query)}`;
         const options = {
-            hostname: 'suggestqueries.google.com',
-            path: '/complete/search',
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             }
         };
-        const req = https.request(options, (res) => {
-            // Validate HTTP status code
-            if (res.statusCode !== 200) {
-                resolve([]);
-                return;
-            }
+        const req = https.get(url, options, (res) => {
             let data = '';
-            res.on('data', chunk => {
-                // Limit response size
-                if ((data += chunk).length > 1_000_000) {
-                    req.destroy();
-                    resolve([]);
-                    return;
-                }
-            });
+            res.on('data', chunk => data += chunk);
             res.on('end', () => {
                 try {
                     const json = JSON.parse(data);
@@ -1954,11 +1758,7 @@ function generateWebSuggestions(query) {
             });
         });
         req.on('error', () => resolve([]));
-        // Add request timeout
-        req.setTimeout(5000, () => {
-            req.destroy();
-            resolve([]);
-        });
+        req.setTimeout(3000, () => { req.destroy(); resolve([]); });
     });
 }
 
@@ -2092,13 +1892,13 @@ function onSearchKeyDown(event) {
             }
             break;
 
-case 'Escape':
-        event.preventDefault();
-        hideSearchPanel();
-        clearSearchBar();
-        searchBar.placeholder = 'Type here to search';
-        returnToIdle();
-        break;
+        case 'Escape':
+            event.preventDefault();
+            hideSearchPanel();
+            clearSearchBar();
+            searchBar.placeholder = 'Type here to search';
+            setStateIdle();
+            break;
     }
 }
 
@@ -2115,7 +1915,6 @@ function updatePanelSelection() {
 
 function renderSpeechErrors() {
     if (!speechErrorLogEl) return;
-    speechErrorLogEl.setAttribute('aria-live', 'polite');
     if (speechDiagnostics.errors.length === 0) {
         speechErrorLogEl.textContent = 'None';
         return;
@@ -2188,7 +1987,7 @@ function closeSettings(silent = false) {
     settingsContainer.classList.remove('visible');
     animationContainer.style.display = 'block';
     if (!silent) {
-        returnToIdle();
+        setStateIdle();
     }
 }
 
@@ -2390,7 +2189,8 @@ function renderCustomActions() {
             deleteBtn.className = 'reminder-action-btn delete';
             deleteBtn.onclick = () => {
                 customActions.splice(index, 1);
-                saveCustomActions().then(renderCustomActions);
+                saveCustomActions();
+                renderCustomActions();
             };
     
             textContainer.appendChild(triggerSpan);
@@ -2440,22 +2240,15 @@ function onSaveCustomAction() {
     } else {
         customActions.push(newAction);
     }
-    saveCustomActions().then(() => {
-        renderCustomActions();
-        hideCustomActionForm();
-        showSavedToast();
-    });
-  }
+    saveCustomActions();
+    renderCustomActions();
+    hideCustomActionForm();
+    showSavedToast();
+}
 
-async function saveCustomActions() {
-    const result = await ipcRenderer.invoke('set-custom-actions', customActions);
-    if (result && result.success) {
-        showSavedToast();
-    } else {
-        actionSequenceWarning.textContent = result && result.error ? result.error : 'Failed to save custom actions.';
-        actionSequenceWarning.style.display = 'block';
-    }
-  }
+function saveCustomActions() {
+    ipcRenderer.invoke('set-custom-actions', customActions);
+}
 
 let savedToastTimer = null;
 
@@ -2904,20 +2697,16 @@ function speak(text, onSpeechEndCallback) {
 
 let currentEdgeAudio = null;
 let currentEdgeFilePath = null;
-let currentEdgeGeneration = 0;
 
 function speakEdge(text, onSpeechEndCallback) {
-    const requestGeneration = ++currentEdgeGeneration;
-
     if (currentEdgeAudio) {
         currentEdgeAudio.pause();
         currentEdgeAudio = null;
     }
-
-    // Clean up previous temp file if it still refers to an old request
-    if (currentEdgeFilePath && currentEdgeGeneration > 0) {
-        // We'll clean up the old file after this request's file is handled
-        // Don't synchronously delete - let the new request handle cleanup
+    // Clean up previous temp file if any
+    if (currentEdgeFilePath) {
+        try { require('fs').unlinkSync(currentEdgeFilePath); } catch(e) {}
+        currentEdgeFilePath = null;
     }
 
     let callbackInvoked = false;
@@ -2933,63 +2722,38 @@ function speakEdge(text, onSpeechEndCallback) {
         pitch,
         rate
     }).then(result => {
-        // If this request was cancelled, delete the file without playing
-        if (requestGeneration !== currentEdgeGeneration) {
-            // This request's generation has been superseded; delete the file
-            try { require('fs').unlinkSync(result.filePath); } catch(e) {}
-            invokeCallback();
-            return;
-        }
-
         if (!result.success) {
             console.error('Edge TTS failed:', result.error);
             invokeCallback();
             return;
         }
-
-        // Store the file path for this request
         currentEdgeFilePath = result.filePath;
-
         const audio = new Audio('file://' + result.filePath.replace(/\\/g, '/'));
         currentEdgeAudio = audio;
-
         const cleanup = () => {
-            // Only clear references if they still belong to this request
-            if (currentEdgeGeneration === requestGeneration) {
-                currentEdgeAudio = null;
-            }
-            if (currentEdgeFilePath === result.filePath) {
+            currentEdgeAudio = null;
+            if (currentEdgeFilePath) {
+                try { require('fs').unlinkSync(currentEdgeFilePath); } catch(e) {}
                 currentEdgeFilePath = null;
             }
         };
-
         audio.onended = () => {
-            // Only cleanup if this request is still active
-            if (currentEdgeGeneration === requestGeneration) {
-                cleanup();
-                invokeCallback();
-            }
+            cleanup();
+            invokeCallback();
         };
         audio.onerror = (err) => {
             console.error('Edge TTS audio error:', err);
-            if (currentEdgeGeneration === requestGeneration) {
-                cleanup();
-            }
+            cleanup();
             invokeCallback();
         };
         audio.play().catch(err => {
             console.error('Edge TTS audio play failed:', err);
-            if (currentEdgeGeneration === requestGeneration) {
-                cleanup();
-            }
+            cleanup();
             invokeCallback();
         });
     }).catch(err => {
         console.error('Edge TTS invoke failed:', err);
-        // If this request was cancelled, don't invoke callback
-        if (requestGeneration === currentEdgeGeneration) {
-            invokeCallback();
-        }
+        invokeCallback();
     });
 }
 
@@ -3035,15 +2799,14 @@ function setStateIdle() {
 
     clearTimeout(finishSpeakingTimeout);
     window.speechSynthesis.cancel();
-
-    // Edge TTS cleanup: only clear references if they belong to the current generation
     if (currentEdgeAudio) {
-        // Pause but don't immediately delete - let the generation-based cleanup handle it
+        currentEdgeAudio.pause();
         currentEdgeAudio = null;
     }
-    // Note: currentEdgeFilePath cleanup is handled asynchronously in speakEdge
-    // through the generation-based cleanup logic
-
+    if (currentEdgeFilePath) {
+        try { require('fs').unlinkSync(currentEdgeFilePath); } catch(e) {}
+        currentEdgeFilePath = null;
+    }
     requestSound.pause();
     requestSound.currentTime = 0;
     drumrollSound.pause();
@@ -3180,7 +2943,7 @@ function hideSearchResults() {
     searchBar.placeholder = 'Type here to search';
     clearSearchBar();
     searchIcon.src = cortanaIcon;
-    returnToIdle();
+    setStateIdle();
 }
 
 function showWebLink() {
@@ -3960,21 +3723,18 @@ function stopTimerPanelInterval() {
 }
 
 function cancelActiveTimer() {
-    ipcRenderer.invoke('cancel-timer', activeTimerId).then((result) => {
-        if (result && result.success) {
-            activeTimerId = null;
-            timerEndTime = null;
-            timerDuration = null;
-            activeTimerLabel = null;
-            stopTimerPanelInterval();
-        }
-    }).catch(() => {
+    if (activeTimerId !== null) {
+        ipcRenderer.invoke('cancel-timer', activeTimerId);
         activeTimerId = null;
-        timerEndTime = null;
-        timerDuration = null;
-        activeTimerLabel = null;
-        stopTimerPanelInterval();
-    });
+    }
+    if (timerCountdownInterval) {
+        clearInterval(timerCountdownInterval);
+        timerCountdownInterval = null;
+    }
+    stopTimerPanelInterval();
+    timerEndTime = null;
+    timerDuration = null;
+    activeTimerLabel = null;
 }
 
 function showTimersPanel() {
@@ -4245,6 +4005,12 @@ const commands = [
         }
     },
     {
+        regex: /^\s*(?:(?:what|which)\s+timers?\s+do\s+i\s+have|what\s+(?:are|is)\s+my\s+timers?|what'?s\s+my\s+timers?|my\s+timers?|show\s+(?:my\s+)?timers?|list\s+(?:my\s+)?timers?|(?:active|current)\s+timers?|check\s+(?:my\s+)?timers?|how\s+long\s+is\s+left(?:\s+on\s+(?:the\s+|my\s+)?timers?)?|how\s+much\s+time\s+(?:is\s+)?left|timers?\s+status)\s*[!.?]*\s*$/i,
+        handler: () => {
+            showTimersPanel();
+        }
+    },
+    {
         regex: /^how much time (?:is )?left(?: on the timer)?\??$/i,
         handler: () => {
             if (activeTimerId === null) {
@@ -4259,12 +4025,6 @@ const commands = [
                     onActionFinished, {}, false
                 );
             });
-        }
-    },
-    {
-        regex: /^\s*(?:(?:what|which)\s+timers?\s+do\s+i\s+have|what\s+(?:are|is)\s+my\s+timers?|what'?s\s+my\s+timers?|my\s+timers?|show\s+(?:my\s+)?timers?|list\s+(?:my\s+)?timers?|(?:active|current)\s+timers?|check\s+(?:my\s+)?timers?|how\s+long\s+is\s+left(?:\s+on\s+(?:the\s+|my\s+)?timers?)?|timers?\s+status)\s*[!.?]*\s*$/i,
-        handler: () => {
-            showTimersPanel();
         }
     },
     {
@@ -4947,7 +4707,10 @@ function createActionItemUI(action, index, isLastItem) {
             } else if (action.type === 'play_sound') {
                 filters = [{ name: 'Audio Files', extensions: ['mp3', 'wav', 'ogg'] }];
             }
-            const result = await ipcRenderer.invoke('show-open-dialog', 'application');
+            const result = await ipcRenderer.invoke('show-open-dialog', { 
+                properties: ['openFile'],
+                filters: filters
+            });
             if (!result.canceled && result.filePaths.length > 0) {
                 valueInput.value = result.filePaths[0];
                 validateAndApplyActionFormState();

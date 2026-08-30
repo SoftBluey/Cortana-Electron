@@ -197,7 +197,7 @@ let reminders = [];
 let activeTimer = null;
 let timerIdCounter = 0;
 
-let settings = {
+const DEFAULT_SETTINGS = {
   openAtLogin: true,
   preferredVoice: "Microsoft Zira Desktop",
   searchEngine: "bing",
@@ -224,6 +224,11 @@ let settings = {
   useEverythingSearch: false,
   heyCortana: false,
   everythingPort: 80,
+};
+
+let settings = {
+  ...DEFAULT_SETTINGS,
+  customActions: [],
 };
 let SETTINGS_FILE;
 let REMINDERS_FILE;
@@ -531,7 +536,7 @@ async function loadReminders() {
 }
 
 const VALID_ENUMS = {
-  searchEngine: ['bing', 'duckduckgo', 'google'],
+  searchEngine: ['bing', 'duckduckgo', 'google', 'brave', 'ecosia'],
   ttsEngine: ['edge', 'system'],
   timeFormat: ['12', '24'],
   weatherUnits: ['metric', 'imperial'],
@@ -653,42 +658,41 @@ async function loadSettings() {
       await saveSettings();
       return;
     }
-    throw error;
+    // Startup resilience: never block window creation because settings could not be read
+    console.error("Failed to read settings; falling back to defaults:", error);
+    settings = restoreDefaults();
+    await saveSettings();
+    return;
   }
 
-  // Handle empty file - treat as corrupt
+  // Handle empty file - treat as corrupt, back it up, restore defaults
   if (!data || data.trim() === '') {
-    // Back up the empty/missing file and restore defaults
     try {
       const backupName = generateUniqueBackupName(SETTINGS_FILE);
-      await fssync.copyFile(SETTINGS_FILE, backupName);
+      await fs.copyFile(SETTINGS_FILE, backupName);
+      console.log(`Empty/corrupt settings backed up to ${backupName}`);
     } catch (_) {}
-    await restoreDefaults();
+    settings = restoreDefaults();
+    await saveSettings();
     return;
   }
 
   const validationResult = loadValidatedSettings(data);
 
   if (!validationResult.success) {
-    // File has invalid JSON or structure - try partial recovery
+    // File has invalid JSON or structure - back it up and restore defaults
     try {
       const backupName = generateUniqueBackupName(SETTINGS_FILE);
-      await fssync.copyFile(SETTINGS_FILE, backupName);
+      await fs.copyFile(SETTINGS_FILE, backupName);
       console.log(`Corrupted settings backed up to ${backupName}`);
     } catch (_) {}
-
-    // Attempt to recover the valid portion
-    const recovered = loadValidatedSettings(data);
-    if (recovered.success && Object.keys(recovered.data).length > 0) {
-      settings = { ...settings, ...recovered.data };
-    } else {
-      await restoreDefaults();
-      return;
-    }
-  } else {
-    // Valid settings - merge with defaults, preserving unknown keys behavior
-    settings = { ...settings, ...validationResult.data };
+    settings = restoreDefaults();
+    await saveSettings();
+    return;
   }
+
+  // Valid settings - merge with defaults, preserving unknown keys behavior
+  settings = { ...restoreDefaults(), ...validationResult.data };
 
   // Ensure defaults are applied for any missing keys
   await saveSettings();
@@ -696,33 +700,10 @@ async function loadSettings() {
 
 function restoreDefaults() {
   settings = {
-    openAtLogin: true,
-    preferredVoice: "Microsoft Zira Desktop",
-    searchEngine: "bing",
-    themeColor: "#0078d7",
-    useWindowsAccent: false,
+    ...DEFAULT_SETTINGS,
     customActions: [],
-    isMovable: false,
-    pitch: 1,
-    rate: 1,
-    idleGreetingMode: "random",
-    specificIdleGreeting: "What's on your mind?",
-    customIdleGreeting: "",
-    reminderSound: "notify.wav",
-    ttsEngine: "edge",
-    edgeVoice: "en-US-JennyNeural",
-    timeFormat: "12",
-    weatherUnits: "metric",
-    openaiApiKey: "",
-    aiEnabled: false,
-    aiSystemPrompt: "You are Cortana, Microsoft's virtual assistant. Be helpful, concise, and friendly. Keep responses brief and conversational. Do not use markdown formatting.",
-    aiModel: "gpt-4o-mini",
-    aiApiUrl: "https://api.openai.com/v1/chat/completions",
-    aiProvider: "",
-    useEverythingSearch: false,
-    heyCortana: false,
-    everythingPort: 80,
-};
+  };
+  return settings;
 }
 
 async function saveSettings() {
@@ -769,14 +750,6 @@ async function checkForUpdates() {
   } catch (error) {
     console.error("Failed to check for updates:", error);
     return { available: false, error: error.message };
-  }
-}
-
-async function saveSettings() {
-  try {
-    await fs.writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2));
-  } catch (error) {
-    console.error("Failed to save settings:", error);
   }
 }
 
@@ -1055,8 +1028,6 @@ if (gotTheLock) {
     }
   });
 
-  let wakeRestartTimer = null;
-
   ipcMain.on('speech-stop', () => {
     cancelManualSpeech({ stopFallback: true });
     if (wakeEnabled && !wakeRunning && !wakeRestartTimer && !isSettingsVisible) {
@@ -1102,7 +1073,7 @@ ipcMain.handle('get-speech-capabilities', async () => {
             } catch (_) {}
           }
         } catch (_) {}
-        wakeRecognizer.close();
+        try { wakeRecognizer.close(); } catch (_) {}
       }
       wakeRecognizer = null;
       if (powerBlocker) {
@@ -1120,9 +1091,11 @@ async function startWakeLoop(backoff = 0) {
       return;
     }
 
-    // Use generation token to prevent stale restarts
-    const generation = ++wakeGeneration;
-    const token = generation;
+    // Use generation token to prevent stale restarts.
+    // The module-scope wakeGeneration counter is bumped whenever the wake
+    // context is invalidated (disable, settings, suspend, quit), so callbacks
+    // compare against it to detect stale generations.
+    const token = ++wakeGeneration;
 
     // Check if WinRT bindings are available
     if (!SpeechRecognizer || !SpeechRecognitionTopicConstraint || !SpeechRecognitionScenario) {
@@ -1159,7 +1132,7 @@ async function startWakeLoop(backoff = 0) {
 
       session.onResultGenerated(async (sender, args) => {
         // Verify generation token to prevent stale callbacks
-        if (generation !== token) return;
+        if (wakeGeneration !== token) return;
         if (!wakeRunning || wakeTriggered) return;
         let text = '';
         try {
@@ -1230,7 +1203,7 @@ async function startWakeLoop(backoff = 0) {
       session.onCompleted((sender, args) => {
         if (wakeTriggered) return;
         // Verify generation token
-        if (generation !== token) return;
+        if (wakeGeneration !== token) return;
         completionStatus = (args && args.status != null) ? args.status : null;
         console.warn('[wake] ContinuousRecognitionSession ended (status ' + completionStatus + ')');
         wakeRunning = false;
@@ -1841,43 +1814,58 @@ const MAX_TRIGGER_LENGTH = 256;
 const MAX_ACTION_COUNT_PER_SEQUENCE = 20;
 const VALID_ACTION_TYPES = new Set(['speak', 'open_app', 'open_url', 'play_sound', 'run_command']);
 
-function validateActionObject(action) {
-  if (typeof action !== 'object' || action === null) return false;
+// A single executable step inside a custom action sequence.
+// Shape: { type, value }
+function validateActionStep(step) {
+  if (typeof step !== 'object' || step === null || Array.isArray(step)) return false;
 
-  const requiredKeys = new Set(['type', 'value']);
-  const optionalKeys = new Set(['trigger']);
-  const allowedKeys = new Set(['type', 'value', 'trigger']);
-
-  const keys = Object.keys(action);
-  for (const key of keys) {
+  const allowedKeys = new Set(['type', 'value']);
+  for (const key of Object.keys(step)) {
     if (!allowedKeys.has(key)) return false;
   }
 
-  if (!requiredKeys.has('type')) return false;
-  if (!requiredKeys.has('value')) return false;
-  if (typeof action.type !== 'string') return false;
-  if (typeof action.value !== 'string') return false;
-  if (!VALID_ACTION_TYPES.has(action.type)) return false;
+  if (typeof step.type !== 'string') return false;
+  if (!VALID_ACTION_TYPES.has(step.type)) return false;
+  if (typeof step.value !== 'string' || !step.value.trim()) return false;
 
-  if (action.trigger !== undefined) {
-    if (typeof action.trigger !== 'string') return false;
-    if (action.trigger.length === 0) return false;
-    if (action.trigger.length > MAX_TRIGGER_LENGTH) return false;
-    if (hasControlChars(action.trigger)) return false;
-  }
-
-  if (action.type === 'open_url') {
-    if (!action.value.startsWith('http:') && !action.value.startsWith('https:')) {
+  if (step.type === 'open_url') {
+    if (!step.value.startsWith('http:') && !step.value.startsWith('https:')) {
       return false;
     }
-  } else if (action.type === 'open_app' || action.type === 'play_sound') {
-    if (!isSafeFallbackAppName(action.value)) return false;
-  } else if (action.type === 'run_command') {
-    if (action.value.length > 4096) return false;
-    if (hasControlChars(action.value)) return false;
-  } else if (action.type === 'speak') {
-    if (action.value.length > 4096) return false;
-    if (hasControlChars(action.value)) return false;
+  } else if (step.type === 'open_app' || step.type === 'play_sound') {
+    if (!isSafeFallbackAppName(step.value)) return false;
+  } else if (step.type === 'run_command') {
+    if (step.value.length > 4096) return false;
+    if (hasControlChars(step.value)) return false;
+  } else if (step.type === 'speak') {
+    if (step.value.length > 4096) return false;
+    if (hasControlChars(step.value)) return false;
+  }
+
+  return true;
+}
+
+// A single user-defined custom action.
+// Shape: { trigger, actions: [ActionStep] }
+function validateCustomAction(customAction) {
+  if (typeof customAction !== 'object' || customAction === null || Array.isArray(customAction)) return false;
+
+  const allowedKeys = new Set(['trigger', 'actions']);
+  for (const key of Object.keys(customAction)) {
+    if (!allowedKeys.has(key)) return false;
+  }
+
+  if (typeof customAction.trigger !== 'string') return false;
+  if (customAction.trigger.trim().length === 0) return false;
+  if (customAction.trigger.length > MAX_TRIGGER_LENGTH) return false;
+  if (hasControlChars(customAction.trigger)) return false;
+
+  if (!Array.isArray(customAction.actions)) return false;
+  if (customAction.actions.length === 0) return false;
+  if (customAction.actions.length > MAX_ACTION_COUNT_PER_SEQUENCE) return false;
+
+  for (const step of customAction.actions) {
+    if (!validateActionStep(step)) return false;
   }
 
   return true;
@@ -1889,14 +1877,7 @@ function validateCustomActions(actions) {
   if (actions.length > MAX_CUSTOM_ACTIONS) return false;
 
   for (const action of actions) {
-    if (!validateActionObject(action)) return false;
-    if (action.actions) {
-      if (!Array.isArray(action.actions)) return false;
-      if (action.actions.length > MAX_ACTION_COUNT_PER_SEQUENCE) return false;
-      for (const subAction of action.actions) {
-        if (!validateActionObject(subAction)) return false;
-      }
-    }
+    if (!validateCustomAction(action)) return false;
   }
   return true;
 }
@@ -2004,9 +1985,12 @@ ipcMain.handle("set-custom-actions", async (event, actions) => {
     return new Promise((resolve, reject) => {
       // Validate port - must be a valid port number
       const effectivePort = port && Number.isInteger(port) && port > 0 && port <= 65535 ? port : 80;
-      const encodedQuery = encodeURIComponent(query);
-      // Limit query length
-      const safeQuery = query.length > 256 ? query.slice(0, 256) : query;
+      // Limit query length, then build the query from the truncated value
+      const safeQuery =
+        typeof query === 'string'
+          ? query.slice(0, 256)
+          : '';
+      const encodedQuery = encodeURIComponent(safeQuery);
       const urlPath = `/?search=${encodedQuery}&json=1&count=10&path_column=1&sort=date_modified&ascending=0`;
       // Everything Search must remain limited to loopback hosts
       const options = {
@@ -2283,7 +2267,28 @@ ipcMain.on("run-special-command", (event, command) => {
 
 ipcMain.handle("show-open-dialog", async (event, operation) => {
     if (!mainWindow) return;
-    const options = SHOW_DIALOG_OPERATIONS[operation] || SHOW_DIALOG_OPERATIONS.default;
+
+    let options;
+    if (typeof operation === 'string' && operation) {
+      // New-style operation key validated against the allowlist
+      options = SHOW_DIALOG_OPERATIONS[operation] || SHOW_DIALOG_OPERATIONS.default;
+    } else if (operation && typeof operation === 'object' && !Array.isArray(operation)) {
+      // Legacy object form from the pre-context-isolation renderer.
+      // Constrain to safe openFile-only dialogs.
+      options = {
+        properties: Array.isArray(operation.properties)
+          ? operation.properties.filter((p) => p === 'openFile')
+          : ['openFile'],
+        filters: Array.isArray(operation.filters)
+          ? operation.filters.filter(
+              (f) => f && typeof f === 'object' && Array.isArray(f.extensions) && f.extensions.length <= 20
+            )
+          : [],
+      };
+    } else {
+      options = SHOW_DIALOG_OPERATIONS.default;
+    }
+
     const result = await dialog.showOpenDialog(mainWindow, options);
     return result;
   });
@@ -2342,8 +2347,10 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
 
     // Reject creation of a second timer - only one timer is supported
     if (activeTimer) {
-      clearTimeout(activeTimer.timeout);
-      activeTimer = null;
+      return {
+        success: false,
+        error: 'A timer is already running. Cancel it before starting another.'
+      };
     }
 
     const id = ++timerIdCounter;
@@ -2830,9 +2837,11 @@ function createWindow() {
     focusable: true,
     show: false,
     webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: false,
+      nodeIntegration: true,
+      contextIsolation: false,
+      // TODO: Complete context-isolation migration in a dedicated change.
+      // renderer.js currently depends on Node APIs for GIF decoding,
+      // filesystem asset loading, path handling, HTTPS suggestions, and audio cleanup.
     },
   };
 
@@ -2846,10 +2855,6 @@ function createWindow() {
 
   mainWindow = new BrowserWindow({
     ...winOptions,
-    webPreferences: {
-      ...winOptions.webPreferences,
-      preload: path.join(__dirname, 'preload.js'),
-    },
   });
   if (settings.isMovable) {
     mainWindow.setMenu(null);

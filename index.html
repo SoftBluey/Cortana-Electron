@@ -61,6 +61,7 @@
                 <div class="settings-section">
                   <h2>Personalisation</h2>
                   <div id="online-speech-warning"
+                       aria-live="polite"
                        style="display:none; align-items:flex-start; gap:8px; padding:10px 12px;
                               background:rgba(232,168,56,0.12); border:1px solid rgba(232,168,56,0.4);
                               border-radius:0; margin-bottom:12px;">
@@ -236,7 +237,7 @@
                       <label for="everything-port-input">HTTP Port</label>
                       <input type="number" id="everything-port-input" class="settings-text-input" value="80" min="1" max="65535" />
                     </div>
-                    <p class="setting-warning" id="everything-warning" style="display:block; color: #a2a2a2; border: none;">
+                    <p class="setting-warning" id="everything-warning" aria-live="polite" style="display:block; color: #a2a2a2; border: none;">
                       Requires Everything with HTTP server enabled (Tools &gt; Options &gt; HTTP Server).
                     </p>
                   </div>
@@ -372,7 +373,7 @@
                   </div>
                   <div class="setting-item" style="flex-direction:column; align-items:flex-start; gap:6px;">
                     <label>Recent recognition errors</label>
-                    <div id="speech-error-log" style="font-size:12px; opacity:0.85; width:100%;">None</div>
+                    <div id="speech-error-log" aria-live="polite" style="font-size:12px; opacity:0.85; width:100%;">None</div>
                   </div>
                 </div>
                 <div class="settings-section">
