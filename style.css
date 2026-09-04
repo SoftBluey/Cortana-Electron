@@ -12,6 +12,28 @@
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 }
 
+/* Universal Windows 10-style scrollbar: thin, flat, square corners.
+   Do NOT add scrollbar-color/scrollbar-width anywhere alongside these
+   ::-webkit-scrollbar-* rules. Chromium discards the square-corner
+   styling on any element that sets both (intended Chromium behavior). */
+*::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+*::-webkit-scrollbar-track {
+    background: #171717;
+}
+
+*::-webkit-scrollbar-thumb {
+    background-color: #555;
+    border-radius: 0;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+    background-color: #777;
+}
+
 html,
 body {
     background-color: transparent;
@@ -208,6 +230,14 @@ body.slim-mode #search-panel {
     transition: top 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
+/* Widen #content-wrapper to full width while it holds the search results
+   card, so its normal 90%-width/overflow:hidden doesn't clip the card. */
+#content-wrapper:has(.search-results-panel) {
+    width: 100%;
+    left: 0;
+    transform: none;
+}
+
 #results-display {
     color: var(--text-color);
     font-size: 28px;
@@ -310,8 +340,6 @@ body.slim-mode #search-panel {
     overflow-y: auto;
     overflow-x: hidden;
     padding-bottom: 20px;
-    scrollbar-width: thin;
-    scrollbar-color: #555 #171717;
 }
 
 #animation-container.active #results-display {
@@ -367,13 +395,31 @@ body.slim-mode #search-panel {
     text-decoration: underline;
 }
 
+/* White backdrop card for web search results, matching the Windows 10
+   style of the app/file search panel so it visually separates itself
+   from the rest of the (dark) UI. The #content-wrapper:has() rule above
+   already widens the parent to the true full width whenever this card is
+   present, so this just needs to fill that (now full-width) parent. */
+.search-results-panel {
+    background: #FFFFFF;
+    color: #1a1a1a;
+    text-align: left;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 16px 20px;
+}
+
 .search-result-item {
     text-align: left;
     padding: 12px 0;
-    border-bottom: 1px solid #333;
+    border-bottom: 1px solid #e0e0e0;
     overflow: hidden;
     width: 100%;
     box-sizing: border-box;
+}
+
+.search-result-item:last-child {
+    border-bottom: none;
 }
 
 .search-result-title {
@@ -393,7 +439,7 @@ body.slim-mode #search-panel {
 }
 
 .search-result-snippet {
-    color: #ccc;
+    color: #444;
     font-size: 13px;
     margin: 4px 0;
     line-height: 1.4;
@@ -402,7 +448,7 @@ body.slim-mode #search-panel {
 }
 
 .search-result-url {
-    color: #666;
+    color: #767676;
     font-size: 11px;
     overflow: hidden;
     text-overflow: ellipsis;

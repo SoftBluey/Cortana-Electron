@@ -19,7 +19,7 @@ let allPanelItems = [];
 
 let reminderContainer, reminderTextInput, reminderTimeInput, reminderSoundInput, reminderSaveBtn, reminderCancelBtn, reminderSoundBrowseBtn;
 
-let settingsContainer, settingsBtn, settingsBackBtn, voiceSelect, startupToggle, startupWarning, voiceWarning, searchEngineSelect, themeColorPicker, movableToggle, pitchSlider, rateSlider, resetVoiceBtn, resetReminderSoundBtn, resetAllBtn, reminderSoundSettingInput, reminderSoundBrowseSettingBtn, reminderSoundResetSettingBtn;
+let settingsContainer, settingsBtn, settingsBackBtn, voiceSelect, startupToggle, startupWarning, voiceWarning, searchEngineSelect, themeColorPicker, movableToggle, pitchSlider, rateSlider, resetVoiceBtn, resetReminderSoundBtn, resetThemeBtn, resetAllBtn, reminderSoundSettingInput, reminderSoundBrowseSettingBtn, reminderSoundResetSettingBtn;
 let evaVoiceContainer, evaVoiceStatus, installEvaVoiceBtn;
 let ttsEngineSelect, edgeVoiceSelect, edgeVoiceContainer;
 let timeFormatSelect;
@@ -146,7 +146,7 @@ const SPECIAL_ANIMATIONS = [
   { name: 'Minions', start: 'minions_start.gif', loop: 'minions_static.gif' },
   { name: 'Record', start: 'record_start.gif', loop: 'record_loop.gif' },
   { name: 'Rocket', start: 'rocket_start.gif', loop: 'rocket_loop.gif' },
-  { name: 'Space', start: 'space_start.gif', loop: 'space_end.gif' },
+  { name: 'Space', start: 'space_start.gif', loop: 'space_static.gif' },
   { name: 'Star Wars', start: 'starwars_start.gif', loop: 'starwars_static.gif' },
   { name: 'Trophy', start: 'trophy_start.gif', loop: 'trophy_static.gif' },
 ];
@@ -460,7 +460,12 @@ class AnimationManager {
       return;
     }
 
-    await this.renderer.load(path.join(appRoot, file));
+    try {
+      await this.renderer.load(path.join(appRoot, file));
+    } catch (e) {
+      console.warn(`Failed to load animation file ${file}:`, e && e.message);
+      return;
+    }
     if (generation !== this._generation) return;
 
     const isLooping = (
@@ -2242,7 +2247,7 @@ function onSaveCustomAction() {
 }
 
 function saveCustomActions() {
-    ipcRenderer.send('set-custom-actions', customActions);
+    ipcRenderer.invoke('set-custom-actions', customActions);
 }
 
 let savedToastTimer = null;
@@ -2691,11 +2696,17 @@ function speak(text, onSpeechEndCallback) {
 }
 
 let currentEdgeAudio = null;
+let currentEdgeFilePath = null;
 
 function speakEdge(text, onSpeechEndCallback) {
     if (currentEdgeAudio) {
         currentEdgeAudio.pause();
         currentEdgeAudio = null;
+    }
+    // Clean up previous temp file if any
+    if (currentEdgeFilePath) {
+        try { require('fs').unlinkSync(currentEdgeFilePath); } catch(e) {}
+        currentEdgeFilePath = null;
     }
 
     let callbackInvoked = false;
@@ -2716,11 +2727,15 @@ function speakEdge(text, onSpeechEndCallback) {
             invokeCallback();
             return;
         }
+        currentEdgeFilePath = result.filePath;
         const audio = new Audio('file://' + result.filePath.replace(/\\/g, '/'));
         currentEdgeAudio = audio;
         const cleanup = () => {
             currentEdgeAudio = null;
-            try { require('fs').unlinkSync(result.filePath); } catch(e) {}
+            if (currentEdgeFilePath) {
+                try { require('fs').unlinkSync(currentEdgeFilePath); } catch(e) {}
+                currentEdgeFilePath = null;
+            }
         };
         audio.onended = () => {
             cleanup();
@@ -2787,6 +2802,10 @@ function setStateIdle() {
     if (currentEdgeAudio) {
         currentEdgeAudio.pause();
         currentEdgeAudio = null;
+    }
+    if (currentEdgeFilePath) {
+        try { require('fs').unlinkSync(currentEdgeFilePath); } catch(e) {}
+        currentEdgeFilePath = null;
     }
     requestSound.pause();
     requestSound.currentTime = 0;
@@ -2861,6 +2880,10 @@ async function performWebSearch(query) {
     }
     anim.goToState(AnimationState.THINKING);
     resultsDisplay.innerHTML = '';
+
+    // Plain Cortana dialogue line (same class/markup as every other spoken
+    // line elsewhere in the app). No white backdrop while just searching.
+    // The white card only wraps the actual results list, once there is one.
     const loadingP = document.createElement('p');
     loadingP.className = 'fade-in-item';
     loadingP.textContent = `Searching the web for "${query}"...`;
@@ -2874,6 +2897,12 @@ async function performWebSearch(query) {
 
     resultsDisplay.innerHTML = '';
     if (result.success && result.results.length > 0) {
+        // White backdrop card that separates the results list from the rest
+        // of the UI, matching the look of the app/file search panel.
+        const resultsPanel = document.createElement('div');
+        resultsPanel.className = 'search-results-panel fade-in-item';
+        resultsDisplay.appendChild(resultsPanel);
+
         result.results.forEach(r => {
             const item = document.createElement('div');
             item.className = 'search-result-item fade-in-item';
@@ -2894,7 +2923,7 @@ async function performWebSearch(query) {
             item.appendChild(title);
             if (r.snippet) item.appendChild(snippet);
             item.appendChild(url);
-            resultsDisplay.appendChild(item);
+            resultsPanel.appendChild(item);
         });
 
         showWebLink();
@@ -3705,13 +3734,14 @@ function stopTimerPanelInterval() {
 
 function cancelActiveTimer() {
     if (activeTimerId !== null) {
-        ipcRenderer.send('cancel-timer', activeTimerId);
+        ipcRenderer.invoke('cancel-timer', activeTimerId);
         activeTimerId = null;
     }
     if (timerCountdownInterval) {
         clearInterval(timerCountdownInterval);
         timerCountdownInterval = null;
     }
+    stopTimerPanelInterval();
     timerEndTime = null;
     timerDuration = null;
     activeTimerLabel = null;
@@ -4338,6 +4368,7 @@ async function startTimer(value, unit, ms) {
       clearInterval(timerCountdownInterval);
       timerCountdownInterval = null;
     }
+    stopTimerPanelInterval();
 
     const label = `Your ${value} ${unit}${value !== 1 ? 's' : ''} timer is up!`;
     
@@ -4534,6 +4565,11 @@ function onSearch() {
 
 async function executeActionSequence(actions) {
     for (const action of actions) {
+        // Validate action has required fields
+        if (!action || !action.type || !action.value) {
+            console.warn('Skipping invalid action:', action);
+            continue;
+        }
         try {
             switch (action.type) {
                 case 'speak':
@@ -4709,12 +4745,47 @@ function createActionItemUI(action, index, isLastItem) {
     return itemDiv;
 }
 
+function sanitizeActionValue(type, value) {
+    if (typeof value !== 'string') return '';
+    const trimmed = value.trim();
+    
+    switch (type) {
+        case 'speak':
+            // Limit speech text length and remove potentially harmful characters
+            return trimmed.slice(0, 5000);
+        case 'open_app':
+            // Validate path - only allow alphanumeric, spaces, dots, dashes, underscores, backslashes, colons
+            return trimmed.slice(0, 260).replace(/[<>|&^%]/g, '');
+        case 'open_url':
+            // Validate URL
+            try {
+                const url = new URL(trimmed);
+                if (['http:', 'https:'].includes(url.protocol)) {
+                    return url.toString();
+                }
+            } catch (_) {}
+            return '';
+        case 'play_sound':
+            // Allow file paths and URLs
+            return trimmed.slice(0, 260);
+        case 'run_command':
+            // Limit command length and remove dangerous characters
+            return trimmed.slice(0, 4096).replace(/[\x00-\x1F\x7F]/g, '');
+        default:
+            return trimmed.slice(0, 4096);
+    }
+}
+
 function getCurrentActionsFromForm() {
     const actionItems = actionSequenceList.querySelectorAll('.action-item');
-    return Array.from(actionItems).map(item => ({
-        type: item.querySelector('.action-item-type-select').value,
-        value: item.querySelector('.action-item-value-input').value
-    }));
+    return Array.from(actionItems).map(item => {
+        const type = item.querySelector('.action-item-type-select').value;
+        const rawValue = item.querySelector('.action-item-value-input').value;
+        return {
+            type,
+            value: sanitizeActionValue(type, rawValue)
+        };
+    });
 }
 
 function moveAction(index, direction) {
