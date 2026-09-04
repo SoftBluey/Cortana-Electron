@@ -19,7 +19,7 @@ let allPanelItems = [];
 
 let reminderContainer, reminderTextInput, reminderTimeInput, reminderSoundInput, reminderSaveBtn, reminderCancelBtn, reminderSoundBrowseBtn;
 
-let settingsContainer, settingsBtn, settingsBackBtn, voiceSelect, startupToggle, startupWarning, voiceWarning, searchEngineSelect, themeColorPicker, movableToggle, pitchSlider, rateSlider, resetVoiceBtn, resetReminderSoundBtn, resetAllBtn, reminderSoundSettingInput, reminderSoundBrowseSettingBtn, reminderSoundResetSettingBtn;
+let settingsContainer, settingsBtn, settingsBackBtn, voiceSelect, startupToggle, startupWarning, voiceWarning, searchEngineSelect, themeColorPicker, movableToggle, pitchSlider, rateSlider, resetVoiceBtn, resetReminderSoundBtn, resetThemeBtn, resetAllBtn, reminderSoundSettingInput, reminderSoundBrowseSettingBtn, reminderSoundResetSettingBtn;
 let evaVoiceContainer, evaVoiceStatus, installEvaVoiceBtn;
 let ttsEngineSelect, edgeVoiceSelect, edgeVoiceContainer;
 let timeFormatSelect;
@@ -2880,6 +2880,10 @@ async function performWebSearch(query) {
     }
     anim.goToState(AnimationState.THINKING);
     resultsDisplay.innerHTML = '';
+
+    // Plain Cortana dialogue line (same class/markup as every other spoken
+    // line elsewhere in the app) — no white backdrop while just searching.
+    // The white card only wraps the actual results list, once there is one.
     const loadingP = document.createElement('p');
     loadingP.className = 'fade-in-item';
     loadingP.textContent = `Searching the web for "${query}"...`;
@@ -2893,6 +2897,12 @@ async function performWebSearch(query) {
 
     resultsDisplay.innerHTML = '';
     if (result.success && result.results.length > 0) {
+        // White backdrop card that separates the results list from the rest
+        // of the UI, matching the look of the app/file search panel.
+        const resultsPanel = document.createElement('div');
+        resultsPanel.className = 'search-results-panel fade-in-item';
+        resultsDisplay.appendChild(resultsPanel);
+
         result.results.forEach(r => {
             const item = document.createElement('div');
             item.className = 'search-result-item fade-in-item';
@@ -2913,7 +2923,7 @@ async function performWebSearch(query) {
             item.appendChild(title);
             if (r.snippet) item.appendChild(snippet);
             item.appendChild(url);
-            resultsDisplay.appendChild(item);
+            resultsPanel.appendChild(item);
         });
 
         showWebLink();

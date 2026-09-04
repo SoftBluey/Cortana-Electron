@@ -11,6 +11,16 @@ const {
   systemPreferences,
   powerMonitor,
 } = require("electron");
+
+// Belt-and-suspenders: also ask Chromium to keep its older (non-Fluent)
+// native scrollbar renderer as the fallback base layer. The real fix for
+// this app's square/flat scrollbar look lives entirely in style.css (see
+// the notes there) — this app never actually relies on Chromium's native
+// theme for scrollbars, since ::-webkit-scrollbar-* fully overrides it once
+// scrollbar-color/scrollbar-width aren't also set on the same element.
+// Must run before app.whenReady()/any window is created.
+app.commandLine.appendSwitch("disable-features", "FluentScrollbar,FluentOverlayScrollbar");
+
 const path = require("path");
 const https = require("https");
 const http = require("http");
@@ -23,10 +33,26 @@ const { EdgeTTS } = require("node-edge-tts");
 const os = require("os");
 
 let updateAvailable = false;
-const GITHUB_RAW_URL =
-  "https://raw.githubusercontent.com/SoftBluey/Cortana-Electron/refs/heads/main/package.json";
+const GITHUB_RELEASES_API_URL =
+  "https://api.github.com/repos/SoftBluey/Cortana-Electron/releases/latest";
+const GITHUB_RELEASES_PAGE_URL =
+  "https://github.com/SoftBluey/Cortana-Electron/releases";
 
 const APP_ID = "com.blueysoft.cortana-electron";
+
+// Compares two dotted version strings (e.g. "7.2.0" vs "7.10.0").
+// Returns a negative number if `a` < `b`, positive if `a` > `b`, or 0 if equal.
+function compareVersions(a, b) {
+  const partsA = String(a).split(".").map((n) => parseInt(n, 10) || 0);
+  const partsB = String(b).split(".").map((n) => parseInt(n, 10) || 0);
+  const len = Math.max(partsA.length, partsB.length);
+  for (let i = 0; i < len; i++) {
+    const numA = partsA[i] || 0;
+    const numB = partsB[i] || 0;
+    if (numA !== numB) return numA - numB;
+  }
+  return 0;
+}
 
 process.stdout.on('error', (err) => {
   if (err.code === 'EPIPE') { /* ignore broken pipe from WASM debug logs */ }
@@ -40,6 +66,13 @@ let wakeRecognizer = null;
 let wakeRestartTimer = null;
 let wakeRetryAttempt = 0;
 let wakeGeneration = 0;
+// Resolves once the current (or most recently started) wake continuous
+// recognition session has fully wound down — including its onCompleted
+// event, not just the stopAsync() call. Manual speech-start awaits this so
+// a brand-new recognizer never starts capturing audio while the previous
+// wake session's audio graph is still mid-teardown (a real WinRT race that
+// can leave the new recognizer hearing nothing at all).
+let wakeSessionEndedPromise = Promise.resolve();
 
 const speechState = {
   recognizer: null,
@@ -64,6 +97,7 @@ function stopSapiFallback() {
 function startSapiFallback(generation) {
   if (speechState.process || speechState.cancelled) return false;
 
+  console.log('[speech]', `gen=${generation}`, 'SAPI fallback process spawning');
   const scriptPath = app.isPackaged
     ? path.join(process.resourcesPath, 'speech.ps1')
     : path.join(__dirname, 'speech.ps1');
@@ -155,6 +189,7 @@ function startSapiFallback(generation) {
 }
 
 function cancelManualSpeech({ stopFallback = true } = {}) {
+  console.log('[speech]', `gen=${speechState.generation}`, 'cancelManualSpeech: recognizer=' + !!speechState.recognizer + ' queryRecognizer=' + !!speechState.queryRecognizer + ' process=' + !!speechState.process);
   speechState.cancelled = true;
   speechState.generation += 1;
   speechState.starting = false;
@@ -235,6 +270,25 @@ let REMINDERS_FILE;
 let iconPath;
 let assetsPath;
 let onlineSpeechEnabled = false;
+
+// Reads Windows' "Online speech recognition" privacy consent, which the
+// WinRT SpeechRecognizer's open-vocabulary Dictation constraint needs to
+// return real results (it compiles fine without it, but recognizeAsync()
+// then reliably comes back Unknown/Rejected for actual speech). Re-checked
+// fresh on every manual speech-start since the user can flip this setting
+// in Windows Settings at any time while the app is running.
+function checkOnlineSpeechEnabled() {
+  return new Promise((resolve) => {
+    const cmd = `reg query "HKCU\\Software\\Microsoft\\Speech_OneCore\\Settings\\OnlineSpeechPrivacy" /v HasAccepted`;
+    exec(cmd, { timeout: 3000, windowsHide: true }, (error, stdout) => {
+      if (error) {
+        resolve(false);
+        return;
+      }
+      resolve(/HasAccepted\s+REG_DWORD\s+0x1/i.test(stdout || ""));
+    });
+  });
+}
 
 function normalizeAccentColor(raw) {
   if (!raw) return null;
@@ -718,23 +772,40 @@ async function checkForUpdates() {
   try {
     const currentVersion = app.getVersion();
 
+    // Ask GitHub for the latest published release (not just the version
+    // baked into package.json on main) so this reflects real releases.
     const response = await new Promise((resolve, reject) => {
       https
-        .get(GITHUB_RAW_URL, (res) => {
-          if (res.statusCode !== 200) {
-            reject(new Error(`Request failed with status ${res.statusCode}`));
-            return;
-          }
+        .get(
+          GITHUB_RELEASES_API_URL,
+          {
+            headers: {
+              "User-Agent": "Cortana-Electron-Update-Check",
+              Accept: "application/vnd.github+json",
+            },
+          },
+          (res) => {
+            if (res.statusCode !== 200) {
+              reject(new Error(`Request failed with status ${res.statusCode}`));
+              return;
+            }
 
-          let data = "";
-          res.on("data", (chunk) => (data += chunk));
-          res.on("end", () => resolve(data));
-        })
+            let data = "";
+            res.on("data", (chunk) => (data += chunk));
+            res.on("end", () => resolve(data));
+          }
+        )
         .on("error", reject);
     });
 
-    const remotePackage = JSON.parse(response);
-    const remoteVersion = remotePackage.version;
+    const latestRelease = JSON.parse(response);
+    // Release tags are typically prefixed with "v" (e.g. "v7.2.0").
+    const remoteVersion = String(latestRelease.tag_name || "").replace(/^v/i, "");
+    const releaseUrl = latestRelease.html_url || GITHUB_RELEASES_PAGE_URL;
+
+    if (!remoteVersion) {
+      throw new Error("Latest release did not include a version tag");
+    }
 
     updateAvailable = compareVersions(currentVersion, remoteVersion) < 0;
 
@@ -743,10 +814,11 @@ async function checkForUpdates() {
         available: updateAvailable,
         currentVersion,
         remoteVersion,
+        releaseUrl,
       });
     }
 
-    return { available: updateAvailable, currentVersion, remoteVersion };
+    return { available: updateAvailable, currentVersion, remoteVersion, releaseUrl };
   } catch (error) {
     console.error("Failed to check for updates:", error);
     return { available: false, error: error.message };
@@ -857,33 +929,39 @@ if (gotTheLock) {
     args: ["--hidden"],
   })
 
-  onlineSpeechEnabled = await new Promise((resolve) => {
-    const cmd = `reg query "HKCU\\Software\\Microsoft\\Speech_OneCore\\Settings\\OnlineSpeechPrivacy" /v HasAccepted`;
-    exec(cmd, { timeout: 3000, windowsHide: true }, (error, stdout) => {
-      if (error) {
-        resolve(false);
-        return;
-      }
-      resolve(/HasAccepted\s+REG_DWORD\s+0x1/i.test(stdout || ""));
-    });
-  });
+  onlineSpeechEnabled = await checkOnlineSpeechEnabled();
 
   const bindingsPath = app.isPackaged
     ? path.join(__dirname, '.winapp', 'bindings')
     : '#winapp/bindings';
-  let SpeechRecognizer, SpeechRecognitionTopicConstraint, SpeechRecognitionScenario;
+  let SpeechRecognizer, SpeechRecognitionTopicConstraint, SpeechRecognitionScenario, SpeechRecognitionResultStatus;
   let winRTBindingsAvailable = false;
   try {
     const bindings = require(bindingsPath);
     SpeechRecognizer = bindings.SpeechRecognizer;
     SpeechRecognitionTopicConstraint = bindings.SpeechRecognitionTopicConstraint;
     SpeechRecognitionScenario = bindings.SpeechRecognitionScenario;
+    SpeechRecognitionResultStatus = bindings.SpeechRecognitionResultStatus;
     winRTBindingsAvailable = true;
     console.log('[speech] WinRT bindings loaded successfully');
   } catch (err) {
     console.error('[speech] Failed to load WinRT bindings:', err.message);
     winRTBindingsAvailable = false;
   }
+
+  // Readable name for a SpeechRecognitionResultStatus numeric value.
+  // Uses the enum actually exported by the installed bindings (no guessing).
+  const srsNameCache = SpeechRecognitionResultStatus
+    ? Object.keys(SpeechRecognitionResultStatus).reduce((acc, k) => {
+        acc[SpeechRecognitionResultStatus[k]] = k;
+        return acc;
+      }, {})
+    : null;
+  const srsName = (status) => {
+    if (status == null) return 'n/a';
+    const name = srsNameCache && srsNameCache[status];
+    return name ? name : String(status);
+  };
 
   // When WinRT bindings are unavailable, disable Hey Cortana and persist the setting
   if (!winRTBindingsAvailable) {
@@ -913,10 +991,37 @@ if (gotTheLock) {
     speechState.cancelled = false;
     speechState.starting = true;
 
+    const log = (msg, ...a) => console.log('[speech]', `gen=${generation}`, msg, ...a);
+
+    // Per-press guard so we never start SAPI more than once for a single mic press.
+    let fallbackAttempted = false;
+    const trySapiFallback = () => {
+      if (fallbackAttempted) return;
+      fallbackAttempted = true;
+      if (speechState.cancelled || generation !== speechState.generation) return;
+      log('SAPI fallback activated');
+      const started = startSapiFallback(generation);
+      if (!started && !speechState.cancelled && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(
+          'speech-capabilities',
+          { winRTAvailable: false, fallback: 'sapi unavailable' }
+        );
+      }
+    };
+
+    log('speech-start received');
+
     try {
+      // Contention diagnostics: record wake state before tearing it down.
+      const wakeWasActive = !!wakeRecognizer || wakeRunning;
+      if (wakeWasActive) {
+        log('wake contention detected: wakeRecognizer=' + !!wakeRecognizer + ' wakeRunning=' + wakeRunning);
+      }
+
       if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
       if (wakeRecognizer) {
-        try { 
+        log('wake recognizer stop requested');
+        try {
           if (wakeRecognizer.continuousRecognitionSession) {
             try { await wakeRecognizer.continuousRecognitionSession.stopAsync(); } catch (_) {}
           }
@@ -924,12 +1029,31 @@ if (gotTheLock) {
         try { wakeRecognizer.close(); } catch (_) {}
         wakeRecognizer = null;
         wakeRunning = false;
+        log('wake recognizer cleared: wakeRecognizer=' + !!wakeRecognizer + ' wakeRunning=' + wakeRunning);
+      }
+      if (wakeWasActive) {
+        // stopAsync() resolving (above) is not the same signal as the wake
+        // session's own onCompleted event — that event (which fully tears
+        // down its audio capture graph) can arrive noticeably later. Starting
+        // a brand-new SpeechRecognizer before that happens can leave it
+        // fighting the old session for the microphone, so real speech never
+        // reaches it (recognizeAsync then reports Unknown/Rejected every
+        // time, with no error). Wait for the real teardown, capped so a
+        // stuck session can never block the mic press indefinitely.
+        log('waiting for wake session teardown to fully complete');
+        await Promise.race([
+          wakeSessionEndedPromise,
+          new Promise((resolve) => setTimeout(resolve, 1500)),
+        ]);
+        log('wake session teardown wait finished');
+        if (speechState.cancelled || generation !== speechState.generation) return;
       }
       if (speechState.queryRecognizer) {
         try { speechState.queryRecognizer.close(); } catch (_) {}
         speechState.queryRecognizer = null;
       }
       if (speechState.recognizer) {
+        log('recognizer closing (stale)');
         try { speechState.recognizer.close(); } catch (_) {}
         speechState.recognizer = null;
       }
@@ -937,98 +1061,175 @@ if (gotTheLock) {
       // Check if WinRT bindings are available
       if (!SpeechRecognizer || !SpeechRecognitionTopicConstraint || !SpeechRecognitionScenario) {
         // Attempt SAPI fallback for manual voice recognition
-        console.log('[speech] WinRT not available, attempting SAPI fallback');
-        const started = startSapiFallback(generation);
-        if (!started && !speechState.cancelled) {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send(
-              'speech-capabilities',
-              { winRTAvailable: false, fallback: 'sapi unavailable' }
-            );
-          }
-        }
-        // Don't throw - allow SAPI fallback to handle it
-        // If SAPI also fails, the error will be sent in startSapiFallback
+        log('WinRT not available, attempting SAPI fallback');
+        trySapiFallback();
         return;
       }
 
-      try {
-        const recognizer = new SpeechRecognizer();
-        speechState.recognizer = recognizer;
+      // The WinRT Dictation topic constraint used below compiles successfully
+      // even without cloud consent, but the actual recognizeAsync() calls will
+      // then reliably come back Unknown/Rejected for real speech, because the
+      // open-vocabulary dictation language model lives online, not on-device.
+      // Detect that up front instead of burning 3 doomed WinRT retries (each
+      // several seconds) before falling back — go straight to the fully
+      // offline SAPI engine, which does not depend on this setting at all.
+      onlineSpeechEnabled = await checkOnlineSpeechEnabled();
+      if (speechState.cancelled || generation !== speechState.generation) return;
+      if (!onlineSpeechEnabled) {
+        log('online speech recognition not enabled in Windows privacy settings; skipping WinRT dictation, using SAPI fallback');
+        trySapiFallback();
+        return;
+      }
 
-        const constraint = new SpeechRecognitionTopicConstraint(
-          SpeechRecognitionScenario.Dictation, 'dictation');
-        recognizer.constraints.append(constraint);
-        await recognizer.compileConstraintsAsync();
+      const rec = new SpeechRecognizer();
+      speechState.recognizer = rec;
+      log('WinRT recognizer created');
 
-        if (
-          speechState.cancelled ||
-          generation !== speechState.generation
-        ) {
-          try {
-            recognizer.close();
-          } catch (_) {}
+      const constraint = new SpeechRecognitionTopicConstraint(
+        SpeechRecognitionScenario.Dictation, 'dictation');
+      rec.constraints.append(constraint);
+
+      const compile = await rec.compileConstraintsAsync();
+      const compileStatus = compile ? compile.status : null;
+      log('constraints compiled, status=' + compileStatus + ' (' + srsName(compileStatus) + ')');
+
+      if (speechState.cancelled || generation !== speechState.generation) {
+        try { rec.close(); } catch (_) {}
+        if (speechState.recognizer === rec) speechState.recognizer = null;
+        return;
+      }
+
+      if (compileStatus !== SpeechRecognitionResultStatus.Success) {
+        log('COMPILE FAILED status=' + compileStatus + ' (' + srsName(compileStatus) + ')');
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send(
+            'speech-error',
+            'Speech recognition could not be initialized (' + srsName(compileStatus) + ').'
+          );
+        }
+        try { rec.close(); } catch (_) {}
+        if (speechState.recognizer === rec) speechState.recognizer = null;
+        trySapiFallback();
+        return;
+      }
+
+      console.log('[speech] ENGINE:WinRT');
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-ready');
+      log('speech-ready sent');
+
+      // Transient endpoint/engine churn (e.g. the audio stack toggling monitor
+      // endpoints while a capture session opens) can make recognizeAsync return
+      // Unknown/timeout with no text before the engine settles. Retry a few times
+      // on a fresh capture so a momentary pop doesn't silently eat your speech.
+      const TRANSIENT_RETRIES = 3;
+      const RETRY_DELAY_MS = 350;
+
+      let result = null;
+      let status = null;
+      let text = null;
+
+      for (let attempt = 1; attempt <= TRANSIENT_RETRIES; attempt++) {
+        if (speechState.cancelled || generation !== speechState.generation) return;
+
+        if (attempt > 1) {
+          log('retry #' + attempt + ' of ' + TRANSIENT_RETRIES + ' (waiting for audio stack to settle)');
+          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+          if (speechState.cancelled || generation !== speechState.generation) return;
+        }
+
+        log('recognizeAsync begin (attempt ' + attempt + ')');
+        const t0 = Date.now();
+        try {
+          result = await rec.recognizeAsync();
+          log(
+            'recognizeAsync complete (' + (Date.now() - t0) + 'ms) ' +
+            'status=' + (result ? result.status : 'n/a') + ' (' + (result ? srsName(result.status) : 'n/a') + ') ' +
+            'text=' + JSON.stringify(result ? result.text : null) +
+            (result && result.confidence != null ? ' confidence=' + result.confidence : '')
+          );
+        } catch (e) {
+          log('recognizeAsync THREW after ' + (Date.now() - t0) + 'ms: ' + (e && (e.message || e)));
+          throw e;
+        }
+
+        if (speechState.cancelled || generation !== speechState.generation) return;
+
+        status = result ? result.status : null;
+        text = result ? result.text : null;
+
+        // Definitive success: report it.
+        if (status === SpeechRecognitionResultStatus.Success && text) {
+          log('sending valid result: ' + JSON.stringify(text));
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('speech-result', { final: true, text });
+          }
           return;
         }
 
-        console.log('[speech] ENGINE:WinRT');
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-ready');
-
-        const result = await recognizer.recognizeAsync();
-
-        if (
-          speechState.cancelled ||
-          generation !== speechState.generation
-        ) {
-          return;
-        }
-
-        const text = result && result.text;
-        if (text && mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('speech-result', { final: true, text });
-        }
-      } catch (e) {
-        if (
-          speechState.cancelled ||
-          generation !== speechState.generation
-        ) {
-          return;
-        }
-
-        console.error('[speech] WinRT failed, attempting SAPI fallback:', e.message);
-
-        const started = startSapiFallback(generation);
-        if (!started && !speechState.cancelled) {
+        // Definitive, non-transient failures: do NOT retry.
+        if (status === SpeechRecognitionResultStatus.AudioQualityFailure ||
+            status === SpeechRecognitionResultStatus.MicrophoneUnavailable) {
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send(
               'speech-error',
-              'Speech recognition is unavailable. Try restarting the app.'
+              'Your microphone is not available. Make sure one is set as default.'
             );
           }
-        }
-      } finally {
-        if (
-          speechState.recognizer &&
-          generation === speechState.generation
-        ) {
-          try {
-            speechState.recognizer.close();
-          } catch (_) {}
-          speechState.recognizer = null;
+          trySapiFallback();
+          return;
         }
 
-        if (generation === speechState.generation) {
-          speechState.starting = false;
+        if (status === SpeechRecognitionResultStatus.GrammarCompilationFailure ||
+            status === SpeechRecognitionResultStatus.TopicLanguageNotSupported ||
+            status === SpeechRecognitionResultStatus.GrammarLanguageMismatch ||
+            status === SpeechRecognitionResultStatus.NetworkFailure) {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send(
+              'speech-error',
+              'Speech recognition could not complete (' + srsName(status) + ').'
+            );
+          }
+          trySapiFallback();
+          return;
         }
+
+        // Empty Success, Unknown, TimeoutExceeded, PauseLimitExceeded, UserCanceled:
+        // transient if this is just the engine churning on open; retry if attempts remain.
+        log('transient/no-text result (status=' + srsName(status) + ', attempt ' + attempt + ')');
+      }
+
+      // All retries exhausted with no recognised speech.
+      log('no speech after ' + TRANSIENT_RETRIES + ' attempts');
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('speech-error', 'No speech was recognized.');
+      }
+    } catch (e) {
+      if (speechState.cancelled || generation !== speechState.generation) {
+        return;
+      }
+      console.error('[speech] WinRT failed, attempting SAPI fallback:', e.message);
+      trySapiFallback();
+      if (!speechState.process && !speechState.cancelled && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(
+          'speech-error',
+          'Speech recognition is unavailable. Try restarting the app.'
+        );
       }
     } finally {
-      if (speechState.starting && generation === speechState.generation) {
+      if (speechState.recognizer && generation === speechState.generation) {
+        log('recognizer closing');
+        try { speechState.recognizer.close(); } catch (_) {}
+        speechState.recognizer = null;
+      }
+      if (generation === speechState.generation) {
         speechState.starting = false;
       }
+      log('cleanup complete');
     }
   });
 
   ipcMain.on('speech-stop', () => {
+    console.log('[speech]', `gen=${speechState.generation}`, 'speech-stop received');
     cancelManualSpeech({ stopFallback: true });
     if (wakeEnabled && !wakeRunning && !wakeRestartTimer && !isSettingsVisible) {
       wakeRestartTimer = setTimeout(() => {
@@ -1117,6 +1318,7 @@ async function startWakeLoop(backoff = 0) {
 
     let sessionEndedResolve = null;
     const sessionEndedPromise = new Promise(resolve => { sessionEndedResolve = resolve; });
+    wakeSessionEndedPromise = sessionEndedPromise;
 
     try {
       rec = new SpeechRecognizer();
@@ -1205,7 +1407,11 @@ async function startWakeLoop(backoff = 0) {
         // Verify generation token
         if (wakeGeneration !== token) return;
         completionStatus = (args && args.status != null) ? args.status : null;
-        console.warn('[wake] ContinuousRecognitionSession ended (status ' + completionStatus + ')');
+        // args.status is a SpeechRecognitionResultStatus value (same enum as
+        // manual dictation), so name it the same way instead of logging a
+        // bare number — e.g. "5" is UserCanceled, which is a very different
+        // (and diagnostically important) signal than a normal silence timeout.
+        console.warn('[wake] ContinuousRecognitionSession ended (status ' + completionStatus + ' / ' + srsName(completionStatus) + ')');
         wakeRunning = false;
         sessionEndedResolve();
       });
@@ -1305,15 +1511,27 @@ async function startWakeLoop(backoff = 0) {
     }
   });
 
-  ipcMain.on("set-settings-visibility", (event, visible) => {
+  ipcMain.on("set-settings-visibility", async (event, visible) => {
     isSettingsVisible = visible;
     if (visible) {
       cancelManualSpeech({ stopFallback: true });
       if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
-if (wakeRecognizer) {
+      if (wakeRecognizer) {
         wakeRunning = false;
-        try { wakeRecognizer.close(); } catch (_) {}
-        wakeRecognizer = null;
+        // Closing a WinRT recognizer while its continuous recognition
+        // session is still actively capturing forces a synchronous native
+        // teardown that can briefly block the main thread (felt as the app
+        // freezing for a moment, sometimes with an audible audio glitch).
+        // Stop the session first, the same way manual speech-start already
+        // does, instead of calling close() directly on a live session.
+        const recToClose = wakeRecognizer;
+        try {
+          if (recToClose.continuousRecognitionSession) {
+            try { await recToClose.continuousRecognitionSession.stopAsync(); } catch (_) {}
+          }
+        } catch (_) {}
+        try { recToClose.close(); } catch (_) {}
+        if (wakeRecognizer === recToClose) wakeRecognizer = null;
       }
       stopSapiFallback();
       if (mainWindow && !mainWindow.isDestroyed()) {
@@ -2488,9 +2706,7 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
   });
 
   ipcMain.on("open-github-releases", () => {
-    shell.openExternal(
-      "https://github.com/SoftBluey/Cortana-Electron/releases"
-    );
+    shell.openExternal(GITHUB_RELEASES_PAGE_URL);
   });
 
   ipcMain.handle("eva-voice-status", () => {
@@ -2839,6 +3055,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
+      preload: path.join(__dirname, "preload.js"),
       // TODO: Complete context-isolation migration in a dedicated change.
       // renderer.js currently depends on Node APIs for GIF decoding,
       // filesystem asset loading, path handling, HTTPS suggestions, and audio cleanup.
