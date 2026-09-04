@@ -1,0 +1,14 @@
+﻿name: Discord Notifications
+
+on:
+  push:
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mrrobotdotapp/classic-discord-webhook@main
+        with:
+          id: ${{ secrets.DISCORD_WEBHOOK_ID }}
+          token: ${{ secrets.DISCORD_WEBHOOK_TOKEN }}
