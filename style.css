@@ -12,20 +12,10 @@
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 }
 
-/* Universal Windows 10-style scrollbar: thin, flat, square (no rounded
-   corners), matching the classic look instead of the modern rounded
-   scrollbars newer Windows versions/browsers default to. Acts as the
-   baseline for every scrollable element; specific selectors elsewhere
-   in this file may still override colors for particular contexts.
-   Deliberately does NOT set scrollbar-color/scrollbar-width: Chromium
-   treats those standard properties and the ::-webkit-scrollbar-* pseudo
-   elements below as two competing, incompatible styling systems, and
-   silently discards every ::-webkit-scrollbar-* rule (including the
-   square corners this whole block exists for) on any element that also
-   has scrollbar-color/scrollbar-width set — confirmed as Chromium's own
-   intended behavior, not a bug that will ever be fixed. Using only the
-   ::-webkit-scrollbar-* pseudo-elements is what actually keeps the
-   classic flat/square look in Electron's Chromium. */
+/* Universal Windows 10-style scrollbar: thin, flat, square corners.
+   Do NOT add scrollbar-color/scrollbar-width anywhere alongside these
+   ::-webkit-scrollbar-* rules — Chromium discards the square-corner
+   styling on any element that sets both (intended Chromium behavior). */
 *::-webkit-scrollbar {
     width: 6px;
     height: 6px;
@@ -240,12 +230,8 @@ body.slim-mode #search-panel {
     transition: top 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
-/* #content-wrapper's own 90%-width + overflow:hidden is right for normal
-   centered Cortana dialogue text, but it clips anything a child tries to
-   widen itself past 100% of that already-narrowed box — no amount of width/
-   margin on .search-results-panel alone can escape it. Instead, widen
-   #content-wrapper itself back out to the true full width whenever it
-   currently holds the search results card, so the card is never clipped. */
+/* Widen #content-wrapper to full width while it holds the search results
+   card, so its normal 90%-width/overflow:hidden doesn't clip the card. */
 #content-wrapper:has(.search-results-panel) {
     width: 100%;
     left: 0;
@@ -354,11 +340,6 @@ body.slim-mode #search-panel {
     overflow-y: auto;
     overflow-x: hidden;
     padding-bottom: 20px;
-    /* No scrollbar-color/scrollbar-width here — see the note above the
-       universal ::-webkit-scrollbar-* rules for why mixing the two
-       systems on the same element makes Chromium discard the square
-       ::-webkit-scrollbar-thumb styling below and fall back to its own
-       native (rounded) rendering. */
 }
 
 #animation-container.active #results-display {

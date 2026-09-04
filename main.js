@@ -12,13 +12,8 @@ const {
   powerMonitor,
 } = require("electron");
 
-// Belt-and-suspenders: also ask Chromium to keep its older (non-Fluent)
-// native scrollbar renderer as the fallback base layer. The real fix for
-// this app's square/flat scrollbar look lives entirely in style.css (see
-// the notes there) — this app never actually relies on Chromium's native
-// theme for scrollbars, since ::-webkit-scrollbar-* fully overrides it once
-// scrollbar-color/scrollbar-width aren't also set on the same element.
-// Must run before app.whenReady()/any window is created.
+// Keep Chromium's classic (non-Fluent) scrollbar renderer. Must run before
+// app.whenReady()/any window is created.
 app.commandLine.appendSwitch("disable-features", "FluentScrollbar,FluentOverlayScrollbar");
 
 const path = require("path");
@@ -40,8 +35,7 @@ const GITHUB_RELEASES_PAGE_URL =
 
 const APP_ID = "com.blueysoft.cortana-electron";
 
-// Compares two dotted version strings (e.g. "7.2.0" vs "7.10.0").
-// Returns a negative number if `a` < `b`, positive if `a` > `b`, or 0 if equal.
+// Compares two dotted version strings, e.g. "7.2.0" vs "7.10.0".
 function compareVersions(a, b) {
   const partsA = String(a).split(".").map((n) => parseInt(n, 10) || 0);
   const partsB = String(b).split(".").map((n) => parseInt(n, 10) || 0);
@@ -66,12 +60,10 @@ let wakeRecognizer = null;
 let wakeRestartTimer = null;
 let wakeRetryAttempt = 0;
 let wakeGeneration = 0;
-// Resolves once the current (or most recently started) wake continuous
-// recognition session has fully wound down — including its onCompleted
-// event, not just the stopAsync() call. Manual speech-start awaits this so
-// a brand-new recognizer never starts capturing audio while the previous
-// wake session's audio graph is still mid-teardown (a real WinRT race that
-// can leave the new recognizer hearing nothing at all).
+// Resolves once the current wake session's onCompleted event has fired
+// (not just when stopAsync() resolves). Manual speech-start awaits this
+// before creating a new recognizer, avoiding contention with a wake
+// session still mid-teardown.
 let wakeSessionEndedPromise = Promise.resolve();
 
 const speechState = {
@@ -271,12 +263,8 @@ let iconPath;
 let assetsPath;
 let onlineSpeechEnabled = false;
 
-// Reads Windows' "Online speech recognition" privacy consent, which the
-// WinRT SpeechRecognizer's open-vocabulary Dictation constraint needs to
-// return real results (it compiles fine without it, but recognizeAsync()
-// then reliably comes back Unknown/Rejected for actual speech). Re-checked
-// fresh on every manual speech-start since the user can flip this setting
-// in Windows Settings at any time while the app is running.
+// Reads Windows' "Online speech recognition" privacy consent. Re-checked
+// fresh on every manual speech-start since it can change while the app runs.
 function checkOnlineSpeechEnabled() {
   return new Promise((resolve) => {
     const cmd = `reg query "HKCU\\Software\\Microsoft\\Speech_OneCore\\Settings\\OnlineSpeechPrivacy" /v HasAccepted`;
@@ -1032,14 +1020,9 @@ if (gotTheLock) {
         log('wake recognizer cleared: wakeRecognizer=' + !!wakeRecognizer + ' wakeRunning=' + wakeRunning);
       }
       if (wakeWasActive) {
-        // stopAsync() resolving (above) is not the same signal as the wake
-        // session's own onCompleted event — that event (which fully tears
-        // down its audio capture graph) can arrive noticeably later. Starting
-        // a brand-new SpeechRecognizer before that happens can leave it
-        // fighting the old session for the microphone, so real speech never
-        // reaches it (recognizeAsync then reports Unknown/Rejected every
-        // time, with no error). Wait for the real teardown, capped so a
-        // stuck session can never block the mic press indefinitely.
+        // Wait for the wake session's real teardown (onCompleted), not just
+        // stopAsync() resolving, so a new recognizer doesn't contend with it
+        // for the microphone. Capped so a stuck session can't block the mic.
         log('waiting for wake session teardown to fully complete');
         await Promise.race([
           wakeSessionEndedPromise,
@@ -1066,13 +1049,8 @@ if (gotTheLock) {
         return;
       }
 
-      // The WinRT Dictation topic constraint used below compiles successfully
-      // even without cloud consent, but the actual recognizeAsync() calls will
-      // then reliably come back Unknown/Rejected for real speech, because the
-      // open-vocabulary dictation language model lives online, not on-device.
-      // Detect that up front instead of burning 3 doomed WinRT retries (each
-      // several seconds) before falling back — go straight to the fully
-      // offline SAPI engine, which does not depend on this setting at all.
+      // Skip straight to SAPI if online speech consent is off, rather than
+      // burning 3 doomed WinRT retries first.
       onlineSpeechEnabled = await checkOnlineSpeechEnabled();
       if (speechState.cancelled || generation !== speechState.generation) return;
       if (!onlineSpeechEnabled) {
@@ -1407,10 +1385,6 @@ async function startWakeLoop(backoff = 0) {
         // Verify generation token
         if (wakeGeneration !== token) return;
         completionStatus = (args && args.status != null) ? args.status : null;
-        // args.status is a SpeechRecognitionResultStatus value (same enum as
-        // manual dictation), so name it the same way instead of logging a
-        // bare number — e.g. "5" is UserCanceled, which is a very different
-        // (and diagnostically important) signal than a normal silence timeout.
         console.warn('[wake] ContinuousRecognitionSession ended (status ' + completionStatus + ' / ' + srsName(completionStatus) + ')');
         wakeRunning = false;
         sessionEndedResolve();
@@ -1518,12 +1492,8 @@ async function startWakeLoop(backoff = 0) {
       if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
       if (wakeRecognizer) {
         wakeRunning = false;
-        // Closing a WinRT recognizer while its continuous recognition
-        // session is still actively capturing forces a synchronous native
-        // teardown that can briefly block the main thread (felt as the app
-        // freezing for a moment, sometimes with an audible audio glitch).
-        // Stop the session first, the same way manual speech-start already
-        // does, instead of calling close() directly on a live session.
+        // Stop the session before closing, same as manual speech-start —
+        // closing a live session directly can briefly block the main thread.
         const recToClose = wakeRecognizer;
         try {
           if (recToClose.continuousRecognitionSession) {
