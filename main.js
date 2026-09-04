@@ -28,10 +28,12 @@ const { EdgeTTS } = require("node-edge-tts");
 const os = require("os");
 
 let updateAvailable = false;
+let updateCheckInterval = null;
 const GITHUB_RELEASES_API_URL =
   "https://api.github.com/repos/SoftBluey/Cortana-Electron/releases/latest";
 const GITHUB_RELEASES_PAGE_URL =
   "https://github.com/SoftBluey/Cortana-Electron/releases";
+const UPDATE_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000;
 
 const APP_ID = "com.blueysoft.cortana-electron";
 
@@ -762,8 +764,11 @@ async function checkForUpdates() {
 
     // Ask GitHub for the latest published release (not just the version
     // baked into package.json on main) so this reflects real releases.
+    // /releases/latest only ever returns a full, non-draft, non-prerelease
+    // release, so an in-progress dev/prerelease build on GitHub is never
+    // mistaken for "the update to install".
     const response = await new Promise((resolve, reject) => {
-      https
+      const req = https
         .get(
           GITHUB_RELEASES_API_URL,
           {
@@ -784,10 +789,13 @@ async function checkForUpdates() {
           }
         )
         .on("error", reject);
+      req.setTimeout(10000, () => {
+        req.destroy(new Error("Request timed out"));
+      });
     });
 
     const latestRelease = JSON.parse(response);
-    // Release tags are typically prefixed with "v" (e.g. "v7.2.0").
+    // Release tags in this project are always prefixed with "v" (e.g. "v7.2.1").
     const remoteVersion = String(latestRelease.tag_name || "").replace(/^v/i, "");
     const releaseUrl = latestRelease.html_url || GITHUB_RELEASES_PAGE_URL;
 
@@ -1460,6 +1468,11 @@ async function startWakeLoop(backoff = 0) {
       clearTimeout(wakeRestartTimer);
       wakeRestartTimer = null;
     }
+    // Clear the periodic update check
+    if (updateCheckInterval) {
+      clearInterval(updateCheckInterval);
+      updateCheckInterval = null;
+    }
     // Stop and close the recognizer/session
     if (wakeRecognizer) {
       if (wakeRecognizer.continuousRecognitionSession) {
@@ -1492,8 +1505,8 @@ async function startWakeLoop(backoff = 0) {
       if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
       if (wakeRecognizer) {
         wakeRunning = false;
-        // Stop the session before closing, same as manual speech-start —
-        // closing a live session directly can briefly block the main thread.
+        // Stop the session before closing, same as manual speech-start.
+        // Closing a live session directly can briefly block the main thread.
         const recToClose = wakeRecognizer;
         try {
           if (recToClose.continuousRecognitionSession) {
@@ -1523,6 +1536,16 @@ async function startWakeLoop(backoff = 0) {
   }
 
   sendAppVersion();
+
+  // Check for updates once shortly after launch, then periodically while
+  // the app stays open, so a long-running session still notices a new
+  // release without needing a full restart.
+  setTimeout(() => {
+    checkForUpdates();
+  }, 5000);
+  updateCheckInterval = setInterval(() => {
+    checkForUpdates();
+  }, UPDATE_CHECK_INTERVAL_MS);
 });
 }
 

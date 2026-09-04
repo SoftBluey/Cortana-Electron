@@ -2882,7 +2882,7 @@ async function performWebSearch(query) {
     resultsDisplay.innerHTML = '';
 
     // Plain Cortana dialogue line (same class/markup as every other spoken
-    // line elsewhere in the app) — no white backdrop while just searching.
+    // line elsewhere in the app). No white backdrop while just searching.
     // The white card only wraps the actual results list, once there is one.
     const loadingP = document.createElement('p');
     loadingP.className = 'fade-in-item';

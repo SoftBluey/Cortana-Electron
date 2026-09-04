@@ -14,7 +14,7 @@
 
 /* Universal Windows 10-style scrollbar: thin, flat, square corners.
    Do NOT add scrollbar-color/scrollbar-width anywhere alongside these
-   ::-webkit-scrollbar-* rules — Chromium discards the square-corner
+   ::-webkit-scrollbar-* rules. Chromium discards the square-corner
    styling on any element that sets both (intended Chromium behavior). */
 *::-webkit-scrollbar {
     width: 6px;
