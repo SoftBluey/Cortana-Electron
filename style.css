@@ -75,7 +75,7 @@ body.movable-mode #app-container {
 
 body.slim-mode #app-container {
     height: 220px;
-    transition: height 0.3s ease;
+    transition: transform 0.35s cubic-bezier(0.1, 0.9, 0.2, 1), opacity 0.35s cubic-bezier(0.1, 0.9, 0.2, 1), height 0.3s ease;
     overflow: visible;
 }
 body.slim-mode .main-container {
@@ -261,11 +261,9 @@ body.slim-mode #search-panel {
 @keyframes fadeIn {
     from {
         opacity: 0;
-        transform: translateY(10px);
     }
     to {
         opacity: 1;
-        transform: translateY(0);
     }
 }
 
@@ -284,7 +282,7 @@ body.slim-mode #search-panel {
 }
 
 .fade-in-item {
-    animation: fadeIn 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+    animation: fadeIn 0.15s linear forwards;
     opacity: 0;
 }
 
@@ -300,6 +298,14 @@ body.slim-mode #search-panel {
     width: 85%;
     text-align: center;
     line-height: 1.4;
+}
+/* Choices are immediately readable, without staggered entrances. */
+.choice-button.fade-in-item {
+    animation: none;
+    opacity: 1;
+}
+.choice-button:disabled {
+    cursor: default;
 }
 .choice-button:hover {
     filter: brightness(1.12);

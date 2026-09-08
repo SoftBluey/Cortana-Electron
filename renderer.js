@@ -859,21 +859,31 @@ window.addEventListener('DOMContentLoaded', async () => {
     anim = new AnimationManager(circleCanvas);
     await anim.init();
 
+    let cancelWindowClose = null;
+    function revealAppContainer() {
+        if (cancelWindowClose) cancelWindowClose();
+        if (!appContainer.classList.contains('visible')) {
+            // Establish the hidden position before starting the existing slide.
+            void appContainer.offsetWidth;
+            appContainer.classList.add('visible');
+        }
+    }
+
     let entranceReceived = false;
     ipcRenderer.on('trigger-enter-animation', (event, { timeSinceHidden }) => {
         if (wakeTriggered) {
             wakeTriggered = false;
-            appContainer.classList.add('visible');
+            revealAppContainer();
             startSpeechUI();
             return;
         }
         if (speechActive || document.body.classList.contains('slim-mode')) {
-            appContainer.classList.add('visible');
+            revealAppContainer();
             return;
         }
         closeSettings(true);
         entranceReceived = true;
-        appContainer.classList.add('visible');
+        revealAppContainer();
         const state = timeSinceHidden > 5000
             ? AnimationState.ENTRANCE
             : AnimationState.RESUME;
@@ -1216,7 +1226,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
 
     ipcRenderer.on('wake-slim', () => {
-        appContainer.classList.add('visible');
+        revealAppContainer();
         wakeTriggered = true;
         if (settingsContainer.classList.contains('visible')) return;
         document.body.classList.add('slim-mode');
@@ -1419,18 +1429,32 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
 
     ipcRenderer.on('go-idle-and-close', () => {
-        if (!appContainer.classList.contains('visible')) return;
+        if (cancelWindowClose) return;
         if (speechActive) stopSpeechRecognition();
 
-        const onAnimationEnd = () => {
+        let fallback;
+        const cleanup = () => {
+            clearTimeout(fallback);
+            appContainer.removeEventListener('transitionend', onTransitionEnd);
+            cancelWindowClose = null;
+        };
+        const finish = () => {
+            if (cancelWindowClose !== cleanup) return;
+            cleanup();
             if (!appContainer.classList.contains('visible')) {
                 ipcRenderer.send('hide-window');
                 setStateIdle();
             }
         };
+        const onTransitionEnd = event => {
+            if (event.target === appContainer && event.propertyName === 'transform') finish();
+        };
 
-        appContainer.addEventListener('transitionend', onAnimationEnd, { once: true });
+        cancelWindowClose = cleanup;
+        appContainer.addEventListener('transitionend', onTransitionEnd);
         appContainer.classList.remove('visible');
+        // No event is guaranteed when closing before first paint or in movable mode.
+        fallback = setTimeout(finish, 450);
     });
 
     ipcRenderer.on('command-failed', (event, { command }) => {
@@ -1517,7 +1541,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     animationContainer.className = 'idle';
     if (!entranceReceived) {
-        appContainer.classList.add('visible');
+        revealAppContainer();
         anim.goToState(AnimationState.ENTRANCE);
     }
 
@@ -1607,7 +1631,7 @@ async function generateCategorizedResults(query) {
                 setStateActive();
                 resultsDisplay.innerHTML = '';
                 if (matchedSkill) {
-                    processQuery(query);
+                    executeAssistantSkill(matchedSkill);
                 } else {
                     matchedCommand.handler(lowerQuery.match(matchedCommand.regex));
                 }
@@ -2632,9 +2656,8 @@ function displayAndSpeak(text, callback, options = {}, isError = false) {
                     isBusy = false;
                     searchBar.disabled = false;
                     searchBar.placeholder = 'Type here to search';
-                    if (anim.state === AnimationState.ERROR || anim.state === AnimationState.TRANSITION_TO_IDLE) {
-                        anim.goToState(AnimationState.TRANSITION_TO_IDLE);
-                    }
+                    // AnimationManager already advances ERROR through the idle transition.
+                    // Restarting it here can replay the transition when speech finishes.
                 });
             }, 500);
         };
@@ -3018,11 +3041,10 @@ function presentAssistantResponse(response) {
     };
     displayAndSpeak(text, onFinished, { showWebLink }, isError);
     if (choices.length > 0) resultsDisplay.firstChild.style.marginBottom = '10px';
-    choices.forEach((choice, index) => {
+    choices.forEach(choice => {
         const button = document.createElement('button');
         button.textContent = choice.label;
         button.className = 'choice-button fade-in-item';
-        button.style.animationDelay = `${index * 100}ms`;
         button.disabled = !finished;
         button.onclick = () => {
             if (button.disabled || !button.isConnected) return;
@@ -3706,7 +3728,6 @@ async function handleOpenApplication(appName, silent = false) {
             const btn = document.createElement('button');
             btn.textContent = app.name;
             btn.className = 'choice-button fade-in-item';
-            btn.style.animationDelay = `${index * 100}ms`;
             btn.onclick = () => {
                 ipcRenderer.send('open-path', app.path);
                 displayAndSpeak(`Opening ${app.name}...`, onActionFinished, {}, false);
