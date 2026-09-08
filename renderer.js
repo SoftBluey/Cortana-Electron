@@ -1592,9 +1592,10 @@ async function generateCategorizedResults(query) {
 
     const cortanaItems = [];
 
+    const matchedSkill = matchAssistantSkill(lowerQuery);
     const matchedCommand = commands.find(c => lowerQuery.match(c.regex));
 
-    if (matchedCommand) {
+    if (matchedSkill || matchedCommand) {
         cortanaItems.push({
             type: 'cortana',
             title: `Execute "${query}"`,
@@ -1605,7 +1606,11 @@ async function generateCategorizedResults(query) {
                 isBusy = true;
                 setStateActive();
                 resultsDisplay.innerHTML = '';
-                matchedCommand.handler(lowerQuery.match(matchedCommand.regex));
+                if (matchedSkill) {
+                    processQuery(query);
+                } else {
+                    matchedCommand.handler(lowerQuery.match(matchedCommand.regex));
+                }
             }
         });
     }
@@ -2984,7 +2989,101 @@ function showWebLink() {
     }, 200);
 }
 
-function calculate(query) {
+function isNonEmptyString(value) {
+    return typeof value === 'string' && value.trim().length > 0;
+}
+
+function createAssistantResponse(text, { isError = false, showWebLink = false, choices } = {}) {
+    if (!isNonEmptyString(text)) throw new Error('Assistant response requires text');
+    const response = { text, isError: isError === true, showWebLink: showWebLink === true };
+    if (!response.isError && Array.isArray(choices)) {
+        const validChoices = choices
+            .filter(choice => choice && isNonEmptyString(choice.label) && isNonEmptyString(choice.query))
+            .map(({ label, query }) => ({ label, query }));
+        if (validChoices.length > 0) response.choices = validChoices;
+    }
+    return response;
+}
+
+function presentAssistantResponse(response) {
+    const { text, isError, showWebLink, choices = [] } = createAssistantResponse(response.text, response);
+    const buttons = [];
+    let finished = false;
+    // TTS can finish synchronously when no system voice is available.
+    const onFinished = () => {
+        if (finished) return;
+        finished = true;
+        onActionFinished();
+        buttons.forEach(button => { button.disabled = false; });
+    };
+    displayAndSpeak(text, onFinished, { showWebLink }, isError);
+    if (choices.length > 0) resultsDisplay.firstChild.style.marginBottom = '10px';
+    choices.forEach((choice, index) => {
+        const button = document.createElement('button');
+        button.textContent = choice.label;
+        button.className = 'choice-button fade-in-item';
+        button.style.animationDelay = `${index * 100}ms`;
+        button.disabled = !finished;
+        button.onclick = () => {
+            if (button.disabled || !button.isConnected) return;
+            buttons.forEach(item => { item.disabled = true; });
+            lastQuery = choice.query;
+            isBusy = true;
+            setStateActive();
+            processQuery(choice.query);
+        };
+        buttons.push(button);
+        resultsDisplay.appendChild(button);
+    });
+}
+
+const assistantSkills = [
+    {
+        match(query) {
+            const locationMatch = query.match(/(?:what's|what is) the time (?:in|for|at) (.+)/i);
+            if (locationMatch) return { kind: 'location', location: locationMatch[1] };
+            if (/what(?:'s| is) the time|what time is it/i.test(query)) return { kind: 'local' };
+            return null;
+        },
+        execute(context) {
+            return context.kind === 'location' ? getLocationTimeResponse(context.location) : getLocalTimeResponse();
+        }
+    },
+    {
+        match(query) {
+            const prefixedMatch = query.match(/^(?:what is|calculate|compute) ([\d\s\.\+\-\*\/(),]+)\??$/i);
+            if (prefixedMatch) return { expression: prefixedMatch[1] };
+            const bareMatch = query.match(/^[\d\s\.\+\-\*\/(),]+$/);
+            return bareMatch ? { expression: bareMatch[0] } : null;
+        },
+        execute({ expression }) {
+            return calculateResponse(expression);
+        }
+    }
+];
+
+function matchAssistantSkill(query) {
+    // Time patterns are unanchored: do not steal existing reminder/weather requests.
+    if (priorityCommands.some(command => command.regex.test(query))) return null;
+    for (const skill of assistantSkills) {
+        const context = skill.match(query);
+        if (context) return { skill, context };
+    }
+    return null;
+}
+
+async function executeAssistantSkill({ skill, context }) {
+    try {
+        const response = skill.execute(context);
+        // Keep synchronous skills synchronous, including their presentation.
+        presentAssistantResponse(response instanceof Promise ? await response : response);
+    } catch (error) {
+        console.error('Assistant skill failed:', error);
+        presentAssistantResponse(createAssistantResponse("Sorry, something went wrong. Try again in a little bit.", { isError: true }));
+    }
+}
+
+function calculateResponse(query) {
     let responseText;
     try {
         // Remove any spaces and validate the expression only contains numbers, operators, parentheses, and decimals
@@ -3087,10 +3186,10 @@ function calculate(query) {
         }
         
         responseText = `The answer is ${result}.`;
-        displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, false);
+        return createAssistantResponse(responseText, { showWebLink: true });
     } catch (error) {
         responseText = "That doesn't look like a valid calculation.";
-        displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, true);
+        return createAssistantResponse(responseText, { showWebLink: true, isError: true });
     }
 }
 
@@ -3177,52 +3276,36 @@ function getWeatherDescription(code) {
     return descriptions[code] || 'unknown conditions';
 }
 
-async function getTimeForLocation(rawInput) {
-    let text;
+async function getLocationTimeResponse(rawInput) {
     try {
         const result = await ipcRenderer.invoke('get-time-for-location', rawInput.trim(), timeFormat);
-
         if (result.ambiguous) {
-            text = "I found a few places with that name. Which one did you mean?";
-            
-            resultsDisplay.innerHTML = '';
-            const p = document.createElement('p');
-            p.className = 'fade-in-item';
-            p.style.marginBottom = '10px';
-            p.textContent = text;
-            resultsDisplay.appendChild(p);
-
-            result.options.forEach((option, index) => {
-                const label = option.province ? `${option.city}, ${option.province}, ${option.country}` : `${option.city}, ${option.country}`;
-                const btn = document.createElement('button');
-                btn.textContent = label;
-                btn.className = 'choice-button fade-in-item';
-                btn.style.animationDelay = `${index * 100}ms`;
-                btn.onclick = () => {
-                    processQuery(`what is the time in ${option.fullQuery}`);
-                };
-                resultsDisplay.appendChild(btn);
+            const choices = (Array.isArray(result.options) ? result.options : [])
+                .filter(option => option &&
+                    [option.city, option.country, option.fullQuery].every(isNonEmptyString) &&
+                    (option.province == null || typeof option.province === 'string'))
+                .map(option => ({
+                    label: option.province ? `${option.city}, ${option.province}, ${option.country}` : `${option.city}, ${option.country}`,
+                    query: `what is the time in ${option.fullQuery}`
+                }));
+            if (choices.length === 0) throw new Error('No usable location choices');
+            return createAssistantResponse("I found a few places with that name. Which one did you mean?", {
+                showWebLink: true,
+                choices
             });
-
-            anim.goToState(AnimationState.SPEAKING_BEGIN);
-            speak(text, onActionFinished);
-            showWebLink();
-
-        } else {
-            text = `The time in ${result.city}, ${result.country} is ${result.time}.`;
-            displayAndSpeak(text, onActionFinished, { showWebLink: true }, false);
         }
-
+        return createAssistantResponse(`The time in ${result.city}, ${result.country} is ${result.time}.`, { showWebLink: true });
     } catch (error) {
-        text = `Sorry, I couldn't find the time for '${rawInput.trim()}'. Please try a more specific city name.`;
-        displayAndSpeak(text, onActionFinished, { showWebLink: true }, true);
+        return createAssistantResponse(`Sorry, I couldn't find the time for '${rawInput.trim()}'. Please try a more specific city name.`, {
+            showWebLink: true,
+            isError: true
+        });
     }
 }
 
-function getLocalTime() {
+function getLocalTimeResponse() {
     const now = new Date();
-    const text = `The local time is ${now.toLocaleTimeString([], formatTimeOptions())}`;
-    displayAndSpeak(text, onActionFinished, { showWebLink: true }, false);
+    return createAssistantResponse(`The local time is ${now.toLocaleTimeString([], formatTimeOptions())}`, { showWebLink: true });
 }
 
 function getDate() {
@@ -3838,7 +3921,7 @@ function showTimersPanel() {
     speak(`You have a timer running: ${activeTimerLabel || 'timer'}.`, finishPanelSpeech);
 }
 
-const commands = [
+const priorityCommands = [
     {
         regex: /^(drum ?roll)(,)?( please)?(!|\.|\?)?$/i,
         handler: () => {
@@ -3900,34 +3983,14 @@ const commands = [
             getWeather(match[1].trim());
         }
     },
-    {
-        regex: /(?:what's|what is) the time (?:in|for|at) (.+)/i,
-        handler: (match) => {
-            getTimeForLocation(match[1]);
-        }
-    },
-    {
-        regex: /what(?:'s| is) the time|what time is it/i,
-        handler: () => {
-            getLocalTime();
-        }
-    },
+];
+
+const commands = [
+    ...priorityCommands,
     {
         regex: /(?:what's|what is) (?:the date|today's date)|what day is it|what's today/i,
         handler: () => {
             getDate();
-        }
-    },
-    {
-        regex: /^(?:what is|calculate|compute) ([\d\s\.\+\-\*\/(),]+)\??$/i,
-        handler: (match) => {
-            calculate(match[1]);
-        }
-    },
-    {
-        regex: /^[\d\s\.\+\-\*\/(),]+$/,
-        handler: (match) => {
-            calculate(match[0]);
         }
     },
     {
@@ -4338,6 +4401,8 @@ function wouldCommandMatch(text) {
     });
     if (customAction) return true;
     
+    if (matchAssistantSkill(lowerText)) return true;
+
     // Check if it matches any built-in command
     for (const command of commands) {
         if (lowerText.match(command.regex)) {
@@ -4510,6 +4575,12 @@ function processQuery(query) {
     });
     if (customAction && customAction.actions.length > 0) {
         executeActionSequence(customAction.actions);
+        return;
+    }
+
+    const matchedSkill = matchAssistantSkill(lowerCaseQuery);
+    if (matchedSkill) {
+        executeAssistantSkill(matchedSkill);
         return;
     }
 
