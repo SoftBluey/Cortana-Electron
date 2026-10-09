@@ -22,6 +22,8 @@ const https = require("https");
 const http = require("http");
 const crypto = require("crypto");
 const { exec, execFile, spawn, execSync } = require("child_process");
+const animations = require('./lib/animation-loader').createAnimationLoader();
+app.on('will-quit', () => animations.dispose());
 const fs = require("fs/promises");
 const fssync = require("fs");
 const cityTimezones = require("city-timezones");
@@ -877,7 +879,7 @@ if (gotTheLock) {
       } else mainWindow.webContents.send(channel, data);
     },
   });
-  speech.initialize(); // Loads bindings only; never constructs a microphone-owning recognizer.
+  // Load speech bindings after the first usable view; microphone actions also initialize on demand.
   ipcMain.on('speech-start', () => speech.startManual().catch(error => logSpeech('manual-unhandled', errorDetails(error))));
   ipcMain.on('speech-stop', (_event, reason) => cancelManualSpeech(reason));
   ipcMain.handle('get-speech-capabilities', () => speech.capabilities());
@@ -917,7 +919,6 @@ if (gotTheLock) {
 
   const hotkeyResult = registerAssistantHotkey(settings.assistantHotkey);
   if (!hotkeyResult.success) logSpeech('hotkey-registration-failed', { message: hotkeyResult.error });
-  speech.setWake(settings.heyCortana).catch(error => logSpeech('wake-startup-failed', errorDetails(error)));
 
   sendAppVersion();
 
@@ -1136,6 +1137,11 @@ function closeApp() {
 }
 
 function registerIpcHandlers() {
+  ipcMain.handle('decode-animation', (_event, filename, maxHeight) => {
+    if (typeof filename !== 'string' || !/^[\w -]+\.gif$/i.test(filename)) throw new Error('Invalid animation asset');
+    if (!Number.isInteger(maxHeight) || maxHeight < 1 || maxHeight > 822) throw new Error('Invalid animation size');
+    return animations.decode(path.join(assetsPath, filename), maxHeight);
+  });
   ipcMain.on("get-is-packaged", (event) => {
     event.returnValue = app.isPackaged;
   });
@@ -2334,6 +2340,14 @@ ipcMain.handle("synthesize-edge-tts", async (event, { text, voice, pitch, rate }
 }
 
 function createWindow() {
+  let initialColor = settings.themeColor || '#0078d7';
+  if (settings.useWindowsAccent) {
+    try { initialColor = normalizeAccentColor(systemPreferences.getAccentColor()) || initialColor; } catch (_) {}
+  }
+  const presentation = { themeColor: initialColor, useWindowsAccent: settings.useWindowsAccent,
+    isMovable: settings.isMovable, idleGreetingMode: settings.idleGreetingMode,
+    specificIdleGreeting: settings.specificIdleGreeting, customIdleGreeting: settings.customIdleGreeting,
+    name: notebook.profile?.name || '' };
   const winOptions = {
     width: winWidth,
     height: winHeight,
@@ -2350,6 +2364,7 @@ function createWindow() {
       contextIsolation: true,
       sandbox: false,
       backgroundThrottling: true,
+      additionalArguments: ['--cortana-presentation=' + JSON.stringify(presentation)],
     },
   };
 
@@ -2452,9 +2467,22 @@ function createWindow() {
       } catch (_) {}
     }
   });
-  mainWindow.on("ready-to-show", () => {
-    if (!isSilentStart) {
-      showWindow();
-    }
-  });
+  let nativeReady = false, rendererReady = false, started = false;
+  const showWhenReady = () => {
+    if (started || !nativeReady || !rendererReady) return;
+    started = true;
+    if (!isSilentStart) showWindow();
+    setTimeout(() => {
+      if (app.isQuitting) return;
+      speech.initialize();
+      speech.setWake(settings.heyCortana).catch(error => logSpeech('wake-startup-failed', errorDetails(error)));
+    }, 500);
+  };
+  const onRendererReady = event => {
+    if (event.sender !== mainWindow.webContents) return;
+    rendererReady = true; showWhenReady();
+  };
+  ipcMain.on('renderer-ready', onRendererReady);
+  mainWindow.once('closed', () => ipcMain.removeListener('renderer-ready', onRendererReady));
+  mainWindow.on('ready-to-show', () => { nativeReady = true; showWhenReady(); });
 }

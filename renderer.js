@@ -108,7 +108,7 @@ function refreshVisualActivity() {
         !document.getElementById('notebook-intro')?.hidden]]) {
         if (!renderer) continue;
         renderer.active = active;
-        if (!active) { clearTimeout(renderer.timer); renderer.timer = null; }
+        if (!active) { clearTimeout(renderer.timer); renderer.timer = null; renderer._nextFrameAt = null; }
         else if (renderer.running && !renderer.timer) renderer._tick();
     }
 }
@@ -200,8 +200,56 @@ function getReadableTextColor(hex) {
 }
 
 const gifCache = new Map();
-const GIF_CACHE_MAX = 8;
-const GIF_CACHE_BYTES = 48 * 1024 * 1024;
+const pendingGifs = new Map();
+const GIF_CACHE_MAX = 20;
+const GIF_CACHE_BYTES = 96 * 1024 * 1024;
+function animationHeight() { return Math.round(200 * Math.min(2, window.devicePixelRatio || 1)); }
+async function loadAnimation(filename) {
+  const height = animationHeight(), key = `${filename}:${height}`;
+  if (gifCache.has(key)) {
+    const cached = gifCache.get(key); gifCache.delete(key); gifCache.set(key, cached);
+    return cached;
+  }
+  if (pendingGifs.has(key)) return pendingGifs.get(key);
+  const pending = window.cortana.decodeAnimation(filename, height).then(decoded => {
+    const bytes = decoded.frames.reduce((total, frame) => total + frame.data.byteLength + (frame.alpha?.byteLength || 0), 0);
+    let cachedBytes = [...gifCache.values()].reduce((total, entry) => total + entry.bytes, 0);
+    while (gifCache.size && (gifCache.size >= GIF_CACHE_MAX || cachedBytes + bytes > GIF_CACHE_BYTES)) {
+      const oldest = gifCache.keys().next().value;
+      cachedBytes -= gifCache.get(oldest).bytes; gifCache.delete(oldest);
+    }
+    const entry = { ...decoded, bytes };
+    if (bytes <= GIF_CACHE_BYTES) gifCache.set(key, entry);
+    return entry;
+  }).finally(() => pendingGifs.delete(key));
+  pendingGifs.set(key, pending);
+  return pending;
+}
+
+// Main supplies only presentation preferences, before the first greeting can paint.
+const initialPresentation = window.cortana.presentation || {};
+if (/^#[\da-f]{6}$/i.test(initialPresentation.themeColor || '')) themeColor = initialPresentation.themeColor;
+useWindowsAccent = initialPresentation.useWindowsAccent === true;
+idleGreetingMode = initialPresentation.idleGreetingMode || idleGreetingMode;
+specificIdleGreeting = initialPresentation.specificIdleGreeting || specificIdleGreeting;
+customIdleGreeting = initialPresentation.customIdleGreeting || '';
+document.documentElement.style.setProperty('--primary-color', themeColor);
+document.documentElement.style.setProperty('--text-color', getReadableTextColor(themeColor));
+function prefetchAnimation(filename) {
+  if (filename) loadAnimation(filename).catch(error => console.warn('Animation prefetch failed:', error.message));
+}
+const NEXT_ANIMATION_STATES = {
+  [AnimationState.ENTRANCE]: AnimationState.TRANSITION_TO_IDLE,
+  [AnimationState.RESUME]: AnimationState.TRANSITION_TO_IDLE,
+  [AnimationState.TRANSITION_TO_IDLE]: AnimationState.IDLE,
+  [AnimationState.LISTENING_BEGIN]: AnimationState.LISTENING,
+  [AnimationState.LISTENING_END]: AnimationState.TRANSITION_TO_IDLE,
+  [AnimationState.SPEAKING_BEGIN]: AnimationState.SPEAKING,
+  [AnimationState.SPEAKING_END]: AnimationState.TRANSITION_TO_IDLE,
+  [AnimationState.ERROR]: AnimationState.TRANSITION_TO_IDLE,
+  [AnimationState.HOP]: AnimationState.TRANSITION_TO_IDLE,
+  [AnimationState.BOW]: AnimationState.TRANSITION_TO_IDLE,
+};
 
 class GifRenderer {
   constructor(canvas) {
@@ -223,43 +271,16 @@ class GifRenderer {
 
   async load(filePath) {
     const generation = this._loadGeneration = (this._loadGeneration || 0) + 1;
-    this.stop();
-    this._lastFrame = null;
     const filename = path.basename(filePath);
-    const cached = gifCache.get(filename);
-
-    if (cached) {
-      this.frames = cached.frames.map(f => ({ data: f.data, delay: f.delay }));
-      this.gifWidth = cached.gifWidth;
-      this.gifHeight = cached.gifHeight;
-      this.canvas.width = this.gifWidth;
-      this.canvas.height = this.gifHeight;
-      this._imageData = this.ctx.createImageData(this.gifWidth, this.gifHeight);
-      this.currentIndex = 0;
-      this.loops = 0;
-      return;
-    }
-
-    const decoded = await window.cortana.decodeAnimation(filename);
+    const decoded = await loadAnimation(filename);
     if (generation !== this._loadGeneration) return;
-    Object.assign(this, decoded);
-    this.canvas.width = this.gifWidth; this.canvas.height = this.gifHeight;
-    this._imageData = this.ctx.createImageData(this.gifWidth, this.gifHeight);
-
-    const bytes = this.frames.reduce((total, frame) => total + frame.data.byteLength, 0);
-    let cachedBytes = [...gifCache.values()].reduce((total, entry) => total + (entry.bytes || 0), 0);
-    while (gifCache.size && (gifCache.size >= GIF_CACHE_MAX || cachedBytes + bytes > GIF_CACHE_BYTES)) {
-      const firstKey = gifCache.keys().next().value;
-      cachedBytes -= gifCache.get(firstKey).bytes || 0;
-      gifCache.delete(firstKey);
+    this.stop(); this._lastFrame = null;
+    this.frames = decoded.frames; this.gifWidth = decoded.gifWidth; this.gifHeight = decoded.gifHeight;
+    if (this.canvas.width !== this.gifWidth || this.canvas.height !== this.gifHeight) {
+      this.canvas.width = this.gifWidth; this.canvas.height = this.gifHeight;
+      this._imageData = null;
     }
-    if (bytes <= GIF_CACHE_BYTES) gifCache.set(filename, {
-      bytes,
-      frames: this.frames.map(f => ({ data: f.data, delay: f.delay })),
-      gifWidth: this.gifWidth,
-      gifHeight: this.gifHeight
-    });
-
+    this._imageData ||= this.ctx.createImageData(this.gifWidth, this.gifHeight);
     this.currentIndex = 0;
     this.loops = 0;
   }
@@ -272,6 +293,7 @@ class GifRenderer {
     this.currentIndex = 0;
     this.loops = 0;
     this.maxLoops = loop ? Infinity : 1;
+    this._nextFrameAt = null;
     this._tick();
   }
 
@@ -301,7 +323,12 @@ class GifRenderer {
       if (cb) cb();
       return;
     }
+    const now = performance.now();
     const delay = this.frames[this.currentIndex].delay;
+    // Carry small timer lateness forward without adding render time to every frame.
+    // After a long stall or a hidden window, resume gently rather than racing old frames.
+    if (this._nextFrameAt == null || now - this._nextFrameAt > delay) this._nextFrameAt = now;
+    this._nextFrameAt += delay;
     this._renderFrame(this.currentIndex);
     if (this.frames.length === 1 && this.maxLoops === Infinity) { this.running = false; return; }
 
@@ -312,14 +339,14 @@ class GifRenderer {
       if (this.loops >= this.maxLoops) {
         // Hold the last frame for its authored duration before changing GIFs.
         this._finishing = true;
-        this.timer = setTimeout(() => this._tick(), delay);
+        this.timer = setTimeout(() => this._tick(), Math.max(0, this._nextFrameAt - performance.now()));
         return;
       }
       this.currentIndex = 0;
       if (this.onLoop) this.onLoop();
     }
 
-    this.timer = setTimeout(() => this._tick(), delay);
+    this.timer = setTimeout(() => this._tick(), Math.max(0, this._nextFrameAt - performance.now()));
   }
 
   _renderFrame(index) {
@@ -342,7 +369,7 @@ class GifRenderer {
     }
     const rgba = new Uint32Array(imageData.data.buffer);
     for (let i = 0; i < pxData.length; i++) {
-      rgba[i] = this._palette[pxData[i]];
+      rgba[i] = frame.alpha ? (this._palette[pxData[i]] & 0xffffff) | (frame.alpha[i] << 24) : this._palette[pxData[i]];
     }
     this.ctx.putImageData(imageData, 0, 0);
     this._lastFrame = pxData;
@@ -439,6 +466,8 @@ class AnimationManager {
       return;
     }
     if (generation !== this._generation) return;
+    const next = options.nextState || NEXT_ANIMATION_STATES[state];
+    prefetchAnimation(next === AnimationState.IDLE ? ANIMATION_FILES.idle_mid : ANIMATION_FILES[next]);
 
     const isLooping = (
       state === AnimationState.LISTENING ||
@@ -472,22 +501,9 @@ class AnimationManager {
       return;
     }
 
-    const autoNext = {
-      [AnimationState.ENTRANCE]: AnimationState.TRANSITION_TO_IDLE,
-      [AnimationState.RESUME]: AnimationState.TRANSITION_TO_IDLE,
-      [AnimationState.TRANSITION_TO_IDLE]: AnimationState.IDLE,
-      [AnimationState.LISTENING_BEGIN]: AnimationState.LISTENING,
-      [AnimationState.LISTENING_END]: AnimationState.TRANSITION_TO_IDLE,
-      [AnimationState.SPEAKING_BEGIN]: AnimationState.SPEAKING,
-      [AnimationState.SPEAKING_END]: AnimationState.TRANSITION_TO_IDLE,
-      [AnimationState.ERROR]: AnimationState.TRANSITION_TO_IDLE,
-      [AnimationState.HOP]: AnimationState.TRANSITION_TO_IDLE,
-      [AnimationState.BOW]: AnimationState.TRANSITION_TO_IDLE,
-    };
-
     // Use completingState (the state we were playing) not this.state
     // (which may have been updated by a concurrent goToState call)
-    const next = autoNext[completingState];
+    const next = NEXT_ANIMATION_STATES[completingState];
     if (next) {
       await this._playState(next);
     }
@@ -498,6 +514,7 @@ class AnimationManager {
     this._idlePlaying = true;
     this._idleCycleIndex = 1;
     await this._playIdleFrame();
+    prefetchAnimation(ANIMATION_FILES[AnimationState.RESUME]);
   }
 
   async _playIdleFrame() {
@@ -516,6 +533,7 @@ class AnimationManager {
 
     await this.renderer.load(path.join(appRoot, file));
     if (generation !== this._generation) return;
+    prefetchAnimation(ANIMATION_FILES[files[(this._idleCycleIndex + 1) % files.length]]);
     this.renderer.playOneShot(() => {
       if (this._destroyed || !this._idlePlaying) return;
       if (this._generation !== generation) return;
@@ -563,6 +581,7 @@ class AnimationManager {
     const special = SPECIAL_ANIMATIONS[this._currentSpecialIndex];
     await this.renderer.load(path.join(appRoot, special.start));
     if (this._destroyed || generation !== this._generation || !this._isPlayingSpecial) return;
+    prefetchAnimation(special.loop);
     this.renderer.playOneShot(() => this._onSpecialStartEnd(generation));
   }
 
@@ -840,7 +859,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     
     const circleCanvas = document.getElementById('circle-canvas');
     anim = new AnimationManager(circleCanvas);
-    anim.init().catch(error => console.warn('Initial orb could not be loaded:', error.message));
+    anim.renderer.active = false;
+    anim.setThemeColor(themeColor);
+    applyMovableModeStyles(initialPresentation.isMovable === true);
 
     let cancelWindowClose = null;
     function revealAppContainer() {
@@ -850,9 +871,9 @@ window.addEventListener('DOMContentLoaded', async () => {
             void appContainer.offsetWidth;
             appContainer.classList.add('visible');
         }
+        refreshVisualActivity();
     }
 
-    let entranceReceived = false;
     ipcRenderer.on('trigger-enter-animation', (event, { timeSinceHidden }) => {
         if (wakeTriggered) {
             wakeTriggered = false;
@@ -866,7 +887,6 @@ window.addEventListener('DOMContentLoaded', async () => {
         }
         closeSettings(true);
         if (notebookPage === 'day') { closeNotebook({ immediate: true }); setStateIdle(); }
-        entranceReceived = true;
         revealAppContainer();
         const state = timeSinceHidden > 5000
             ? AnimationState.ENTRANCE
@@ -1515,14 +1535,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
 
     animationContainer.className = 'idle';
-    if (!entranceReceived) {
-        entranceReceived = true;
-        revealAppContainer();
-        anim.goToState(AnimationState.ENTRANCE);
-    }
     new ResizeObserver(([entry])=>document.getElementById('app-container').style.setProperty('--search-height', `${entry.target.getBoundingClientRect().height}px`)).observe(document.querySelector('.search-container'));
-    await setupNotebookAndSystemControls();
-    await loadAndApplySettings();
+    await Promise.all([setupNotebookAndSystemControls(), loadAndApplySettings(),
+        anim.goToState(AnimationState.ENTRANCE).catch(error => console.warn('Initial orb could not be loaded:', error.message))]);
     setupTTS();
     refreshEvaVoiceStatus();
 
@@ -1536,9 +1551,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchBar.placeholder = 'Type here to search';
     isBusy = false;
     searchIcon.src = cortanaIcon;
+    window.cortana.rendererReady();
     } catch (e) {
         console.error('Init error:', e);
         ipcRenderer.send('renderer-error', e.message + '\n' + (e.stack || ''));
+        window.cortana.rendererReady();
     }
 });
 
@@ -1974,6 +1991,7 @@ async function showSettingsUI() {
     searchBar.placeholder = 'Type here to search';
     isBusy = false;
     document.getElementById('settings-back-btn').focus({ preventScroll: true });
+    if (ttsEngine === 'edge') loadEdgeVoices().catch(error => console.warn('Voice list could not be loaded:', error.message));
     // Controls already reflect startup settings and their change handlers.
     // Rebuilding them on navigation changed layout during the entrance.
     const startupRevision = startupChangeRevision;
@@ -2048,7 +2066,7 @@ function updateGreetingUI() {
 
 function updateCloseButton(closeToTray) {
     const button = document.getElementById('close-btn');
-    const text = closeToTray ? 'Hide Cortana in the notification area' : 'Quit Cortana';
+    const text = closeToTray ? 'Dismiss Cortana' : 'Close Cortana';
     button.title = text;
     button.setAttribute('aria-label', text);
 }
@@ -2128,9 +2146,7 @@ async function loadAndApplySettings() {
     ttsEngineSelect.value = ttsEngine;
     updateTtsEngineUI();
 
-    if (ttsEngine === 'edge') {
-        await loadEdgeVoices();
-    }
+    // Voice inventory is only needed when Settings opens, never on the first-paint path.
 
     timeFormat = settings.timeFormat || '12';
     timeFormatSelect.value = timeFormat;
@@ -2532,8 +2548,11 @@ function updateTtsEngineUI() {
     // Pitch and rate sliders work for Edge TTS too — don't hide them
 }
 
+let edgeVoiceLoad = null;
 async function loadEdgeVoices() {
     if (edgeVoices.length > 0) return;
+    if (edgeVoiceLoad) return edgeVoiceLoad;
+    edgeVoiceLoad = (async () => {
     edgeVoices = await ipcRenderer.invoke('get-edge-voices');
     edgeVoiceSelect.innerHTML = '';
     const sortedVoices = edgeVoices.sort((a, b) => (a.FriendlyName || '').localeCompare(b.FriendlyName || ''));
@@ -2544,6 +2563,8 @@ async function loadEdgeVoices() {
         edgeVoiceSelect.appendChild(option);
     });
     edgeVoiceSelect.value = edgeVoice;
+    })().finally(() => { edgeVoiceLoad = null; });
+    return edgeVoiceLoad;
 }
 
 async function onTtsEngineChanged() {
@@ -5032,7 +5053,7 @@ function validateAndApplyActionFormState() {
     if (addStepButton) {
         addStepButton.disabled = false;
     }
-}let notebookData = { notes: '', todos: [], introduced: false };
+}let notebookData = { notes: '', todos: [], introduced: false, profile: { name: initialPresentation.name || '' } };
 let notebookSaveGeneration = 0;
 let notebookPreviousFocus = null;
 let notebookPage = 'overview';
@@ -5113,6 +5134,7 @@ function selectNotebookPage(page = 'overview', focus = true, animate = true) {
     document.getElementById('notebook-intro').hidden = page !== 'overview';
     document.getElementById('notebook-save-status').hidden = ['overview', 'reminders', 'day'].includes(page);
     refreshVisualActivity();
+    if (page === 'overview' && notebookAnim && !notebookAnim.state) notebookAnim.goToState(AnimationState.IDLE).catch(error => console.warn('Notebook orb could not be loaded:', error.message));
     document.querySelector('.notebook-content').scrollTop = 0;
     if (animate && changed) enterPaneContent(document.getElementById('notebook-sidebar'));
     if (focus) document.getElementById('notebook-back').focus({ preventScroll: true });
@@ -5224,7 +5246,6 @@ async function setupNotebookAndSystemControls() {
     notebookAnim = new AnimationManager(document.getElementById('notebook-idle-canvas'));
     notebookAnim.renderer.active = false;
     notebookAnim.setThemeColor(themeColor);
-    await notebookAnim.goToState(AnimationState.IDLE);
     document.getElementById('notebook-my-day').onclick = () => showMyDay();
     document.getElementById('notebook-btn').onclick = () => openNotebook();
     document.getElementById('navigation-toggle').onclick = () => {
@@ -5317,10 +5338,11 @@ async function setupNotebookAndSystemControls() {
     let inputIdentity = null, deviceChangeTimer;
     const inputs = async () => CortanaAudioDevicePolicy.inputFingerprint(await navigator.mediaDevices.enumerateDevices());
     if (navigator.mediaDevices) {
-        inputIdentity = await inputs().catch(() => null);
+        const identityReady = inputs().then(identity => { inputIdentity = identity; }).catch(() => {});
         navigator.mediaDevices.addEventListener('devicechange', () => {
             clearTimeout(deviceChangeTimer);
             deviceChangeTimer = setTimeout(async () => {
+                await identityReady;
                 const next = await inputs().catch(() => null);
                 if (next === null || next === inputIdentity) return;
                 const hadIdentity = inputIdentity !== null;

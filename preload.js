@@ -1,10 +1,11 @@
 const { contextBridge, ipcRenderer, clipboard } = require('electron');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { decodeAnimation } = require('./lib/gif-decoder');
+const presentationArgument = process.argv.find(value => value.startsWith('--cortana-presentation='));
+const presentation = presentationArgument ? JSON.parse(presentationArgument.slice('--cortana-presentation='.length)) : {};
 const assetRoot = path.join(__dirname, ipcRenderer.sendSync('get-is-packaged') ? '../assets' : 'assets');
-const api = { assetRoot,
- decodeAnimation: filename => { if (typeof filename !== 'string' || !/^[\w -]+\.gif$/i.test(filename)) throw new Error('Invalid animation asset'); return decodeAnimation(path.join(assetRoot,filename)); },
+const api = { assetRoot, presentation,
+ decodeAnimation: (filename, maxHeight = 400) => { if (typeof filename !== 'string' || !/^[\w -]+\.gif$/i.test(filename)) throw new Error('Invalid animation asset'); if (!Number.isInteger(maxHeight) || maxHeight < 1 || maxHeight > 822) throw new Error('Invalid animation size'); return ipcRenderer.invoke('decode-animation', filename, maxHeight); },
  fileUrl: filename => pathToFileURL(filename).href,
  copyDiagnostics: value => { if (typeof value !== 'string' || value.length > 100000) throw new Error('Invalid diagnostic text'); clipboard.writeText(value); },
 };
@@ -50,6 +51,7 @@ api.ttsBegin = (...args) => ipcRenderer.invoke('tts-begin',...args);
 api.wikipediaLookup = (...args) => ipcRenderer.invoke('wikipedia-lookup',...args);
 api.closeApp = (...args) => ipcRenderer.send('close-app',...args);
 api.hideWindow = (...args) => ipcRenderer.send('hide-window',...args);
+api.rendererReady = () => ipcRenderer.send('renderer-ready');
 api.installEvaVoice = (...args) => ipcRenderer.send('install-eva-voice',...args);
 api.openExternalLink = (...args) => ipcRenderer.send('open-external-link',...args);
 api.openPath = (...args) => ipcRenderer.send('open-path',...args);

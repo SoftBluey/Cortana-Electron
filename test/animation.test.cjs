@@ -6,8 +6,10 @@ const source = fs.readFileSync(require.resolve('../renderer.js'), 'utf8');
 const gifClass = source.slice(source.indexOf('class GifRenderer {'), source.indexOf('class AnimationManager {'));
 function renderer() {
   const timers = [];
+  let clock = 0;
   const context = vm.createContext({
-    visualsActive: true, setTimeout: (callback, delay) => { timers.push({ callback, delay }); return timers.length; },
+    performance: { now: () => clock },
+    visualsActive: true, setTimeout: (callback, delay) => { timers.push({ callback: () => { clock += delay; callback(); }, delay }); return timers.length; },
     clearTimeout() {}, parseHexColor: () => ({ r: 255, g: 128, b: 0 }),
   });
   vm.runInContext(gifClass + ';globalThis.GifRenderer = GifRenderer;', context);
@@ -15,7 +17,7 @@ function renderer() {
   const result = new context.GifRenderer(canvas);
   result._imageData = { data: new Uint8ClampedArray(8) };
   result.frames = [{ data: new Uint8Array([0, 128]), delay: 90 }, { data: new Uint8Array([255, 10]), delay: 30 }];
-  return { result, context, canvas, timers };
+  return { result, context, canvas, timers, advance: ms => { clock += ms; } };
 }
 test('hidden/unfocused animation schedules no timer and resumes its existing frame', () => {
   const { result, timers } = renderer(); result.active = false;
@@ -25,6 +27,13 @@ test('hidden/unfocused animation schedules no timer and resumes its existing fra
 test('GIF timing uses the displayed frame delay, preserving animation speed', () => {
   const { result, timers } = renderer(); result.start(true); assert.equal(timers[0].delay, 90);
   timers[0].callback(); assert.equal(timers[1].delay, 30);
+});
+test('frame rendering time does not slow the authored GIF cadence', () => {
+  const { result, timers, advance } = renderer();
+  result._renderFrame = () => advance(12);
+  result.start(true);
+  assert.equal(timers[0].delay, 78);
+  timers[0].callback(); assert.equal(timers[1].delay, 18);
 });
 test('monochrome palette retains tint and transparency', () => {
   const { result, canvas } = renderer(); result.setThemeColor('#ff8000'); result._renderFrame(0);
@@ -58,8 +67,9 @@ function manager() {
   }
   const definitions = source.slice(source.indexOf('const AnimationState ='), source.indexOf('function parseHexColor'));
   const managerClass = source.slice(source.indexOf('class AnimationManager {'), source.indexOf('// ===================== END ANIMATION'));
-  const context = vm.createContext({ GifRenderer: FakeRenderer, path: require('node:path'), appRoot: '.', console });
-  vm.runInContext(definitions + managerClass + ';globalThis.Manager = AnimationManager; globalThis.states = AnimationState;', context);
+  const nextStates = source.slice(source.indexOf('const NEXT_ANIMATION_STATES ='), source.indexOf('class GifRenderer {'));
+  const context = vm.createContext({ GifRenderer: FakeRenderer, path: require('node:path'), appRoot: '.', console, prefetchAnimation() {} });
+  vm.runInContext(definitions + nextStates + managerClass + ';globalThis.Manager = AnimationManager; globalThis.states = AnimationState;', context);
   return { result: new context.Manager({}), states: context.states, pending, playback };
 }
 
