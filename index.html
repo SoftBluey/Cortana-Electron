@@ -289,7 +289,7 @@
                 <div class="settings-section">
                   <h2>Search</h2>
                   <div class="setting-item"><label for="weather-city-input">Weather city</label><input id="weather-city-input" class="settings-text-input" maxlength="120" placeholder="e.g., Chicago" aria-describedby="weather-city-hint" /></div>
-                  <p id="weather-city-hint" class="setting-hint">Used when you ask for the weather without naming a city. Leave it empty to choose a city each time.</p>
+                  <p id="weather-city-hint" class="setting-hint">Say “my weather” or “what’s the weather?” to use this city. You can still ask for another city, like “weather in London”. Leave this empty and Cortana will ask which city to check.</p>
                   <div class="setting-item">
                     <label for="weather-units-select">Weather units</label>
                     <select id="weather-units-select">
@@ -550,6 +550,7 @@
     <script src="lib/audio-device-policy.js"></script>
     <script src="lib/ui-bridge.js"></script>
     <script src="lib/lists.js"></script>
+    <script src="lib/weather-command.js"></script>
     <script src="renderer.js"></script>
   </body>
 </html>

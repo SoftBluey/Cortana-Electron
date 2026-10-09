@@ -122,6 +122,7 @@ const winHeight = 640;
 let isSettingsVisible = false;
 let tray = null;
 let isClosing = false;
+let quitAfterDismiss = false;
 let lastHiddenTime = 0;
 
 let applicationCache = new Map();
@@ -721,12 +722,19 @@ async function fetchLatestRelease() {
             }
 
             let data = "";
+            let receivedBytes = 0;
             res.setEncoding('utf8');
             res.on('error', reject);
             res.on('aborted', () => reject(new Error('The update connection was interrupted.')));
             res.on("data", (chunk) => {
+              receivedBytes += Buffer.byteLength(chunk);
+              if (receivedBytes > 1024 * 1024) {
+                const error = new Error('The update response was too large.');
+                reject(error);
+                req.destroy(error);
+                return;
+              }
               data += chunk;
-              if (data.length > 1024 * 1024) req.destroy(new Error('The update response was too large.'));
             });
             res.on("end", () => resolve(data));
           }
@@ -943,6 +951,7 @@ function showWindow() {
       mainWindow.setPosition(x, y + screenHeight - winHeight);
     }
     isClosing = false;
+    quitAfterDismiss = false;
     mainWindow.show();
     mainWindow.focus();
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1130,8 +1139,8 @@ function closeApp() {
   ) {
     return;
   }
-  if (!settings.closeToTray) { app.isQuitting = true; app.quit(); return; }
   isClosing = true;
+  quitAfterDismiss = !settings.closeToTray;
   lastHiddenTime = Date.now();
   mainWindow.webContents.send("go-idle-and-close");
 }
@@ -1148,6 +1157,11 @@ function registerIpcHandlers() {
 
   ipcMain.on("hide-window", () => {
     cancelManualSpeech({ stopFallback: true });
+    if (isClosing && quitAfterDismiss) {
+      app.isQuitting = true;
+      app.quit();
+      return;
+    }
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.hide();
     }
@@ -2427,15 +2441,9 @@ function createWindow() {
   mainWindow.on("blur", handleBlur);
   mainWindow.on("close", (event) => {
     if (!app.isQuitting) {
-      if (!settings.closeToTray) { app.isQuitting = true; app.quit(); return; }
       event.preventDefault();
-      if (settings.isMovable) {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.hide();
-        }
-      } else {
-        closeApp();
-      }
+      if (!mainWindow.isVisible() && !settings.closeToTray) { app.isQuitting = true; app.quit(); return; }
+      closeApp();
     }
   });
 

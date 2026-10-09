@@ -4052,29 +4052,16 @@ const priorityCommands = [
         }
     },
     {
-        regex: /^(weather today|weather forecast|current weather|today'?s weather)$/i,
-        handler: () => {
-            if (notebookData.profile?.weatherCity.trim()) { getWeather(notebookData.profile.weatherCity.trim()); return; }
-            displayAndSpeak("I need a location to check the weather. Try asking 'What's the weather in New York?'", onActionFinished, {}, false);
-        }
-    },
-    {
-        regex: /(?:what's|how's|what is) the weather(?: in| for| like in)?\s+(.+)/i,
-        handler: (match) => {
-            const location = match[1].trim().replace(/\?$/, '');
-            getWeather(location);
-        }
-    },
-    {
-        regex: /^(?:weather|forecast) (?:in|for|of) (.+)/i,
-        handler: (match) => {
-            getWeather(match[1].trim());
-        }
-    },
-    {
-        regex: /^(.+) (?:weather|forecast)$/i,
-        handler: (match) => {
-            getWeather(match[1].trim());
+        regex: CortanaWeather.commandPattern,
+        handler: (_match, originalQuery) => {
+            const request = CortanaWeather.parse(originalQuery || _match[0]);
+            if (request?.unsupportedPeriod) {
+                displayAndSpeak("I can check the current weather, but I don't have a forecast for later yet. Try “my weather” or “weather in Chicago”.", onActionFinished, {}, false);
+                return;
+            }
+            const location = request?.location === null ? notebookData.profile?.weatherCity?.trim() : request?.location;
+            if (location) { getWeather(location); return; }
+            displayAndSpeak("Which city should I check? Try “weather in Chicago”. You can save a city in Settings > Search for “my weather”.", onActionFinished, {}, false);
         }
     },
 ];
