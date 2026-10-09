@@ -10,6 +10,7 @@ const {
   dialog,
   systemPreferences,
   powerMonitor,
+  globalShortcut,
 } = require("electron");
 
 // Keep Chromium's classic (non-Fluent) scrollbar renderer. Must run before
@@ -20,12 +21,74 @@ const path = require("path");
 const https = require("https");
 const http = require("http");
 const crypto = require("crypto");
-const { exec, spawn, execSync } = require("child_process");
+const { exec, execFile, spawn, execSync } = require("child_process");
 const fs = require("fs/promises");
 const fssync = require("fs");
 const cityTimezones = require("city-timezones");
 const { EdgeTTS } = require("node-edge-tts");
 const os = require("os");
+const { SpeechController, errorDetails } = require('./lib/speech-controller');
+const { createWriter, validNotebook, migrateInterfaceSettings } = require('./lib/preferences');
+const { normalizeEndpoint, isLoopback } = require('./lib/ai-endpoint');
+const { createStartup } = require('./lib/startup');
+const atomicWriteFile = createWriter();
+let speech = null;
+let appScanInterval = null;
+let registeredHotkey = '';
+let notebook = { notes: '', todos: [], introduced: false };
+let NOTEBOOK_FILE;
+let diagnosticsFile;
+let diagnosticWrite = Promise.resolve();
+const diagnosticEvents = [];
+let settingsWritable = true;
+let remindersWritable = true;
+// Explicit diagnostic mode creates its own profile and skips Windows startup registration.
+const diagnosticSmoke = process.argv.includes('--diagnostic-smoke');
+const startup = createStartup(app, { diagnostic: diagnosticSmoke });
+if (diagnosticSmoke) app.setPath('userData', fssync.mkdtempSync(path.join(os.tmpdir(), 'cortana-smoke-')));
+
+function logSpeech(stage, details = {}) {
+  const record = { timestamp: new Date().toISOString(), stage, ...details };
+  diagnosticEvents.push(record);
+  if (diagnosticEvents.length > 100) diagnosticEvents.shift();
+  if (diagnosticSmoke || process.argv.includes('--speech-debug')) console.log('[speech]', stage, details);
+  if (diagnosticsFile) {
+    diagnosticWrite = diagnosticWrite.then(async () => {
+      try {
+        const stat = await fs.stat(diagnosticsFile).catch(() => null);
+        if (stat?.size > 1024 * 1024) await fs.rename(diagnosticsFile, diagnosticsFile + '.previous').catch(() => {});
+        await fs.appendFile(diagnosticsFile, JSON.stringify(record) + '\n');
+      } catch (error) { console.error('Could not write speech diagnostics:', error.message); }
+    });
+  }
+}
+
+function cancelManualSpeech(reason = 'manual-cancel') {
+  // Hiding an idle window must not tear down and reopen wake capture.
+  if (speech?.active?.kind === 'wake') return;
+  speech?.stop(true, typeof reason === 'string' ? reason : 'manual-cancel')
+    .catch(error => logSpeech('stop-failed', errorDetails(error)));
+}
+
+function registerAssistantHotkey(accelerator) {
+  if (accelerator === registeredHotkey) return { success: true, accelerator };
+  if (!accelerator) {
+    if (registeredHotkey) globalShortcut.unregister(registeredHotkey);
+    registeredHotkey = '';
+    return { success: true, accelerator: '' };
+  }
+  try {
+    const registered = globalShortcut.register(accelerator, () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      showWindow();
+      if (settings.hotkeyStartsListening) mainWindow.webContents.send('activate-assistant');
+    });
+    if (!registered) return { success: false, error: 'This shortcut is already in use by Windows or another app. Choose a different combination.' };
+    if (registeredHotkey) globalShortcut.unregister(registeredHotkey);
+    registeredHotkey = accelerator;
+    return { success: true, accelerator };
+  } catch (_) { return { success: false, error: 'Invalid keyboard shortcut. Try CommandOrControl+Shift+C.' }; }
+}
 
 let updateAvailable = false;
 let updateCheckInterval = null;
@@ -36,6 +99,8 @@ const GITHUB_RELEASES_PAGE_URL =
 const UPDATE_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000;
 
 const APP_ID = "com.blueysoft.cortana-electron";
+// Electron script entry points otherwise report Electron's own version.
+const APP_VERSION = require('./package.json').version;
 
 // Compares two dotted version strings, e.g. "7.2.0" vs "7.10.0".
 function compareVersions(a, b) {
@@ -55,162 +120,6 @@ process.stdout.on('error', (err) => {
 });
 
 let mainWindow;
-let speechRecognizer = null;
-let wakeEnabled = false;
-let wakeRunning = false;
-let wakeRecognizer = null;
-let wakeRestartTimer = null;
-let wakeRetryAttempt = 0;
-let wakeGeneration = 0;
-// Resolves once the current wake session's onCompleted event has fired
-// (not just when stopAsync() resolves). Manual speech-start awaits this
-// before creating a new recognizer, avoiding contention with a wake
-// session still mid-teardown.
-let wakeSessionEndedPromise = Promise.resolve();
-
-const speechState = {
-  recognizer: null,
-  queryRecognizer: null,
-  process: null,
-  starting: false,
-  cancelled: false,
-  generation: 0,
-};
-
-function stopSapiFallback() {
-  const processToStop = speechState.process;
-  speechState.process = null;
-
-  if (processToStop) {
-    try {
-      processToStop.kill();
-    } catch (_) {}
-  }
-}
-
-function startSapiFallback(generation) {
-  if (speechState.process || speechState.cancelled) return false;
-
-  console.log('[speech]', `gen=${generation}`, 'SAPI fallback process spawning');
-  const scriptPath = app.isPackaged
-    ? path.join(process.resourcesPath, 'speech.ps1')
-    : path.join(__dirname, 'speech.ps1');
-
-  const ps = spawn('powershell.exe', [
-    '-NoProfile',
-    '-STA',
-    '-ExecutionPolicy',
-    'Bypass',
-    '-File',
-    scriptPath,
-  ], {
-    windowsHide: true,
-  });
-
-  speechState.process = ps;
-  let buffer = '';
-
-  ps.stdout.on('data', (data) => {
-    if (
-      speechState.cancelled ||
-      generation !== speechState.generation ||
-      speechState.process !== ps
-    ) {
-      return;
-    }
-
-    buffer += data.toString();
-    const lines = buffer.split('\n');
-    buffer = lines.pop();
-
-    for (const line of lines) {
-      const text = line.trim();
-      if (!text) continue;
-
-      if (text === 'READY') {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('speech-ready');
-        }
-      } else if (text.startsWith('FINAL:')) {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('speech-result', {
-            final: true,
-            text: text.substring(6).trim(),
-          });
-        }
-      } else if (text.startsWith('ERROR:')) {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send(
-            'speech-error',
-            text.substring(6).trim()
-          );
-        }
-        stopSapiFallback();
-      } else if (text.startsWith('ENGINE:')) {
-        console.log('[speech]', text);
-      }
-    }
-  });
-
-  ps.stderr.on('data', (data) => {
-    if (!speechState.cancelled) {
-      console.error('[speech:SAPI]', data.toString().trim());
-    }
-  });
-
-  ps.on('error', (error) => {
-    if (
-      !speechState.cancelled &&
-      generation === speechState.generation
-    ) {
-      console.error('[speech:SAPI] Failed to start:', error.message);
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send(
-          'speech-error',
-          'Speech recognition is unavailable. Try restarting the app.'
-        );
-      }
-    }
-  });
-
-  ps.on('close', () => {
-    if (speechState.process === ps) {
-      speechState.process = null;
-    }
-  });
-
-  return true;
-}
-
-function cancelManualSpeech({ stopFallback = true } = {}) {
-  console.log('[speech]', `gen=${speechState.generation}`, 'cancelManualSpeech: recognizer=' + !!speechState.recognizer + ' queryRecognizer=' + !!speechState.queryRecognizer + ' process=' + !!speechState.process);
-  speechState.cancelled = true;
-  speechState.generation += 1;
-  speechState.starting = false;
-
-  const recognizer = speechState.recognizer;
-  speechState.recognizer = null;
-
-  if (recognizer) {
-    try {
-      recognizer.close();
-    } catch (_) {}
-  }
-
-  const queryRecognizer = speechState.queryRecognizer;
-  speechState.queryRecognizer = null;
-
-  if (queryRecognizer) {
-    try {
-      queryRecognizer.close();
-    } catch (_) {}
-  }
-
-  if (stopFallback) {
-    stopSapiFallback();
-  }
-}
-
 const winWidth = 360;
 const winHeight = 640;
 let isSettingsVisible = false;
@@ -227,8 +136,9 @@ let activeTimer = null;
 let timerIdCounter = 0;
 
 const DEFAULT_SETTINGS = {
+  interfaceRelease: 8,
   openAtLogin: true,
-  preferredVoice: "Microsoft Zira Desktop",
+  preferredVoice: "Microsoft Zira",
   searchEngine: "bing",
   themeColor: "#0078d7",
   useWindowsAccent: false,
@@ -252,7 +162,13 @@ const DEFAULT_SETTINGS = {
   aiProvider: "",
   useEverythingSearch: false,
   heyCortana: false,
+  recognitionEngine: 'winrt',
+  recognitionMode: 'dictation',
+  listeningSounds: true,
   everythingPort: 80,
+  closeToTray: true,
+  assistantHotkey: "",
+  hotkeyStartsListening: false,
 };
 
 let settings = {
@@ -288,7 +204,7 @@ function normalizeAccentColor(raw) {
   return '#' + hex.substring(0, 6);
 }
 
-const EVA_TTS_DIR = "C:\\Windows\\Speech_OneCore\\Engines\\TTS\\en-US";
+const EVA_TTS_DIR = path.join(process.env.WINDIR || 'C:\\Windows', 'Speech_OneCore', 'Engines', 'TTS', 'en-US');
 const EVA_REG_TOKEN = "MSTTS_V110_enUS_EvaM";
 const EVA_TOKEN_PATH = `HKLM\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\${EVA_REG_TOKEN}`;
 
@@ -298,6 +214,8 @@ function getEvaVoiceStatus() {
     const out = execSync(`reg query "${EVA_TOKEN_PATH}"`, {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      timeout: 3000,
+      windowsHide: true,
     });
     registryPresent = out.includes(EVA_REG_TOKEN);
   } catch (_) {
@@ -481,7 +399,7 @@ function fireReminder(reminder) {
   }
 
   reminders = reminders.filter((item) => item.id !== reminder.id);
-  saveReminders();
+  saveReminders().catch(error => console.error('Failed to persist fired reminder:', error));
 }
 
 function scheduleReminder(reminder) {
@@ -516,6 +434,7 @@ function scheduleReminder(reminder) {
 }
 
 async function saveReminders() {
+  if (!remindersWritable) throw new Error('The existing reminders file could not be read. It has been retained; check its permissions or contents before adding reminders.');
   try {
     const remindersToSave = reminders.map(({ id, text, time, sound }) => ({
       id,
@@ -523,12 +442,13 @@ async function saveReminders() {
       time,
       sound,
     }));
-    await fs.writeFile(
+    await atomicWriteFile(
       REMINDERS_FILE,
       JSON.stringify(remindersToSave, null, 2)
     );
   } catch (error) {
     console.error("Failed to save reminders:", error);
+    throw error;
   }
 }
 
@@ -551,8 +471,7 @@ async function loadReminders() {
           typeof item.text === 'string' &&
           item.text.trim() &&
           typeof item.time === 'string' &&
-          Number.isFinite(Date.parse(item.time)) &&
-          Date.parse(item.time) > now
+          Number.isFinite(Date.parse(item.time))
         );
       })
       .map((item) => ({
@@ -574,12 +493,15 @@ async function loadReminders() {
   } catch (error) {
     if (error.code !== 'ENOENT') {
       console.error('Failed to load reminders:', error);
+      remindersWritable = false;
     }
     reminders = [];
   }
 }
 
 const VALID_ENUMS = {
+  recognitionEngine: ['winrt'],
+  recognitionMode: ['dictation', 'commands'],
   searchEngine: ['bing', 'duckduckgo', 'google', 'brave', 'ecosia'],
   ttsEngine: ['edge', 'system'],
   timeFormat: ['12', '24'],
@@ -589,6 +511,15 @@ const VALID_ENUMS = {
 };
 
 function validateSettingValue(key, value) {
+  if (key === 'interfaceRelease' && (!Number.isInteger(value) || value < 0)) return false;
+  if (typeof DEFAULT_SETTINGS[key] === 'boolean' && typeof value !== 'boolean') return false;
+  if (key === 'assistantHotkey' && (typeof value !== 'string' || value.length > 128 || /[\r\n\0]/.test(value))) return false;
+  if (key === 'customActions') return Array.isArray(value) && value.length <= 50 && value.every(action =>
+    action && typeof action.trigger === 'string' && action.trigger.length <= 256 && Array.isArray(action.actions) &&
+    action.actions.length <= 20 && action.actions.every(step => step && ['speak', 'open_app', 'open_url', 'play_sound', 'run_command'].includes(step.type) && typeof step.value === 'string' && step.value.length <= 4096));
+  if (key === 'everythingPort' && (!Number.isInteger(value) || value < 1 || value > 65535)) return false;
+  if (['pitch', 'rate'].includes(key) && !Number.isFinite(value)) return false;
+  if (key === 'themeColor' && (typeof value !== 'string' || !/^#[0-9a-f]{6}$/i.test(value))) return false;
   if (key in VALID_ENUMS) {
     if (!VALID_ENUMS[key].includes(value)) {
       return false;
@@ -655,16 +586,6 @@ function validateSettingValue(key, value) {
   return true;
 }
 
-function atomicWriteFile(filePath, data) {
-  const tempPath = filePath + '.tmp.' + Date.now() + '.' + crypto.randomUUID().slice(0, 8);
-  return fs.writeFile(tempPath, data).then(() => {
-    return fs.rename(tempPath, filePath);
-  }).catch((err) => {
-    try { fssync.unlinkSync(tempPath); } catch (_) {}
-    throw err;
-  });
-}
-
 function loadValidatedSettings(rawData) {
   let parsed;
   try {
@@ -673,14 +594,14 @@ function loadValidatedSettings(rawData) {
     return { success: false, error: 'Invalid JSON' };
   }
 
-  if (typeof parsed !== 'object' || parsed === null) {
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     return { success: false, error: 'Settings must be an object' };
   }
 
   // Validate each known key, ignore unknown keys
-  const recovered = {};
+  const recovered = Object.create(null);
   for (const [key, value] of Object.entries(parsed)) {
-    if (validateSettingValue(key, value)) {
+    if (!Object.hasOwn(DEFAULT_SETTINGS, key) || validateSettingValue(key, value)) {
       recovered[key] = value;
     }
   }
@@ -704,8 +625,8 @@ async function loadSettings() {
     }
     // Startup resilience: never block window creation because settings could not be read
     console.error("Failed to read settings; falling back to defaults:", error);
+    settingsWritable = false;
     settings = restoreDefaults();
-    await saveSettings();
     return;
   }
 
@@ -715,7 +636,7 @@ async function loadSettings() {
       const backupName = generateUniqueBackupName(SETTINGS_FILE);
       await fs.copyFile(SETTINGS_FILE, backupName);
       console.log(`Empty/corrupt settings backed up to ${backupName}`);
-    } catch (_) {}
+    } catch (_) { settingsWritable = false; }
     settings = restoreDefaults();
     await saveSettings();
     return;
@@ -729,14 +650,14 @@ async function loadSettings() {
       const backupName = generateUniqueBackupName(SETTINGS_FILE);
       await fs.copyFile(SETTINGS_FILE, backupName);
       console.log(`Corrupted settings backed up to ${backupName}`);
-    } catch (_) {}
+    } catch (_) { settingsWritable = false; }
     settings = restoreDefaults();
     await saveSettings();
     return;
   }
 
   // Valid settings - merge with defaults, preserving unknown keys behavior
-  settings = { ...restoreDefaults(), ...validationResult.data };
+  settings = { ...restoreDefaults(), ...migrateInterfaceSettings(validationResult.data) };
 
   // Ensure defaults are applied for any missing keys
   await saveSettings();
@@ -751,6 +672,7 @@ function restoreDefaults() {
 }
 
 async function saveSettings() {
+  if (!settingsWritable) return;
   try {
     await atomicWriteFile(SETTINGS_FILE, JSON.stringify(settings, null, 2));
   } catch (error) {
@@ -760,7 +682,7 @@ async function saveSettings() {
 
 async function checkForUpdates() {
   try {
-    const currentVersion = app.getVersion();
+    const currentVersion = APP_VERSION;
 
     // Ask GitHub for the latest published release (not just the version
     // baked into package.json on main) so this reflects real releases.
@@ -823,7 +745,7 @@ async function checkForUpdates() {
 
 const sendAppVersion = async () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    const currentVersion = app.getVersion();
+    const currentVersion = APP_VERSION;
     mainWindow.webContents.send("update-status", {
       currentVersion: currentVersion,
     });
@@ -847,6 +769,15 @@ if (gotTheLock) {
   
   SETTINGS_FILE = path.join(app.getPath("userData"), "settings.json");
   REMINDERS_FILE = path.join(app.getPath("userData"), "reminders.json");
+  NOTEBOOK_FILE = path.join(app.getPath('userData'), 'notebook.json');
+  diagnosticsFile = path.join(app.getPath('userData'), 'speech-diagnostics.jsonl');
+  logSpeech('environment', { platform: process.platform, arch: process.arch, os: os.release(),
+    versions: process.versions, packaged: app.isPackaged, microphoneAccess: systemPreferences.getMediaAccessStatus('microphone') });
+  try {
+    const saved = JSON.parse(await fs.readFile(NOTEBOOK_FILE, 'utf8'));
+    if (validNotebook(saved)) notebook = saved;
+    else console.error('Invalid notebook data; original file retained.');
+  } catch (error) { if (error.code !== 'ENOENT') console.error('Notebook could not be loaded; original file retained:', error.message); }
   
   assetsPath = app.isPackaged
     ? path.join(process.resourcesPath, "assets")
@@ -871,37 +802,13 @@ if (gotTheLock) {
       }
     }
 
-    await saveReminders();
+    await saveReminders().catch(error => console.error('Failed to persist reminders after resume:', error));
 
-    // Null out the WinRT recognizer so it is recreated fresh on next use
-    if (speechRecognizer) {
-      try { speechRecognizer.close(); } catch (_) {}
-      speechRecognizer = null;
-    }
-
-    // Stop any stale SAPI process — it will restart on next mic press
-    stopSapiFallback();
-
-    // Restart Hey Cortana if it was enabled
-    if (wakeEnabled) {
-      if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
-      if (wakeRecognizer) {
-        try {
-          if (wakeRecognizer.continuousRecognitionSession) {
-            try { await wakeRecognizer.continuousRecognitionSession.stopAsync(); } catch (_) {}
-          }
-          wakeRecognizer.close();
-        } catch (_) {}
-        wakeRecognizer = null;
-      }
-      wakeRunning = false;
-      // Restart wake loop with fresh backoff
-      startWakeLoop(0);
-    } else if (wakeRunning && !wakeRecognizer) {
-      // If Hey Cortana wasn't enabled but wakeRunning is stuck, reset it
-      wakeRunning = false;
-    }
+    cancelManualSpeech();
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-force-stop');
   });
+  powerMonitor.on('suspend', () => speech?.setPaused(true).catch(error => logSpeech('suspend-failed', errorDetails(error))));
+  powerMonitor.on('resume', () => speech?.setPaused(isSettingsVisible).catch(error => logSpeech('resume-failed', errorDetails(error))));
 
   systemPreferences.on('accent-color-changed', (event, newColor) => {
     if (mainWindow && !mainWindow.isDestroyed() && settings.useWindowsAccent) {
@@ -912,628 +819,85 @@ if (gotTheLock) {
 
   scanApplications();
 
-  setInterval(() => {
+  appScanInterval = setInterval(() => {
     scanApplications();
   }, 30 * 60 * 1000); // rescan every 30 minutes
 
-  let powerBlocker = null;
 
   registerIpcHandlers();
 
-  app.setLoginItemSettings({
-    openAtLogin: settings.openAtLogin,
-    args: ["--hidden"],
-  })
+  const startupStatus = startup.reconcile(settings.openAtLogin);
+  if (startupStatus.error) console.error('Windows startup registration failed:', startupStatus.error);
 
   onlineSpeechEnabled = await checkOnlineSpeechEnabled();
 
-  const bindingsPath = app.isPackaged
-    ? path.join(__dirname, '.winapp', 'bindings')
-    : '#winapp/bindings';
-  let SpeechRecognizer, SpeechRecognitionTopicConstraint, SpeechRecognitionScenario, SpeechRecognitionResultStatus;
-  let winRTBindingsAvailable = false;
-  try {
-    const bindings = require(bindingsPath);
-    SpeechRecognizer = bindings.SpeechRecognizer;
-    SpeechRecognitionTopicConstraint = bindings.SpeechRecognitionTopicConstraint;
-    SpeechRecognitionScenario = bindings.SpeechRecognitionScenario;
-    SpeechRecognitionResultStatus = bindings.SpeechRecognitionResultStatus;
-    winRTBindingsAvailable = true;
-    console.log('[speech] WinRT bindings loaded successfully');
-  } catch (err) {
-    console.error('[speech] Failed to load WinRT bindings:', err.message);
-    winRTBindingsAvailable = false;
-  }
-
-  // Readable name for a SpeechRecognitionResultStatus numeric value.
-  // Uses the enum actually exported by the installed bindings (no guessing).
-  const srsNameCache = SpeechRecognitionResultStatus
-    ? Object.keys(SpeechRecognitionResultStatus).reduce((acc, k) => {
-        acc[SpeechRecognitionResultStatus[k]] = k;
-        return acc;
-      }, {})
-    : null;
-  const srsName = (status) => {
-    if (status == null) return 'n/a';
-    const name = srsNameCache && srsNameCache[status];
-    return name ? name : String(status);
-  };
-
-  // When WinRT bindings are unavailable, disable Hey Cortana and persist the setting
-  if (!winRTBindingsAvailable) {
-    wakeEnabled = false;
-    settings.heyCortana = false;
-    // Stop any powerSaveBlocker since Hey Cortana can't run
-    if (powerBlocker) {
-      require('electron').powerSaveBlocker.stop(powerBlocker);
-      powerBlocker = null;
-    }
-    // Notify renderer of speech capabilities status
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('speech-capabilities', { winRTAvailable: false, fallback: 'sapi' });
-    }
-  }
-
-  ipcMain.on('speech-start', async () => {
-    if (isSettingsVisible) {
-      if (mainWindow && !mainWindow.isDestroyed())
-        mainWindow.webContents.send('speech-force-stop');
-      return;
-    }
-
-    if (speechState.starting || speechState.process) return;
-
-    const generation = ++speechState.generation;
-    speechState.cancelled = false;
-    speechState.starting = true;
-
-    const log = (msg, ...a) => console.log('[speech]', `gen=${generation}`, msg, ...a);
-
-    // Per-press guard so we never start SAPI more than once for a single mic press.
-    let fallbackAttempted = false;
-    const trySapiFallback = () => {
-      if (fallbackAttempted) return;
-      fallbackAttempted = true;
-      if (speechState.cancelled || generation !== speechState.generation) return;
-      log('SAPI fallback activated');
-      const started = startSapiFallback(generation);
-      if (!started && !speechState.cancelled && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send(
-          'speech-capabilities',
-          { winRTAvailable: false, fallback: 'sapi unavailable' }
-        );
+  const bindingsPath = app.isPackaged ? path.join(__dirname, '.winapp', 'bindings') : '#winapp/bindings';
+  speech = new SpeechController({
+    loadBindings: () => {
+      const runtime = require('@microsoft/dynwinrt');
+      // Electron initializes its Windows main thread as STA. Accept an existing MTA too.
+      try { runtime.roInitialize(0); }
+      catch (error) {
+        if (!/80010106|changed.*mode/i.test(error.message)) throw error;
+        runtime.roInitialize(1);
       }
-    };
-
-    log('speech-start received');
-
-    try {
-      // Contention diagnostics: record wake state before tearing it down.
-      const wakeWasActive = !!wakeRecognizer || wakeRunning;
-      if (wakeWasActive) {
-        log('wake contention detected: wakeRecognizer=' + !!wakeRecognizer + ' wakeRunning=' + wakeRunning);
-      }
-
-      if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
-      if (wakeRecognizer) {
-        log('wake recognizer stop requested');
-        try {
-          if (wakeRecognizer.continuousRecognitionSession) {
-            try { await wakeRecognizer.continuousRecognitionSession.stopAsync(); } catch (_) {}
-          }
-        } catch (_) {}
-        try { wakeRecognizer.close(); } catch (_) {}
-        wakeRecognizer = null;
-        wakeRunning = false;
-        log('wake recognizer cleared: wakeRecognizer=' + !!wakeRecognizer + ' wakeRunning=' + wakeRunning);
-      }
-      if (wakeWasActive) {
-        // Wait for the wake session's real teardown (onCompleted), not just
-        // stopAsync() resolving, so a new recognizer doesn't contend with it
-        // for the microphone. Capped so a stuck session can't block the mic.
-        log('waiting for wake session teardown to fully complete');
-        await Promise.race([
-          wakeSessionEndedPromise,
-          new Promise((resolve) => setTimeout(resolve, 1500)),
-        ]);
-        log('wake session teardown wait finished');
-        if (speechState.cancelled || generation !== speechState.generation) return;
-      }
-      if (speechState.queryRecognizer) {
-        try { speechState.queryRecognizer.close(); } catch (_) {}
-        speechState.queryRecognizer = null;
-      }
-      if (speechState.recognizer) {
-        log('recognizer closing (stale)');
-        try { speechState.recognizer.close(); } catch (_) {}
-        speechState.recognizer = null;
-      }
-
-      // Check if WinRT bindings are available
-      if (!SpeechRecognizer || !SpeechRecognitionTopicConstraint || !SpeechRecognitionScenario) {
-        // Attempt SAPI fallback for manual voice recognition
-        log('WinRT not available, attempting SAPI fallback');
-        trySapiFallback();
-        return;
-      }
-
-      // Skip straight to SAPI if online speech consent is off, rather than
-      // burning 3 doomed WinRT retries first.
-      onlineSpeechEnabled = await checkOnlineSpeechEnabled();
-      if (speechState.cancelled || generation !== speechState.generation) return;
-      if (!onlineSpeechEnabled) {
-        log('online speech recognition not enabled in Windows privacy settings; skipping WinRT dictation, using SAPI fallback');
-        trySapiFallback();
-        return;
-      }
-
-      const rec = new SpeechRecognizer();
-      speechState.recognizer = rec;
-      log('WinRT recognizer created');
-
-      const constraint = new SpeechRecognitionTopicConstraint(
-        SpeechRecognitionScenario.Dictation, 'dictation');
-      rec.constraints.append(constraint);
-
-      const compile = await rec.compileConstraintsAsync();
-      const compileStatus = compile ? compile.status : null;
-      log('constraints compiled, status=' + compileStatus + ' (' + srsName(compileStatus) + ')');
-
-      if (speechState.cancelled || generation !== speechState.generation) {
-        try { rec.close(); } catch (_) {}
-        if (speechState.recognizer === rec) speechState.recognizer = null;
-        return;
-      }
-
-      if (compileStatus !== SpeechRecognitionResultStatus.Success) {
-        log('COMPILE FAILED status=' + compileStatus + ' (' + srsName(compileStatus) + ')');
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send(
-            'speech-error',
-            'Speech recognition could not be initialized (' + srsName(compileStatus) + ').'
-          );
-        }
-        try { rec.close(); } catch (_) {}
-        if (speechState.recognizer === rec) speechState.recognizer = null;
-        trySapiFallback();
-        return;
-      }
-
-      console.log('[speech] ENGINE:WinRT');
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-ready');
-      log('speech-ready sent');
-
-      // Transient endpoint/engine churn (e.g. the audio stack toggling monitor
-      // endpoints while a capture session opens) can make recognizeAsync return
-      // Unknown/timeout with no text before the engine settles. Retry a few times
-      // on a fresh capture so a momentary pop doesn't silently eat your speech.
-      const TRANSIENT_RETRIES = 3;
-      const RETRY_DELAY_MS = 350;
-
-      let result = null;
-      let status = null;
-      let text = null;
-
-      for (let attempt = 1; attempt <= TRANSIENT_RETRIES; attempt++) {
-        if (speechState.cancelled || generation !== speechState.generation) return;
-
-        if (attempt > 1) {
-          log('retry #' + attempt + ' of ' + TRANSIENT_RETRIES + ' (waiting for audio stack to settle)');
-          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
-          if (speechState.cancelled || generation !== speechState.generation) return;
-        }
-
-        log('recognizeAsync begin (attempt ' + attempt + ')');
-        const t0 = Date.now();
-        try {
-          result = await rec.recognizeAsync();
-          log(
-            'recognizeAsync complete (' + (Date.now() - t0) + 'ms) ' +
-            'status=' + (result ? result.status : 'n/a') + ' (' + (result ? srsName(result.status) : 'n/a') + ') ' +
-            'text=' + JSON.stringify(result ? result.text : null) +
-            (result && result.confidence != null ? ' confidence=' + result.confidence : '')
-          );
-        } catch (e) {
-          log('recognizeAsync THREW after ' + (Date.now() - t0) + 'ms: ' + (e && (e.message || e)));
-          throw e;
-        }
-
-        if (speechState.cancelled || generation !== speechState.generation) return;
-
-        status = result ? result.status : null;
-        text = result ? result.text : null;
-
-        // Definitive success: report it.
-        if (status === SpeechRecognitionResultStatus.Success && text) {
-          log('sending valid result: ' + JSON.stringify(text));
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('speech-result', { final: true, text });
-          }
-          return;
-        }
-
-        // Definitive, non-transient failures: do NOT retry.
-        if (status === SpeechRecognitionResultStatus.AudioQualityFailure ||
-            status === SpeechRecognitionResultStatus.MicrophoneUnavailable) {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send(
-              'speech-error',
-              'Your microphone is not available. Make sure one is set as default.'
-            );
-          }
-          trySapiFallback();
-          return;
-        }
-
-        if (status === SpeechRecognitionResultStatus.GrammarCompilationFailure ||
-            status === SpeechRecognitionResultStatus.TopicLanguageNotSupported ||
-            status === SpeechRecognitionResultStatus.GrammarLanguageMismatch ||
-            status === SpeechRecognitionResultStatus.NetworkFailure) {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send(
-              'speech-error',
-              'Speech recognition could not complete (' + srsName(status) + ').'
-            );
-          }
-          trySapiFallback();
-          return;
-        }
-
-        // Empty Success, Unknown, TimeoutExceeded, PauseLimitExceeded, UserCanceled:
-        // transient if this is just the engine churning on open; retry if attempts remain.
-        log('transient/no-text result (status=' + srsName(status) + ', attempt ' + attempt + ')');
-      }
-
-      // All retries exhausted with no recognised speech.
-      log('no speech after ' + TRANSIENT_RETRIES + ' attempts');
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('speech-error', 'No speech was recognized.');
-      }
-    } catch (e) {
-      if (speechState.cancelled || generation !== speechState.generation) {
-        return;
-      }
-      console.error('[speech] WinRT failed, attempting SAPI fallback:', e.message);
-      trySapiFallback();
-      if (!speechState.process && !speechState.cancelled && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send(
-          'speech-error',
-          'Speech recognition is unavailable. Try restarting the app.'
-        );
-      }
-    } finally {
-      if (speechState.recognizer && generation === speechState.generation) {
-        log('recognizer closing');
-        try { speechState.recognizer.close(); } catch (_) {}
-        speechState.recognizer = null;
-      }
-      if (generation === speechState.generation) {
-        speechState.starting = false;
-      }
-      log('cleanup complete');
-    }
+      logSpeech('apartment-ready', { packageIdentity: runtime.hasPackageIdentity() });
+      return require(bindingsPath);
+    },
+    onlineConsent: checkOnlineSpeechEnabled,
+    getMode: () => settings.recognitionMode,
+    getIdentity: () => require('@microsoft/dynwinrt').hasPackageIdentity(),
+    log: logSpeech,
+    send: (channel, data) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (channel === 'wake-activate') {
+        const visible = mainWindow.isVisible();
+        showWindow();
+        mainWindow.webContents.send(visible ? 'wake-listen' : 'wake-slim');
+      } else mainWindow.webContents.send(channel, data);
+    },
   });
-
-  ipcMain.on('speech-stop', () => {
-    console.log('[speech]', `gen=${speechState.generation}`, 'speech-stop received');
-    cancelManualSpeech({ stopFallback: true });
-    if (wakeEnabled && !wakeRunning && !wakeRestartTimer && !isSettingsVisible) {
-      wakeRestartTimer = setTimeout(() => {
-        wakeRestartTimer = null;
-        if (wakeEnabled && !isSettingsVisible) startWakeLoop(0);
-      }, 500);
-    }
+  speech.initialize(); // Loads bindings only; never constructs a microphone-owning recognizer.
+  ipcMain.on('speech-start', () => speech.startManual().catch(error => logSpeech('manual-unhandled', errorDetails(error))));
+  ipcMain.on('speech-stop', (_event, reason) => cancelManualSpeech(reason));
+  ipcMain.handle('get-speech-capabilities', () => speech.capabilities());
+  ipcMain.on('hey-cortana-toggle', (_event, enabled) => speech.setWake(enabled).catch(error => logSpeech('wake-toggle-failed', errorDetails(error))));
+  ipcMain.handle('tts-begin', async () => { await speech.setSpeaking(true); return { success: true }; });
+  ipcMain.on('tts-end', () => speech.setSpeaking(false).catch(error => logSpeech('tts-end-failed', errorDetails(error))));
+  ipcMain.on('speech-device-changed', () => {
+    logSpeech('default-input-change', {});
+    speech.engineChanged().catch(error => logSpeech('device-reset-failed', errorDetails(error)));
+    mainWindow?.webContents.send('speech-force-stop');
   });
-
-ipcMain.handle('get-speech-capabilities', async () => {
-    return { winRTAvailable: !!winRTBindingsAvailable, fallback: winRTBindingsAvailable ? undefined : 'sapi' };
+  ipcMain.on('set-settings-visibility', (_event, visible) => {
+    isSettingsVisible = visible === true;
+    speech.setPaused(isSettingsVisible).catch(error => logSpeech('settings-pause-failed', errorDetails(error)));
+    if (isSettingsVisible && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-force-stop');
   });
-
-  ipcMain.on('hey-cortana-toggle', async (event, enabled) => {
-    wakeEnabled = enabled;
-    if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
-    if (enabled) {
-      if (!winRTBindingsAvailable) {
-        console.warn('[hey-cortana] Hey Cortana cannot be enabled: WinRT bindings unavailable');
-        wakeEnabled = false;
-        settings.heyCortana = false;
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('speech-capabilities', { winRTAvailable: false, fallback: 'sapi' });
-          mainWindow.webContents.send('hey-cortana-status', { enabled: false, reason: 'WinRT bindings unavailable' });
-        }
-        if (powerBlocker) {
-          require('electron').powerSaveBlocker.stop(powerBlocker);
-          powerBlocker = null;
-        }
-        return;
-      }
-      if (!powerBlocker) powerBlocker = require('electron').powerSaveBlocker.start('prevent-app-suspension');
-      if (!wakeRunning) startWakeLoop(0);
-    }
-    if (!enabled) {
-      wakeRunning = false;
-      if (wakeRecognizer) {
-        try {
-          if (wakeRecognizer.continuousRecognitionSession) {
-            try {
-              await wakeRecognizer.continuousRecognitionSession.stopAsync();
-            } catch (_) {}
-          }
-        } catch (_) {}
-        try { wakeRecognizer.close(); } catch (_) {}
-      }
-      wakeRecognizer = null;
-      if (powerBlocker) {
-        require('electron').powerSaveBlocker.stop(powerBlocker);
-        powerBlocker = null;
-      }
-    }
-  });
-
-async function startWakeLoop(backoff = 0) {
-    if (wakeRunning) return;
-    if (isSettingsVisible) return;
-    if (speechState.starting || speechState.recognizer || speechState.process) {
-      console.log('[wake] Deferring: manual speech active.');
-      return;
-    }
-
-    // Use generation token to prevent stale restarts.
-    // The module-scope wakeGeneration counter is bumped whenever the wake
-    // context is invalidated (disable, settings, suspend, quit), so callbacks
-    // compare against it to detect stale generations.
-    const token = ++wakeGeneration;
-
-    // Check if WinRT bindings are available
-    if (!SpeechRecognizer || !SpeechRecognitionTopicConstraint || !SpeechRecognitionScenario) {
-      console.warn('[wake] WinRT bindings not available, cannot start wake loop');
-      wakeRunning = false;
-      wakeRetryAttempt = 0; // Reset retry attempt when bindings unavailable
-      // Notify renderer
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('speech-capabilities', { winRTAvailable: false, fallback: 'sapi' });
-      }
-      return;
-    }
-
-    wakeRunning = true;
-    wakeRetryAttempt = 0; // Reset retry attempt on healthy session start
-    let wakeTriggered = false;
-    let rec = null;
-    let completionStatus = null;
-
-    let sessionEndedResolve = null;
-    const sessionEndedPromise = new Promise(resolve => { sessionEndedResolve = resolve; });
-    wakeSessionEndedPromise = sessionEndedPromise;
-
-    try {
-      rec = new SpeechRecognizer();
-      wakeRecognizer = rec;
-
-      const constraint = new SpeechRecognitionTopicConstraint(
-        SpeechRecognitionScenario.Dictation, 'dictation'
-      );
-      rec.constraints.append(constraint);
-      await rec.compileConstraintsAsync();
-
-      const session = rec.continuousRecognitionSession;
-
-      session.onResultGenerated(async (sender, args) => {
-        // Verify generation token to prevent stale callbacks
-        if (wakeGeneration !== token) return;
-        if (!wakeRunning || wakeTriggered) return;
-        let text = '';
-        try {
-          text = (args.result && args.result.text || '').toLowerCase().trim();
-        } catch (_) {}
-        if (!text.includes('cortana')) return;
-        if (isSettingsVisible) return;
-
-        wakeTriggered = true;
-        wakeRunning = false;
-        console.log('[wake] Wake word detected:', text);
-
-        try { await session.stopAsync(); } catch (_) {}
-        sessionEndedResolve();
-
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          if (mainWindow.isVisible()) {
-            mainWindow.webContents.send('wake-listen');
-          } else {
-            mainWindow.webContents.send('wake-slim');
-            if (settings.useWindowsAccent) {
-              try {
-                const accent = normalizeAccentColor(systemPreferences.getAccentColor());
-                if (accent) mainWindow.webContents.send('accent-color-updated', accent);
-              } catch (_) {}
-            }
-            showWindow();
-          }
-        }
-
-        try { rec.close(); } catch (_) {}
-        rec = null;
-        wakeRecognizer = null;
-
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          let qr = null;
-          try {
-            qr = new SpeechRecognizer();
-            speechState.queryRecognizer = qr;
-            qr.constraints.append(new SpeechRecognitionTopicConstraint(
-              SpeechRecognitionScenario.Dictation, 'dictation'));
-            await qr.compileConstraintsAsync();
-            const qres = await qr.recognizeAsync();
-            const qtext = qres && qres.text;
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('speech-result',
-                { final: true, text: qtext || '' });
-            }
-          } catch (e) {
-            console.warn('[wake] Query recognition failed:', e.message);
-          } finally {
-            if (qr) { try { qr.close(); } catch (_) {} }
-            if (speechState.queryRecognizer === qr) speechState.queryRecognizer = null;
-          }
-        }
-
-        if (wakeEnabled && !wakeRestartTimer && !isSettingsVisible) {
-          wakeRestartTimer = setTimeout(() => {
-            // Verify generation token before restarting
-            if (wakeGeneration === token && wakeEnabled && !isSettingsVisible) {
-              wakeRestartTimer = null;
-              startWakeLoop(0);
-            }
-          }, 1000);
-        }
-      });
-
-      session.onCompleted((sender, args) => {
-        if (wakeTriggered) return;
-        // Verify generation token
-        if (wakeGeneration !== token) return;
-        completionStatus = (args && args.status != null) ? args.status : null;
-        console.warn('[wake] ContinuousRecognitionSession ended (status ' + completionStatus + ' / ' + srsName(completionStatus) + ')');
-        wakeRunning = false;
-        sessionEndedResolve();
-      });
-
-      console.log('[wake] Starting continuous recognition session...');
-      await session.startAsync();
-      backoff = 0;
-      console.log('[wake] Continuous session active — listening for Hey Cortana.');
-
-      await sessionEndedPromise;
-
-      if (!wakeTriggered) {
-        try { await session.stopAsync(); } catch (_) {}
-      }
-
-    } catch (outerErr) {
-      wakeRunning = false;
-      completionStatus = 'error';
-      console.error('[wake] Fatal wake loop error:', outerErr.message || outerErr);
-      // Increment retry attempt on failure
-      wakeRetryAttempt++;
-      const delay = Math.min(500 * Math.pow(2, wakeRetryAttempt), 30000);
-      console.warn('[wake] Session failed; retrying in ' + delay + 'ms (attempt ' + wakeRetryAttempt + ')');
-      if (wakeEnabled && !wakeRestartTimer) {
-        wakeRestartTimer = setTimeout(() => {
-          // Verify generation token before retry
-          if (wakeGeneration === token) {
-            wakeRestartTimer = null;
-            startWakeLoop(backoff);
-          }
-        }, delay);
-      }
-    } finally {
-      // Only reset running state if this session wasn't replaced by a newer generation
-      if (wakeGeneration === token) {
-        if (rec) { try { rec.close(); } catch (_) {} }
-        if (wakeRecognizer === rec) wakeRecognizer = null;
-      }
-    }
-
-    // Expected session end: short restart delay only if wake is still enabled
-    // and manual recognition/settings are inactive
-    if (wakeEnabled && !wakeRestartTimer && !wakeTriggered
-        && !speechState.starting && !speechState.recognizer && !speechState.process
-        && !isSettingsVisible) {
-      console.log('[wake] Expected session end; restarting in 1000ms');
-      wakeRestartTimer = setTimeout(() => {
-        wakeRestartTimer = null;
-        // Verify generation token before restarting
-        if (wakeGeneration === token) {
-          startWakeLoop(0);
-        }
-      }, 1000);
-    }
-  }
-
-  app.on('before-quit', () => {
+  app.on('before-quit', event => {
     app.isQuitting = true;
-    wakeRunning = false;
-    cancelManualSpeech({ stopFallback: true });
-    // Stop any powerSaveBlocker
-    if (powerBlocker) {
-      require('electron').powerSaveBlocker.stop(powerBlocker);
-      powerBlocker = null;
-    }
-    // Notify renderer to cancel any ongoing speech synthesis
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('speech-force-stop');
-    }
-    // Clear wake restart timer
-    if (wakeRestartTimer) {
-      clearTimeout(wakeRestartTimer);
-      wakeRestartTimer = null;
-    }
-    // Clear the periodic update check
-    if (updateCheckInterval) {
-      clearInterval(updateCheckInterval);
-      updateCheckInterval = null;
-    }
-    // Stop and close the recognizer/session
-    if (wakeRecognizer) {
-      if (wakeRecognizer.continuousRecognitionSession) {
-        (async () => { try { await wakeRecognizer.continuousRecognitionSession.stopAsync(); } catch (_) {} })();
-      }
-      try { wakeRecognizer.close(); } catch (_) {}
-      wakeRecognizer = null;
-    }
-    wakeRunning = false;
-    // Clear reminder and timer timeouts
-    reminders.forEach((reminder) => {
-      if (reminder.timeout) clearTimeout(reminder.timeout);
-    });
-    // Clear active timer
-    if (activeTimer) {
-      clearTimeout(activeTimer.timeout);
-      activeTimer = null;
-    }
-    // Destroy the tray
-    if (tray) {
-      tray.destroy();
-      tray = null;
-    }
-  });
-
-  ipcMain.on("set-settings-visibility", async (event, visible) => {
-    isSettingsVisible = visible;
-    if (visible) {
-      cancelManualSpeech({ stopFallback: true });
-      if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
-      if (wakeRecognizer) {
-        wakeRunning = false;
-        // Stop the session before closing, same as manual speech-start.
-        // Closing a live session directly can briefly block the main thread.
-        const recToClose = wakeRecognizer;
-        try {
-          if (recToClose.continuousRecognitionSession) {
-            try { await recToClose.continuousRecognitionSession.stopAsync(); } catch (_) {}
-          }
-        } catch (_) {}
-        try { recToClose.close(); } catch (_) {}
-        if (wakeRecognizer === recToClose) wakeRecognizer = null;
-      }
-      stopSapiFallback();
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('speech-force-stop');
-      }
-    } else if (wakeEnabled) {
-      if (wakeRestartTimer) { clearTimeout(wakeRestartTimer); wakeRestartTimer = null; }
-      if (!wakeRunning) startWakeLoop(0);
+    globalShortcut.unregisterAll();
+    clearInterval(appScanInterval);
+    clearInterval(updateCheckInterval);
+    reminders.forEach(clearReminderTimeout);
+    if (activeTimer) clearTimeout(activeTimer.timeout);
+    if (!speech.shuttingDown) {
+      event.preventDefault();
+      speech.shutdown().catch(error => logSpeech('shutdown-failed', errorDetails(error)))
+        .finally(async () => {
+          try { await saveSettings(); await saveReminders(); await diagnosticWrite; }
+          catch (error) { console.error('Shutdown persistence failed:', error.message); }
+          finally { app.quit(); }
+        });
     }
   });
 
   createWindow();
+  if (diagnosticSmoke) require('./lib/diagnostic-smoke').run({ app, window: mainWindow, speech });
 
-  if (settings.heyCortana) {
-    wakeEnabled = true;
-    setTimeout(() => {
-      if (!wakeRunning) startWakeLoop(0);
-    }, 3000);
-  }
+  const hotkeyResult = registerAssistantHotkey(settings.assistantHotkey);
+  if (!hotkeyResult.success) logSpeech('hotkey-registration-failed', { message: hotkeyResult.error });
+  speech.setWake(settings.heyCortana).catch(error => logSpeech('wake-startup-failed', errorDetails(error)));
 
   sendAppVersion();
 
@@ -1745,6 +1109,7 @@ function closeApp() {
   ) {
     return;
   }
+  if (!settings.closeToTray) { app.isQuitting = true; app.quit(); return; }
   isClosing = true;
   lastHiddenTime = Date.now();
   mainWindow.webContents.send("go-idle-and-close");
@@ -1802,14 +1167,8 @@ function registerIpcHandlers() {
 
     let urlObj;
     try {
-      urlObj = new URL(apiUrl);
-      let path = urlObj.pathname.replace(/\/+$/, "");
-      if (!path.endsWith("chat/completions")) {
-        path = path.replace(/\/v1\/?$/, "");
-        path += "/v1/chat/completions";
-        apiUrl = urlObj.origin + path + urlObj.search;
-        urlObj = new URL(apiUrl);
-      }
+      urlObj = normalizeEndpoint(apiUrl);
+      apiUrl = urlObj.toString();
     } catch (_) {
       return { success: false, error: 'Invalid AI API URL.' };
     }
@@ -1818,7 +1177,7 @@ function registerIpcHandlers() {
       return { success: false, error: 'AI API URL must use http or https.' };
     }
 
-    const isLocal = !apiUrl.includes("openai.com") && !apiUrl.includes("api.openai.com");
+    const isLocal = isLoopback(apiUrl);
     if (!apiKey && !isLocal) {
       return { success: false, error: "No API key configured. Add your key in Settings > AI." };
     }
@@ -1830,6 +1189,7 @@ function registerIpcHandlers() {
         { role: "user", content: query.trim() },
       ],
       max_tokens: 500,
+      stream: false,
     });
 
     const headers = {
@@ -1845,10 +1205,12 @@ function registerIpcHandlers() {
     try {
       const data = await new Promise((resolve, reject) => {
         let settled = false;
+        let deadline;
 
         const finish = (callback, value) => {
           if (settled) return;
           settled = true;
+          clearTimeout(deadline);
           callback(value);
         };
 
@@ -1861,11 +1223,12 @@ function registerIpcHandlers() {
             headers,
           },
           (res) => {
+            res.setEncoding('utf8');
             let responseData = '';
             let responseBytes = 0;
 
             res.on('data', (chunk) => {
-              responseBytes += chunk.length;
+              responseBytes += Buffer.byteLength(chunk);
 
               if (responseBytes > AI_MAX_RESPONSE_BYTES) {
                 req.destroy();
@@ -1879,6 +1242,8 @@ function registerIpcHandlers() {
               responseData += chunk;
             });
 
+            res.on('error', error => finish(reject, error));
+            res.on('aborted', () => finish(reject, new Error('AI provider disconnected before completing its response.')));
             res.on('end', () => {
               if (settled) return;
 
@@ -1924,6 +1289,7 @@ function registerIpcHandlers() {
             new Error('AI provider request timed out.')
           );
         });
+        deadline = setTimeout(() => req.destroy(new Error('AI provider request timed out.')), AI_REQUEST_TIMEOUT_MS);
 
         req.on('error', (error) => {
           finish(reject, error);
@@ -1938,23 +1304,68 @@ function registerIpcHandlers() {
         Array.isArray(data.choices) &&
         data.choices[0] &&
         data.choices[0].message &&
-        typeof data.choices[0].message.content === 'string'
+        typeof data.choices[0].message.content === 'string' && data.choices[0].message.content.trim()
       ) {
         return { success: true, text: data.choices[0].message.content.trim() };
       }
 
       return { success: false, error: 'AI provider returned an unexpected response format.' };
     } catch (error) {
-      return { success: false, error: error.message };
+      const message = error.code === 'ECONNREFUSED' && isLocal
+        ? 'Local AI server is not running at the configured address. Start Ollama or LM Studio and check the port and model.' : error.message;
+      return { success: false, error: message };
     }
   });
 
+  ipcMain.handle('set-assistant-hotkey', async (_event, accelerator) => {
+    if (!validateSettingValue('assistantHotkey', accelerator)) return { success: false, error: 'Invalid keyboard shortcut.' };
+    const result = registerAssistantHotkey(accelerator);
+    if (result.success) { settings.assistantHotkey = accelerator; await saveSettings(); }
+    return result;
+  });
+  ipcMain.handle('get-hotkey-status', () => ({ accelerator: registeredHotkey, configured: settings.assistantHotkey }));
+  ipcMain.handle('get-notebook', () => notebook);
+  ipcMain.handle('save-notebook', async (_event, value) => {
+    if (!validNotebook(value)) return { success: false, error: 'Invalid notebook data or maximum size exceeded.' };
+    try {
+      await atomicWriteFile(NOTEBOOK_FILE, JSON.stringify(value, null, 2));
+      notebook = value;
+      return { success: true };
+    } catch (error) { return { success: false, error: 'Could not save your notebook: ' + error.message }; }
+  });
+  ipcMain.handle('speech-diagnostics', async () => ({ environment: { arch: process.arch, os: os.release(),
+    versions: process.versions, packaged: app.isPackaged, microphoneAccess: systemPreferences.getMediaAccessStatus('microphone') },
+    audioDefaults: await new Promise(resolve => {
+      execFile('powershell.exe', ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File',
+        app.isPackaged ? path.join(process.resourcesPath, 'speech.ps1') : path.join(__dirname, 'speech.ps1'), '-Inventory'],
+      { windowsHide: true, timeout: 5000, maxBuffer: 32768 }, (error, stdout) => {
+        try { resolve(error ? { error: error.message } : JSON.parse(stdout)); }
+        catch (_) { resolve({ error: 'Audio defaults could not be read.' }); }
+      });
+    }), capabilities: speech?.capabilities(), events: diagnosticEvents, logPath: diagnosticsFile }));
+  ipcMain.handle('open-local-folder', async (_event, name) => {
+    if (!['desktop', 'documents', 'downloads', 'pictures', 'music', 'videos', 'home'].includes(name)) return { success: false, error: 'Unknown local folder.' };
+    const error = await shell.openPath(app.getPath(name));
+    return error ? { success: false, error } : { success: true };
+  });
+
   ipcMain.handle("get-settings", async () => {
-    return settings;
+    const startupStatus = startup.status();
+    return { ...settings, startupStatus, openAtLogin: startupStatus.supported ? startupStatus.enabled : settings.openAtLogin };
+  });
+
+  ipcMain.handle('set-startup', async (_event, enabled) => {
+    if (typeof enabled !== 'boolean') return { enabled: false, error: 'Invalid startup setting.' };
+    const result = startup.set(enabled);
+    if (result.supported && !result.error && result.enabled === enabled) {
+      settings.openAtLogin = enabled;
+      await saveSettings();
+    }
+    return result;
   });
 
   ipcMain.on("set-setting", async (event, { key, value }) => {
-    if (!key) return;
+    if (!Object.hasOwn(DEFAULT_SETTINGS, key) || !validateSettingValue(key, value) || ['assistantHotkey', 'customActions', 'interfaceRelease', 'openAtLogin'].includes(key)) return;
 
     // Handle known enum keys using shared validation
     if (key in VALID_ENUMS) {
@@ -2007,15 +1418,14 @@ function registerIpcHandlers() {
     }
 
     settings[key] = value;
-    if (key === "openAtLogin") {
-      app.setLoginItemSettings({
-        openAtLogin: value,
-        args: ["--hidden"],
-      });
+    if (key === 'recognitionMode') {
+      await speech.engineChanged().catch(error => logSpeech('engine-change-failed', errorDetails(error)));
+      mainWindow?.webContents.send('speech-force-stop');
     }
     if (key === "isMovable") {
+      await saveSettings();
       app.relaunch();
-      app.exit();
+      app.quit();
     }
     await saveSettings();
   });
@@ -2108,7 +1518,9 @@ ipcMain.handle("set-custom-actions", async (event, actions) => {
         if (reminder.timeout) clearTimeout(reminder.timeout);
       });
       reminders = [];
-      settings.customActions = [];
+      restoreDefaults();
+      await speech.setWake(false);
+      registerAssistantHotkey('');
 
       await fs.unlink(SETTINGS_FILE).catch((err) => {
         if (err.code !== "ENOENT") throw err;
@@ -2117,8 +1529,9 @@ ipcMain.handle("set-custom-actions", async (event, actions) => {
         if (err.code !== "ENOENT") throw err;
       });
 
+      await saveSettings();
       app.relaunch();
-      app.exit();
+      app.quit();
     } catch (error) {
       console.error("Failed to reset all settings:", error);
     }
@@ -2249,56 +1662,13 @@ ipcMain.handle("set-custom-actions", async (event, actions) => {
     }
 
     const target = appName.trim();
-
-    return await new Promise((resolve) => {
-      const child = spawn(
-        'cmd.exe',
-        ['/d', '/s', '/c', 'start', '', target],
-        {
-          windowsHide: true,
-          detached: false,
-          shell: false,
-        }
-      );
-
-      let finished = false;
-      const finish = (result) => {
-        if (finished) return;
-        finished = true;
-        resolve(result);
-      };
-
-      child.on('error', (error) => {
-        console.error(
-          `Fallback failed to open app ${target}:`,
-          error
-        );
-
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('command-failed', {
-            command: 'open-application',
-          });
-        }
-
-        finish({
-          success: false,
-          error: 'Application could not be opened.',
-        });
-      });
-
-      child.on('exit', (code) => {
-        finish(
-          code === 0
-            ? { success: true }
-            : {
-                success: false,
-                error: 'Application could not be opened.',
-              }
-        );
-      });
+    if (!/^[a-z0-9_.-]+(?:\.exe)?$/i.test(target)) return { success: false, error: 'Choose a Start Menu application, configured shortcut, or executable name.' };
+    return new Promise(resolve => {
+      const child = spawn(target, [], { windowsHide: false, shell: false, detached: true, stdio: 'ignore' });
+      child.once('error', () => resolve({ success: false, error: 'Application could not be opened.' }));
+      child.once('spawn', () => { child.unref(); resolve({ success: true }); });
     });
-  }
-);
+  });
 
   ipcMain.on("open-external-link", (event, url) => {
     const validated = validateExternalUrl(url);
@@ -2374,7 +1744,8 @@ ipcMain.on("run-command", (event, command) => {
   'ms-settings:devices-touchpad',
   'ms-settings:typing',
   'ms-settings:pen',
-  'ms-settings:autoPlay',
+  'ms-settings:autoplay',
+  'ms-settings:',
   'ms-settings:usb',
   'ms-settings:network',
   'ms-settings:network-wifi',
@@ -2417,6 +1788,7 @@ ipcMain.on("run-command", (event, command) => {
   'ms-settings:cortana',
   'ms-settings:search',
   'ms-settings:privacy',
+  'ms-settings:privacy-microphone',
   'ms-settings:windowsupdate',
   'ms-settings:backup',
   'ms-settings:troubleshoot',
@@ -2682,7 +2054,7 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
     if (reminderIndex !== -1) {
       clearTimeout(reminders[reminderIndex].timeout);
       reminders.splice(reminderIndex, 1);
-      await saveReminders();
+      await saveReminders().catch(error => console.error('Failed to persist reminder deletion:', error));
     }
   });
 
@@ -2691,7 +2063,7 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
   });
 
   ipcMain.handle("get-app-version", () => {
-    return app.getVersion();
+    return APP_VERSION;
   });
 
   ipcMain.handle("check-for-updates", async () => {
@@ -2899,6 +2271,7 @@ ipcMain.handle("synthesize-edge-tts", async (event, { text, voice, pitch, rate }
       return { success: true, filePath: outFile };
     } catch (error) {
       console.error("Edge TTS synthesis failed:", error);
+      logSpeech('edge-tts-failed', errorDetails(error));
       return { success: false, error: error.message };
     }
   });
@@ -2939,7 +2312,7 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
 
   ipcMain.handle("wikipedia-lookup", async (event, query) => {
     try {
-      const ua = `Cortana/${app.getVersion()} (https://github.com/SoftBluey/Cortana-Electron)`;
+      const ua = `Cortana/${APP_VERSION} (https://github.com/SoftBluey/Cortana-Electron)`;
       const fetchJson = (url) => new Promise((resolve, reject) => {
         const req = https.get(url, { headers: { "User-Agent": ua } }, (res) => {
           // Validate HTTP status code - follow only redirects we expect
@@ -3048,7 +2421,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
-      preload: path.join(__dirname, "preload.js"),
+      backgroundThrottling: true,
       // TODO: Complete context-isolation migration in a dedicated change.
       // renderer.js currently depends on Node APIs for GIF decoding,
       // filesystem asset loading, path handling, HTTPS suggestions, and audio cleanup.
@@ -3114,6 +2487,7 @@ function createWindow() {
   mainWindow.on("blur", handleBlur);
   mainWindow.on("close", (event) => {
     if (!app.isQuitting) {
+      if (!settings.closeToTray) { app.isQuitting = true; app.quit(); return; }
       event.preventDefault();
       if (settings.isMovable) {
         if (mainWindow && !mainWindow.isDestroyed()) {
@@ -3125,7 +2499,26 @@ function createWindow() {
     }
   });
 
-  mainWindow.loadFile("index.html");
+  mainWindow.webContents.on('will-navigate', event => event.preventDefault());
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    const safe = validateExternalUrl(url);
+    if (safe) shell.openExternal(safe);
+    return { action: 'deny' };
+  });
+  mainWindow.on('hide', () => {
+    mainWindow.webContents.send('window-visibility', false);
+    mainWindow.webContents.send('speech-force-stop');
+    cancelManualSpeech();
+  });
+  mainWindow.on('show', () => mainWindow.webContents.send('window-visibility', true));
+  mainWindow.on('focus', () => mainWindow.webContents.send('window-focus', true));
+  mainWindow.on('blur', () => mainWindow.webContents.send('window-focus', false));
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    logSpeech('renderer-gone', details);
+    speech?.setSpeaking(false).catch(() => {});
+    cancelManualSpeech();
+  });
+  mainWindow.loadFile(path.join(__dirname, 'index.html'));
   mainWindow.webContents.on('did-finish-load', () => {
     if (settings.useWindowsAccent) {
       try {

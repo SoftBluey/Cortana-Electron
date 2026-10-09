@@ -1,6 +1,8 @@
 const { ipcRenderer } = require('electron');
 const path = require('path');
 const https = require('https');
+const { isLoopback } = require('./lib/ai-endpoint');
+const { defaultVoice: findDefaultVoice, resolveVoice } = require('./lib/voice-policy');
 const { parseGIF, decompressFrames } = require('gifuct-js');
 
 window.onerror = (msg, src, line, col, err) => {
@@ -39,7 +41,8 @@ let availableVoices = [];
 let customActions = [];
 let currentVoice = null;
 let editingActionIndex = null;
-let preferredVoiceName = "Microsoft Zira Desktop";
+let preferredVoiceName = "Microsoft Zira";
+let listeningSounds = true;
 let currentSearchEngine = "bing";
 let isMovableMode = false;
 let themeColor = "#0078d7";
@@ -90,10 +93,36 @@ const offSound = new Audio(path.join(appRoot, 'off.wav'));
 const errorSound = new Audio(path.join(appRoot, 'error.wav'));
 const drumrollSound = new Audio(path.join(appRoot, 'drumroll.mp3'));
 
+function playListeningSound(sound) {
+    if (!listeningSounds) return;
+    sound.currentTime = 0;
+    sound.play().catch(() => {});
+}
+
 let isBusy = false;
 let micBtnBusy = false;
 let lastQuery = '';
 let anim = null;
+let notebookAnim = null;
+let windowVisible = !document.hidden;
+let windowFocused = true;
+let visualsActive = true;
+function refreshVisualActivity() {
+    const visible = windowVisible && windowFocused && !document.hidden;
+    visualsActive = visible &&
+        !settingsContainer?.classList.contains('visible') && !document.getElementById('notebook-sidebar')?.classList.contains('visible');
+    for (const [renderer, active] of [[anim?.renderer, visualsActive], [notebookAnim?.renderer,
+        visible && document.getElementById('notebook-sidebar')?.classList.contains('visible') &&
+        !document.getElementById('notebook-intro')?.hidden]]) {
+        if (!renderer) continue;
+        renderer.active = active;
+        if (!active) { clearTimeout(renderer.timer); renderer.timer = null; }
+        else if (renderer.running && !renderer.timer) renderer._tick();
+    }
+}
+ipcRenderer.on('window-visibility', (_event, visible) => { windowVisible = visible; refreshVisualActivity(); });
+ipcRenderer.on('window-focus', (_event, focused) => { windowFocused = focused; refreshVisualActivity(); });
+document.addEventListener('visibilitychange', refreshVisualActivity);
 
 // ===================== ANIMATION STATE MACHINE =====================
 const AnimationState = Object.freeze({
@@ -179,7 +208,8 @@ function getReadableTextColor(hex) {
 }
 
 const gifCache = new Map();
-const GIF_CACHE_MAX = 20;
+const GIF_CACHE_MAX = 8;
+const GIF_CACHE_BYTES = 48 * 1024 * 1024;
 
 class GifRenderer {
   constructor(canvas) {
@@ -200,7 +230,9 @@ class GifRenderer {
   }
 
   async load(filePath) {
+    const generation = this._loadGeneration = (this._loadGeneration || 0) + 1;
     this.stop();
+    this._lastFrame = null;
     const filename = require('path').basename(filePath);
     const cached = gifCache.get(filename);
 
@@ -217,6 +249,7 @@ class GifRenderer {
     }
 
     const buffer = await require('fs').promises.readFile(filePath);
+    if (generation !== this._loadGeneration) return;
     const gif = parseGIF(buffer);
     const rawFrames = decompressFrames(gif);
 
@@ -269,10 +302,13 @@ class GifRenderer {
         }
       }
 
-      this.frames.push({
-        data: frameData,
-        delay: Math.max(raw.delay, 20),
-      });
+      // Animations are tinted monochrome. Store one intensity byte instead of four RGBA bytes.
+      const intensity = new Uint8Array(this.gifWidth * this.gifHeight);
+      for (let i = 0; i < intensity.length; i++) {
+        const offset = i * 4;
+        intensity[i] = frameData[offset + 3] ? Math.round(getLuminance(frameData[offset], frameData[offset + 1], frameData[offset + 2])) : 0;
+      }
+      this.frames.push({ data: intensity, delay: Math.max(raw.delay, 20) });
 
       prevData = raw.disposalType === 2
         ? new Uint8ClampedArray(this.gifWidth * this.gifHeight * 4)
@@ -280,11 +316,15 @@ class GifRenderer {
       prevDisposal = raw.disposalType;
     }
 
-    if (gifCache.size >= GIF_CACHE_MAX) {
+    const bytes = this.frames.reduce((total, frame) => total + frame.data.byteLength, 0);
+    let cachedBytes = [...gifCache.values()].reduce((total, entry) => total + (entry.bytes || 0), 0);
+    while (gifCache.size && (gifCache.size >= GIF_CACHE_MAX || cachedBytes + bytes > GIF_CACHE_BYTES)) {
       const firstKey = gifCache.keys().next().value;
+      cachedBytes -= gifCache.get(firstKey).bytes || 0;
       gifCache.delete(firstKey);
     }
-    gifCache.set(filename, {
+    if (bytes <= GIF_CACHE_BYTES) gifCache.set(filename, {
+      bytes,
       frames: this.frames.map(f => ({ data: f.data, delay: f.delay })),
       gifWidth: this.gifWidth,
       gifHeight: this.gifHeight
@@ -312,6 +352,7 @@ class GifRenderer {
 
   stop() {
     this.running = false;
+    this._finishing = false;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -320,28 +361,34 @@ class GifRenderer {
   }
 
   _tick() {
-    if (!this.running) return;
-
+    this.timer = null;
+    if (!this.running || this.active === false || this.frames.length === 0) return;
+    if (this._finishing) {
+      this.running = false;
+      this._finishing = false;
+      const cb = this.onComplete;
+      this.onComplete = null;
+      if (cb) cb();
+      return;
+    }
+    const delay = this.frames[this.currentIndex].delay;
     this._renderFrame(this.currentIndex);
+    if (this.frames.length === 1 && this.maxLoops === Infinity) { this.running = false; return; }
 
     this.currentIndex++;
 
     if (this.currentIndex >= this.frames.length) {
       this.loops++;
       if (this.loops >= this.maxLoops) {
-        this.running = false;
-        if (this.onComplete) {
-          const cb = this.onComplete;
-          this.onComplete = null;
-          cb();
-        }
+        // Hold the last frame for its authored duration before changing GIFs.
+        this._finishing = true;
+        this.timer = setTimeout(() => this._tick(), delay);
         return;
       }
       this.currentIndex = 0;
       if (this.onLoop) this.onLoop();
     }
 
-    const delay = this.frames[this.currentIndex].delay;
     this.timer = setTimeout(() => this._tick(), delay);
   }
 
@@ -350,39 +397,32 @@ class GifRenderer {
     if (!frame) return;
 
     const imageData = this._imageData;
-    imageData.data.fill(0);
     const pxData = frame.data;
     const { r, g, b } = this.themeColor;
-
-    for (let i = 0; i < pxData.length; i += 4) {
-      const pr = pxData[i];
-      const pg = pxData[i + 1];
-      const pb = pxData[i + 2];
-      const pa = pxData[i + 3];
-
-      if (pa === 0 || (pr === 0 && pg === 0 && pb === 0)) {
-        imageData.data[i] = 0;
-        imageData.data[i + 1] = 0;
-        imageData.data[i + 2] = 0;
-        imageData.data[i + 3] = 0;
-        continue;
+    const colorKey = `${r},${g},${b}`;
+    if (this._lastFrame === pxData && this._lastColor === colorKey) return;
+    if (this._paletteKey !== colorKey) {
+      this._palette = new Uint32Array(256);
+      for (let value = 1; value < 256; value++) {
+        const intensity = value / 255;
+        this._palette[value] = (255 << 24) | (Math.round(b * intensity) << 16) |
+          (Math.round(g * intensity) << 8) | Math.round(r * intensity);
       }
-
-      const lum = getLuminance(pr, pg, pb);
-      const intensity = lum / 255;
-      imageData.data[i] = Math.round(r * intensity);
-      imageData.data[i + 1] = Math.round(g * intensity);
-      imageData.data[i + 2] = Math.round(b * intensity);
-      imageData.data[i + 3] = pa;
+      this._paletteKey = colorKey;
     }
-
+    const rgba = new Uint32Array(imageData.data.buffer);
+    for (let i = 0; i < pxData.length; i++) {
+      rgba[i] = this._palette[pxData[i]];
+    }
     this.ctx.putImageData(imageData, 0, 0);
+    this._lastFrame = pxData;
+    this._lastColor = colorKey;
   }
 
   setThemeColor(hex) {
     this.themeColor = parseHexColor(hex);
     if (this.frames.length > 0) {
-      this._renderFrame(this.currentIndex % this.frames.length);
+      this._renderFrame(this._finishing ? this.frames.length - 1 : this.currentIndex % this.frames.length);
     }
   }
 
@@ -408,13 +448,14 @@ class AnimationManager {
   }
 
   async init() {
-    await this.renderer.load(path.join(appRoot, ANIMATION_FILES[AnimationState.STATIC]));
-    this.state = AnimationState.STATIC;
-    this.renderer.start(true);
+    await this.goToState(AnimationState.STATIC);
   }
 
   async goToState(state, options = {}) {
     if (this._destroyed) return;
+    if (this.state === state && !this._isPlayingSpecial && !options.nextState &&
+        [AnimationState.ENTRANCE, AnimationState.RESUME, AnimationState.IDLE, AnimationState.STATIC, AnimationState.LISTENING,
+          AnimationState.SPEAKING, AnimationState.THINKING].includes(state)) return;
 
     this.queue = [];
     this._stopIdleCycle();
@@ -436,6 +477,7 @@ class AnimationManager {
 
   destroy() {
     this._destroyed = true;
+    ++this._generation;
     this.renderer.stop();
     this._stopIdleCycle();
     this.queue = [];
@@ -569,11 +611,14 @@ class AnimationManager {
 
   async playSpecial(id) {
     if (this._destroyed || id < 0 || id >= SPECIAL_ANIMATIONS.length) return;
+    const generation = ++this._generation;
+    this.queue = [];
+    this._pendingNext = null;
     this._stopIdleCycle();
     this._stopSpecial();
     this._isPlayingSpecial = true;
     this._currentSpecialIndex = id;
-    await this._playSpecialStart();
+    await this._playSpecialStart(generation);
   }
 
   _stopSpecial() {
@@ -584,20 +629,22 @@ class AnimationManager {
     }
   }
 
-  async _playSpecialStart() {
+  async _playSpecialStart(generation) {
     const special = SPECIAL_ANIMATIONS[this._currentSpecialIndex];
     await this.renderer.load(path.join(appRoot, special.start));
-    this.renderer.playOneShot(() => this._onSpecialStartEnd());
+    if (this._destroyed || generation !== this._generation || !this._isPlayingSpecial) return;
+    this.renderer.playOneShot(() => this._onSpecialStartEnd(generation));
   }
 
-  async _onSpecialStartEnd() {
-    if (this._destroyed || !this._isPlayingSpecial) return;
-    await this._playSpecialLoop();
+  async _onSpecialStartEnd(generation) {
+    if (this._destroyed || !this._isPlayingSpecial || generation !== this._generation) return;
+    await this._playSpecialLoop(generation);
   }
 
-  async _playSpecialLoop() {
+  async _playSpecialLoop(generation) {
     const special = SPECIAL_ANIMATIONS[this._currentSpecialIndex];
     await this.renderer.load(path.join(appRoot, special.loop));
+    if (this._destroyed || generation !== this._generation || !this._isPlayingSpecial) return;
     this.renderer.start(true);
   }
 }
@@ -743,6 +790,7 @@ function getIdleMessage() {
             return customIdleGreeting.trim() || "Hello!";
         case 'random':
         default:
+            if (notebookData.profile?.name.trim()) return `Hi, ${notebookData.profile.name.trim()}. What can I do for you?`;
             const hour = new Date().getHours();
             let pool;
             if (hour >= 5 && hour < 12) {
@@ -854,10 +902,15 @@ window.addEventListener('DOMContentLoaded', async () => {
     gifDisplay = document.getElementById('circle-canvas');
     resultsDisplay = document.getElementById('results-display');
     contentWrapper = document.getElementById('content-wrapper');
+    // First paint must not wait for GIF decoding, voice inventory or diagnostics.
+    const initialGreeting = document.createElement('p');
+    initialGreeting.className = 'idle-greeting';
+    initialGreeting.textContent = getIdleMessage();
+    resultsDisplay.replaceChildren(initialGreeting);
     
     const circleCanvas = document.getElementById('circle-canvas');
     anim = new AnimationManager(circleCanvas);
-    await anim.init();
+    anim.init().catch(error => console.warn('Initial orb could not be loaded:', error.message));
 
     let cancelWindowClose = null;
     function revealAppContainer() {
@@ -1025,8 +1078,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchBar.addEventListener('keydown', onSearchKeyDown);
     searchBar.addEventListener('blur', () => {
         if (speechActive) {
-            stopSpeechRecognition();
-            searchBar.placeholder = 'Type here to search';
+            // Focus moves to the microphone/navigation controls as recognition
+            // starts. A focus notification is not a request to cancel capture.
             return;
         }
         if (!searchPanel.classList.contains('visible')) {
@@ -1039,13 +1092,11 @@ window.addEventListener('DOMContentLoaded', async () => {
             searchBar.placeholder = 'Type here to search';
             setStateIdle();
         }, 200);
-        offSound.play();
+        playListeningSound(offSound);
     });
 
     searchBar.addEventListener('focus', () => {
-        if (speechActive) {
-            stopSpeechRecognition();
-        }
+        if (speechActive) return;
         searchIcon.src = searchIconPng;
         if (animationContainer.className === 'active') {
             setStateIdle();
@@ -1054,6 +1105,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
 
     let speechActive = false;
+    searchBar.addEventListener('pointerdown', () => { if (speechActive) stopSpeechRecognition(); });
     let speechFinal = '';
     let speechShuffleTimer = null;
 
@@ -1072,8 +1124,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
 
     function startSpeechUI() {
-        window.speechSynthesis.cancel();
-        if (currentEdgeAudio) { currentEdgeAudio.pause(); currentEdgeAudio = null; }
+        document.getElementById('speech-feedback').hidden = true;
+        cancelSpeechOutput();
         clearTimeout(finishSpeakingTimeout);
         finishSpeakingTimeout = null;
         requestSound.pause();
@@ -1085,7 +1137,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         clearTimeout(blurCleanupTimer);
         micBtn.classList.add('listening');
         anim.goToState(AnimationState.LISTENING_BEGIN);
-        onSound.play();
+        playListeningSound(onSound);
         searchBar.placeholder = 'Listening...';
         searchBar.style.color = '#888888';
         searchBar.value = speechShuffle();
@@ -1120,8 +1172,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         clearSearchBar();
         searchBar.placeholder = 'Type here to search';
         micBtn.classList.remove('listening');
-        ipcRenderer.send('speech-stop');
-        offSound.play();
+        ipcRenderer.send('speech-stop', 'microphone/user-cancel');
+        playListeningSound(offSound);
         if (document.body.classList.contains('slim-mode')) {
             document.body.classList.remove('slim-mode');
             ipcRenderer.send('close-app');
@@ -1140,7 +1192,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         if (speechShuffleTimer) { clearInterval(speechShuffleTimer); speechShuffleTimer = null; }
         searchBar.style.color = '';
         micBtn.classList.remove('listening');
-        ipcRenderer.send('speech-stop');
+        ipcRenderer.send('speech-stop', 'query-submit');
         searchBar.placeholder = 'Type here to search';
         document.body.classList.remove('slim-mode');
 
@@ -1206,13 +1258,22 @@ window.addEventListener('DOMContentLoaded', async () => {
         if (!speechActive) return;
         recordSpeechError(message || 'Speech error');
         console.error('[speech]', message || 'Speech error');
-        searchBar.placeholder = message || 'Speech error';
-        setTimeout(() => { searchBar.placeholder = 'Type here to search'; }, 5000);
-        flashMicError();
         stopSpeechRecognition();
+        flashMicError();
+        document.getElementById('speech-feedback-message').textContent = /timed out|no speech|without a final utterance/i.test(message || '')
+            ? "I couldn't hear a complete request. Try again or type your question."
+            : 'Speech recognition is unavailable right now. Try again or type your question.';
+        document.getElementById('speech-feedback').hidden = false;
     });
+    document.getElementById('speech-feedback-dismiss').onclick = () => { document.getElementById('speech-feedback').hidden = true; };
+    document.getElementById('speech-feedback-settings').onclick = async () => {
+        document.getElementById('speech-feedback').hidden = true;
+        await showSettingsUI();
+        document.getElementById('recognition-mode-select').scrollIntoView({ block: 'center' });
+        document.getElementById('recognition-mode-select').focus();
+    };
 
-    micBtn.addEventListener('mousedown', (e) => {
+    micBtn.addEventListener('click', (e) => {
         e.preventDefault();
         if (settingsContainer.classList.contains('visible')) return;
         if (micBtnBusy) return;
@@ -1224,6 +1285,8 @@ window.addEventListener('DOMContentLoaded', async () => {
             startSpeechRecognition();
         }
     });
+
+    ipcRenderer.on('activate-assistant', () => { if (!speechActive) startSpeechRecognition(); });
 
     ipcRenderer.on('wake-slim', () => {
         revealAppContainer();
@@ -1250,8 +1313,7 @@ window.addEventListener('DOMContentLoaded', async () => {
             searchBar.placeholder = 'Type here to search';
             micBtn.classList.remove('listening');
         }
-        window.speechSynthesis.cancel();
-        if (currentEdgeAudio) { currentEdgeAudio.pause(); currentEdgeAudio = null; }
+        cancelSpeechOutput();
         clearTimeout(finishSpeakingTimeout);
         finishSpeakingTimeout = null;
         requestSound.pause();
@@ -1454,7 +1516,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         appContainer.addEventListener('transitionend', onTransitionEnd);
         appContainer.classList.remove('visible');
         // No event is guaranteed when closing before first paint or in movable mode.
-        fallback = setTimeout(finish, 450);
+        const immediate = document.body.classList.contains('movable-mode') || matchMedia('(prefers-reduced-motion: reduce)').matches;
+        fallback = setTimeout(finish, immediate ? 0 : 250);
     });
 
     ipcRenderer.on('command-failed', (event, { command }) => {
@@ -1478,6 +1541,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
 
     ipcRenderer.on('settings-force-close', () => {
+        closeNotebook();
         closeSettings(true);
     });
 
@@ -1535,20 +1599,20 @@ window.addEventListener('DOMContentLoaded', async () => {
         });
     });
 
+    animationContainer.className = 'idle';
+    if (!entranceReceived) {
+        entranceReceived = true;
+        revealAppContainer();
+        anim.goToState(AnimationState.ENTRANCE);
+    }
+    await setupNotebookAndSystemControls();
     await loadAndApplySettings();
     setupTTS();
     refreshEvaVoiceStatus();
 
-    animationContainer.className = 'idle';
-    if (!entranceReceived) {
-        revealAppContainer();
-        anim.goToState(AnimationState.ENTRANCE);
-    }
-
-    const p = document.createElement('p');
-    p.className = 'fade-in-item';
-    p.textContent = getIdleMessage();
-    resultsDisplay.appendChild(p);
+    // Apply the loaded nickname/greeting preference without a second text entrance.
+    if (initialGreeting.isConnected && !isBusy && animationContainer.className === 'idle')
+        initialGreeting.textContent = getIdleMessage();
 
     webLinkContainer.style.display = 'none';
     webLinkContainer.style.opacity = '0';
@@ -1572,7 +1636,7 @@ const PANEL_ICONS = {
 };
 
 async function onSearchInput(event) {
-    window.speechSynthesis.cancel();
+    cancelSpeechOutput();
     const query = searchBar.value.trim();
     if (query.length === 0) {
         hideSearchPanel();
@@ -1639,7 +1703,7 @@ async function generateCategorizedResults(query) {
         });
     }
 
-    cortanaItems.push({
+    if (navigator.onLine) cortanaItems.push({
         type: 'cortana',
         title: `Search for "${query}"`,
         subtitle: 'Continue with Cortana regular',
@@ -1656,11 +1720,11 @@ async function generateCategorizedResults(query) {
         }
     });
 
-    if (aiEnabled) {
+    if (aiEnabled && (navigator.onLine || isLoopback(aiApiUrl))) {
         cortanaItems.push({
             type: 'cortana',
             title: `Ask AI about "${query}"`,
-            subtitle: navigator.onLine ? 'Get an AI-generated answer' : 'Requires internet connection',
+            subtitle: isLoopback(aiApiUrl) ? 'Use your local AI server' : navigator.onLine ? 'Get an AI-generated answer' : 'Requires internet connection',
             icon: PANEL_ICONS.cortana,
             action: () => {
                 lastQuery = query;
@@ -1741,7 +1805,7 @@ async function generateCategorizedResults(query) {
         }
     } catch (_) {}
 
-    const webSuggestions = await generateWebSuggestions(query);
+    const webSuggestions = (customActionItems.length || matchedSkill || matchedCommand) ? [] : await generateWebSuggestions(query);
     if (webSuggestions.length > 0) {
         categories.push({
             name: 'Web',
@@ -1766,6 +1830,7 @@ async function generateCategorizedResults(query) {
 }
 
 function generateWebSuggestions(query) {
+    if (!navigator.onLine) return Promise.resolve([]);
     return new Promise((resolve) => {
         const url = `https://suggestqueries.google.com/complete/search?client=chrome&q=${encodeURIComponent(query)}`;
         const options = {
@@ -1993,27 +2058,44 @@ async function refreshSpeechDiagnostics() {
 }
 
 async function showSettingsUI() {
+    const alreadyOpen = settingsContainer.classList.contains('visible');
+    closeNotebook({ immediate: true, switching: true });
     _stopSpeechFromOutside?.();
+    cancelSpeechOutput();
+    clearTimeout(blurCleanupTimer);
+    hideSearchPanel();
     animationContainer.style.display = 'none';
     reminderContainer.classList.remove('visible');
     ipcRenderer.send('set-settings-visibility', true);
 
-    settingsContainer.classList.add('visible');
+    setNavigationPage('settings');
     document.querySelector('.settings-main-content').style.display = 'block';
     customActionFormContainer.classList.remove('visible');
-
-    // Refresh all settings when opening settings UI to ensure they're current
-    await loadAndApplySettings();
-    refreshSpeechDiagnostics();
+    if (!alreadyOpen) showPane(settingsContainer);
+    refreshVisualActivity();
 
     searchBar.disabled = true;
-    searchBar.placeholder = 'Unavailable...';
+    searchBar.placeholder = 'Type here to search';
     isBusy = false;
+    document.getElementById('settings-back-btn').focus({ preventScroll: true });
+    // Controls already reflect startup settings and their change handlers.
+    // Rebuilding them on navigation changed layout during the entrance.
+    await refreshSpeechDiagnostics();
 }
 
-function closeSettings(silent = false) {
-    ipcRenderer.send('set-settings-visibility', false);
-    settingsContainer.classList.remove('visible');
+function closeSettings(silent = false, { switching = false } = {}) {
+    if (!settingsContainer.classList.contains('visible')) {
+        if (silent) hidePane(settingsContainer, true);
+        return;
+    }
+    hidePane(settingsContainer, silent);
+    if (!switching) {
+        ipcRenderer.send('set-settings-visibility', false);
+        setNavigationPage('home');
+        searchBar.disabled = false;
+        searchBar.placeholder = 'Type here to search';
+    }
+    refreshVisualActivity();
     animationContainer.style.display = 'block';
     if (!silent) {
         setStateIdle();
@@ -2063,10 +2145,22 @@ function updateGreetingUI() {
 
 async function loadAndApplySettings() {
     const settings = await ipcRenderer.invoke('get-settings');
+    document.getElementById('recognition-mode-select').value = settings.recognitionMode || 'dictation';
+    listeningSounds = settings.listeningSounds !== false;
+    document.getElementById('listening-sounds-toggle').checked = listeningSounds;
+    document.getElementById('close-to-tray-toggle').checked = settings.closeToTray !== false;
+    document.getElementById('hotkey-listen-toggle').checked = settings.hotkeyStartsListening === true;
+    document.getElementById('assistant-hotkey').value = settings.assistantHotkey || '';
+    const hotkey = await ipcRenderer.invoke('get-hotkey-status');
+    document.getElementById('assistant-hotkey-status').textContent = hotkey.accelerator ? `Active: ${hotkey.accelerator}` : hotkey.configured ? 'Configured shortcut could not be registered; choose another.' : 'Shortcut disabled';
     preferredVoiceName = settings.preferredVoice;
 
     startupToggle.checked = settings.openAtLogin;
-    startupWarning.style.display = settings.openAtLogin ? 'none' : 'block';
+    startupToggle.disabled = settings.startupStatus?.supported === false;
+    startupWarning.textContent = settings.startupStatus?.error
+        ? 'Windows could not update startup. Try again or manage Cortana in Windows Startup Apps.'
+        : settings.startupStatus?.message || 'Reminders may not work as expected until Cortana is launched manually.';
+    startupWarning.style.display = !settings.openAtLogin || startupToggle.disabled || settings.startupStatus?.error ? 'block' : 'none';
 
     currentSearchEngine = settings.searchEngine;
     searchEngineSelect.value = settings.searchEngine;
@@ -2158,6 +2252,7 @@ async function loadAndApplySettings() {
         }
     }
 
+    aiApiUrl = settings.aiApiUrl || 'https://api.openai.com/v1/chat/completions';
     aiEnabled = settings.aiEnabled === true;
     aiToggle.checked = aiEnabled;
     openaiApiKeyInput.value = settings.openaiApiKey || '';
@@ -2296,6 +2391,7 @@ function applyThemeColor(color) {
     themeColor = color;
     document.documentElement.style.setProperty('--primary-color', color);
     anim.setThemeColor(color);
+    notebookAnim?.setThemeColor(color);
 
     const defaultHue = 207;
     const newHsl = hexToHsl(color);
@@ -2351,7 +2447,7 @@ function onResetVoiceSettings() {
     ipcRenderer.send('set-setting', { key: 'edgeVoice', value: edgeVoice });
     updateTtsEngineUI();
 
-    const defaultVoice = availableVoices.find(v => v.name.includes("Zira")) || availableVoices[0];
+    const defaultVoice = findDefaultVoice(availableVoices);
     
     if (defaultVoice) {
         preferredVoiceName = defaultVoice.name;
@@ -2425,6 +2521,7 @@ async function refreshEvaVoiceStatus() {
     } else {
         evaVoiceStatus.textContent = 'Not installed. Installs Cortana\u2019s original Eva voice for local (offline) speech.';
     }
+    installEvaVoiceBtn.hidden = status.installed;
 }
 
 function onInstallEvaVoice() {
@@ -2444,11 +2541,22 @@ function onVoiceChanged() {
     showSavedToast();
 }
 
-function onStartupToggleChanged() {
+async function onStartupToggleChanged() {
     const isEnabled = startupToggle.checked;
-    startupWarning.style.display = isEnabled ? 'none' : 'block';
-    ipcRenderer.send('set-setting', { key: 'openAtLogin', value: isEnabled });
-    showSavedToast();
+    startupToggle.disabled = true;
+    try {
+        const result = await ipcRenderer.invoke('set-startup', isEnabled);
+        startupToggle.checked = result.enabled;
+        startupWarning.textContent = result.error || result.message || 'Reminders may not work as expected until Cortana is launched manually.';
+        startupWarning.style.display = result.enabled && !result.error ? 'none' : 'block';
+        if (result.supported && !result.error && result.enabled === isEnabled) showSavedToast();
+        startupToggle.disabled = result.supported === false;
+    } catch (_) {
+        startupToggle.checked = !isEnabled;
+        startupToggle.disabled = false;
+        startupWarning.textContent = 'Windows could not update startup. Try again.';
+        startupWarning.style.display = 'block';
+    }
 }
 
 function onMovableToggleChanged() {
@@ -2552,7 +2660,8 @@ function onPresetChanged() {
     const preset = AI_PRESETS[val];
     if (preset) {
         aiApiUrlInput.value = preset.url;
-        aiModelInput.value = preset.local ? '' : preset.model;
+        aiApiUrl = preset.url;
+        aiModelInput.value = preset.model || aiModelInput.value;
         ipcRenderer.send('set-setting', { key: 'aiApiUrl', value: preset.url });
         if (aiModelInput.value) {
             ipcRenderer.send('set-setting', { key: 'aiModel', value: aiModelInput.value });
@@ -2587,6 +2696,7 @@ function onAIModelChanged() {
 }
 
 function onAIApiUrlChanged() {
+    aiApiUrl = aiApiUrlInput.value;
     ipcRenderer.send('set-setting', { key: 'aiApiUrl', value: aiApiUrlInput.value });
     showSavedToast();
 }
@@ -2688,114 +2798,117 @@ function setupTTS() {
 
         const preferredVoiceIsAvailable = availableVoices.some(v => v.name === preferredVoiceName);
 
-        if (preferredVoiceIsAvailable) {
+        // Resolve the default alias and migrate only an unavailable legacy Zira
+        // default. A deliberately selected custom voice remains untouched.
+        const regularZira = availableVoices.find(v => /zira/i.test(v.name) && !/desktop/i.test(v.name));
+        if (!preferredVoiceIsAvailable && regularZira && /^Microsoft Zira(?: Desktop)?$/i.test(preferredVoiceName)) {
+            preferredVoiceName = regularZira.name;
+            ipcRenderer.send('set-setting', { key: 'preferredVoice', value: preferredVoiceName });
+        }
+
+        if (availableVoices.some(v => v.name === preferredVoiceName)) {
             voiceSelect.value = preferredVoiceName;
         } else {
-            const defaultVoice = availableVoices.find(v => v.name.includes("Zira")) || availableVoices[0];
+            const defaultVoice = findDefaultVoice(availableVoices);
             if (defaultVoice) {
                 voiceSelect.value = defaultVoice.name;
-                preferredVoiceName = defaultVoice.name;
-                ipcRenderer.send('set-setting', { key: 'preferredVoice', value: preferredVoiceName });
+                const missing = document.createElement('option');
+                missing.value = preferredVoiceName;
+                missing.textContent = `${preferredVoiceName} (unavailable; temporary fallback: ${defaultVoice.name})`;
+                voiceSelect.appendChild(missing);
+                voiceSelect.value = preferredVoiceName;
             }
         }
         
-        currentVoice = availableVoices.find(v => v.name === voiceSelect.value) || null;
+        currentVoice = resolveVoice(availableVoices, preferredVoiceName);
     }
 
-    if (window.speechSynthesis.getVoices().length === 0) {
-        window.speechSynthesis.onvoiceschanged = populateAndSetVoices;
-    } else {
-        populateAndSetVoices();
-    }
-}
-
-function speak(text, onSpeechEndCallback) {
-    window.speechSynthesis.cancel();
-    if (!text) {
-        if (onSpeechEndCallback) onSpeechEndCallback();
-        return;
-    }
-
-    if (ttsEngine === 'edge') {
-        speakEdge(text, onSpeechEndCallback);
-    } else {
-        speakSystem(text, onSpeechEndCallback);
-    }
+    window.speechSynthesis.onvoiceschanged = populateAndSetVoices;
+    populateAndSetVoices();
 }
 
 let currentEdgeAudio = null;
 let currentEdgeFilePath = null;
-
-function speakEdge(text, onSpeechEndCallback) {
+let outputGeneration = 0;
+function removeSpeechFile(filename) {
+    if (filename) require('fs').promises.unlink(filename).catch(() => {});
+}
+function cancelSpeechOutput() {
+    ++outputGeneration;
+    window.speechSynthesis.cancel();
     if (currentEdgeAudio) {
+        currentEdgeAudio.onended = null;
+        currentEdgeAudio.onerror = null;
         currentEdgeAudio.pause();
         currentEdgeAudio = null;
     }
-    // Clean up previous temp file if any
-    if (currentEdgeFilePath) {
-        try { require('fs').unlinkSync(currentEdgeFilePath); } catch(e) {}
-        currentEdgeFilePath = null;
-    }
-
-    let callbackInvoked = false;
-    const invokeCallback = () => {
-        if (callbackInvoked) return;
-        callbackInvoked = true;
-        if (onSpeechEndCallback) onSpeechEndCallback();
-    };
-
-    ipcRenderer.invoke('synthesize-edge-tts', {
-        text,
-        voice: edgeVoice,
-        pitch,
-        rate
-    }).then(result => {
-        if (!result.success) {
-            console.error('Edge TTS failed:', result.error);
-            invokeCallback();
-            return;
-        }
-        currentEdgeFilePath = result.filePath;
-        const audio = new Audio('file://' + result.filePath.replace(/\\/g, '/'));
-        currentEdgeAudio = audio;
-        const cleanup = () => {
-            currentEdgeAudio = null;
-            if (currentEdgeFilePath) {
-                try { require('fs').unlinkSync(currentEdgeFilePath); } catch(e) {}
-                currentEdgeFilePath = null;
-            }
-        };
-        audio.onended = () => {
-            cleanup();
-            invokeCallback();
-        };
-        audio.onerror = (err) => {
-            console.error('Edge TTS audio error:', err);
-            cleanup();
-            invokeCallback();
-        };
-        audio.play().catch(err => {
-            console.error('Edge TTS audio play failed:', err);
-            cleanup();
-            invokeCallback();
-        });
-    }).catch(err => {
-        console.error('Edge TTS invoke failed:', err);
-        invokeCallback();
-    });
+    removeSpeechFile(currentEdgeFilePath);
+    currentEdgeFilePath = null;
+    ipcRenderer.send('tts-end');
 }
 
-function speakSystem(text, onSpeechEndCallback) {
-    if (!currentVoice) {
+async function speak(text, onSpeechEndCallback) {
+    cancelSpeechOutput();
+    const generation = outputGeneration;
+    let completed = false;
+    const finish = () => {
+        if (completed || generation !== outputGeneration) return;
+        completed = true;
+        ipcRenderer.send('tts-end');
         if (onSpeechEndCallback) onSpeechEndCallback();
+    };
+    if (!text) { finish(); return; }
+    try {
+        // Await microphone teardown before synthesis or playback, including Bluetooth devices.
+        await ipcRenderer.invoke('tts-begin');
+        if (generation !== outputGeneration) return;
+        if (ttsEngine === 'edge' && navigator.onLine) await speakEdge(text, finish, generation);
+        else speakSystem(text, finish);
+    } catch (error) {
+        console.error('Speech output failed:', error);
+        finish();
+    }
+}
+
+async function speakEdge(text, finish, generation) {
+    let result;
+    try { result = await ipcRenderer.invoke('synthesize-edge-tts', { text, voice: edgeVoice, pitch, rate }); }
+    catch (error) { result = { success: false, error: error.message }; }
+    if (generation !== outputGeneration) { removeSpeechFile(result.filePath); return; }
+    if (!result.success) {
+        console.warn('Edge TTS failed; using local voice:', result.error);
+        speakSystem(text, finish);
         return;
     }
+    currentEdgeFilePath = result.filePath;
+    const audio = new Audio(require('url').pathToFileURL(result.filePath).href);
+    currentEdgeAudio = audio;
+    const cleanup = () => {
+        removeSpeechFile(result.filePath);
+        if (currentEdgeAudio === audio) { currentEdgeAudio = null; currentEdgeFilePath = null; }
+    };
+    audio.onended = () => { cleanup(); finish(); };
+    const fallback = () => {
+        if (generation !== outputGeneration) return;
+        audio.onended = audio.onerror = null;
+        audio.pause();
+        cleanup();
+        speakSystem(text, finish);
+    };
+    audio.onerror = fallback;
+    audio.play().catch(fallback);
+}
+
+function speakSystem(text, finish) {
+    const generation = outputGeneration;
+    currentVoice = resolveVoice(availableVoices, preferredVoiceName);
+    if (!currentVoice) { finish(); return; }
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.voice = currentVoice;
     utterance.pitch = pitch;
     utterance.rate = rate;
-    utterance.onend = () => { if (onSpeechEndCallback) onSpeechEndCallback(); };
-    utterance.onerror = () => { if (onSpeechEndCallback) onSpeechEndCallback(); };
+    utterance.onend = () => { if (generation === outputGeneration) finish(); };
+    utterance.onerror = () => { if (generation === outputGeneration) finish(); };
     window.speechSynthesis.speak(utterance);
 }
 
@@ -2813,7 +2926,8 @@ function onActionFinished() {
 function setStateIdle() {
     searchIcon.src = cortanaIcon;
     if (settingsContainer.classList.contains('visible')) return;
-    if (animationContainer.className === 'idle' && document.activeElement === searchBar) return;
+    if (animationContainer.className === 'idle' && document.activeElement === searchBar &&
+        anim.state === AnimationState.IDLE && !anim._isPlayingSpecial && resultsDisplay.textContent) return;
     
     if (searchResultsActive) {
         searchResultsActive = false;
@@ -2826,15 +2940,7 @@ function setStateIdle() {
     contentWrapper.style.display = 'block';
 
     clearTimeout(finishSpeakingTimeout);
-    window.speechSynthesis.cancel();
-    if (currentEdgeAudio) {
-        currentEdgeAudio.pause();
-        currentEdgeAudio = null;
-    }
-    if (currentEdgeFilePath) {
-        try { require('fs').unlinkSync(currentEdgeFilePath); } catch(e) {}
-        currentEdgeFilePath = null;
-    }
+    cancelSpeechOutput();
     requestSound.pause();
     requestSound.currentTime = 0;
     drumrollSound.pause();
@@ -2848,7 +2954,8 @@ function setStateIdle() {
     } else {
         searchIcon.src = cortanaIcon;
     }
-    anim.goToState(AnimationState.IDLE);
+    if (![AnimationState.IDLE, AnimationState.TRANSITION_TO_IDLE].includes(anim.state) || anim._isPlayingSpecial)
+        anim.goToState(AnimationState.TRANSITION_TO_IDLE);
 
     if (!isBusy) {
         stopTimerPanelInterval();
@@ -2902,6 +3009,10 @@ function getSearchUrl(query) {
 }
 
 async function performWebSearch(query) {
+    if (!navigator.onLine) {
+        displayAndSpeak('Web search needs an internet connection. You can still open apps and folders, calculate, set reminders and timers, and use your Notebook.', onActionFinished);
+        return;
+    }
     searchResultsActive = true;
     if (document.activeElement === searchBar) {
         searchIcon.src = searchIconPng;
@@ -3216,9 +3327,13 @@ function calculateResponse(query) {
 }
 
 async function getWeather(location) {
+    if (!navigator.onLine) {
+        displayAndSpeak('Weather needs an internet connection. Local commands and your Notebook still work offline.', onActionFinished);
+        return;
+    }
     let responseText;
     try {
-        const geoResponse = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(location)}&count=1`);
+        const geoResponse = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(location)}&count=1`, { signal: AbortSignal.timeout(10000) });
         if (!geoResponse.ok) {
             responseText = `Sorry, I had trouble connecting to the location service.`;
             displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, true);
@@ -3242,7 +3357,7 @@ async function getWeather(location) {
         const windSymbol = isImperial ? 'mph' : 'km/h';
         const windPhrase = isImperial ? 'miles per hour' : 'kilometers per hour';
 
-        const weatherResponse = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current_weather=true&temperature_unit=${tempUnit}&wind_speed_unit=${windUnit}`);
+        const weatherResponse = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current_weather=true&temperature_unit=${tempUnit}&wind_speed_unit=${windUnit}`, { signal: AbortSignal.timeout(10000) });
         if (!weatherResponse.ok) {
             responseText = `Sorry, I couldn't get the weather for ${locationNameForSpeech}.`;
             displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, true);
@@ -3765,10 +3880,9 @@ async function showReminders() {
 
         reminders.sort((a, b) => new Date(a.time) - new Date(b.time));
 
-        reminders.forEach((reminder, index) => {
+        reminders.forEach(reminder => {
             const item = document.createElement('div');
             item.className = 'reminder-list-item fade-in-item';
-            item.style.animationDelay = `${index * 100}ms`;
 
             const textContainer = document.createElement('div');
             textContainer.className = 'reminder-text-container';
@@ -3926,6 +4040,7 @@ function showTimersPanel() {
         .then(updateRemaining)
         .catch(() => {});
     timerPanelInterval = setInterval(() => {
+        if (document.hidden || !windowVisible || !time.isConnected) return;
         if (activeTimerId === null) {
             stopTimerPanelInterval();
             return;
@@ -3943,6 +4058,15 @@ function showTimersPanel() {
 }
 
 const priorityCommands = [
+    { regex: /^(?:open|show)(?: my)? (desktop|documents|downloads|pictures|music|videos|home)(?: folder)?$/i,
+      handler: async match => {
+        const result = await ipcRenderer.invoke('open-local-folder', match[1].toLowerCase());
+        displayAndSpeak(result.success ? `Opening ${match[1]}.` : result.error, onActionFinished, {}, !result.success);
+      } },
+    { regex: /^(?:open |show |my )?(?:notebook|to[ -]?do(?: list)?)$/i,
+      handler: () => { isBusy = false; openNotebook(); } },
+    { regex: /^(?:open|show)(?: my)? (notes|lists)$/i,
+      handler: match => { isBusy = false; openNotebook(); selectNotebookPage(match[1].toLowerCase() === 'notes' ? 'notes' : 'todos'); } },
     {
         regex: /^(drum ?roll)(,)?( please)?(!|\.|\?)?$/i,
         handler: () => {
@@ -3982,6 +4106,7 @@ const priorityCommands = [
     {
         regex: /^(weather today|weather forecast|current weather|today'?s weather)$/i,
         handler: () => {
+            if (notebookData.profile?.weatherCity.trim()) { getWeather(notebookData.profile.weatherCity.trim()); return; }
             displayAndSpeak("I need a location to check the weather. Try asking 'What's the weather in New York?'", onActionFinished, {}, false);
         }
     },
@@ -4320,6 +4445,10 @@ const commands = [
         regex: /^(?:what is |tell me about |who (?:is|was) |define )(.+)$|^what does (.+) mean\??$/i,
         handler: (match) => {
             const topic = (match[1] || match[2] || '').trim().replace(/[?!.]+$/, '');
+            if (!navigator.onLine) {
+                displayAndSpeak('Wikipedia needs an internet connection. You can still use local commands and your Notebook.', onActionFinished);
+                return;
+            }
             anim.goToState(AnimationState.THINKING);
             resultsDisplay.innerHTML = '';
             const p = document.createElement('p');
@@ -4492,6 +4621,7 @@ async function startTimer(value, unit, ms) {
     resultsDisplay.appendChild(timerDisplay);
 
     const updateDisplay = async () => {
+      if (document.hidden || !windowVisible) return;
       if (activeTimerId === null) return;
       const { remaining, active } =
         await ipcRenderer.invoke('get-timer-remaining', activeTimerId);
@@ -4613,7 +4743,7 @@ function processQuery(query) {
         }
     }
 
-    if (aiEnabled && navigator.onLine) {
+    if (aiEnabled && (navigator.onLine || isLoopback(aiApiUrl))) {
         anim.goToState(AnimationState.THINKING);
         resultsDisplay.innerHTML = '';
         const p = document.createElement('p');
@@ -4967,5 +5097,255 @@ function validateAndApplyActionFormState() {
     const addStepButton = document.getElementById('add-action-to-sequence-btn');
     if (addStepButton) {
         addStepButton.disabled = false;
+    }
+}let notebookData = { notes: '', todos: [], introduced: false };
+let notebookSaveGeneration = 0;
+let notebookPreviousFocus = null;
+let notebookPage = 'overview';
+const notebookTitles = { overview: 'Notebook', about: 'About me', reminders: 'Reminders', todos: 'Tasks', notes: 'Notes' };
+function setNavigationPage(page) {
+    for (const [id, name] of [['navigation-home','home'], ['notebook-btn','notebook'], ['settings-btn','settings']]) {
+        const button = document.getElementById(id);
+        if (name === page) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
+    }
+    collapseNavigation();
+}
+function collapseNavigation() {
+    document.getElementById('cortana-navigation').classList.remove('expanded');
+    document.getElementById('navigation-toggle').setAttribute('aria-expanded', 'false');
+}
+// Period UWP page transitions keep shared controls and the background fixed.
+// Only the heading and body enter, in two short, ordered regions.
+const contentAnimations = new WeakMap();
+const paneAnimations = new WeakMap();
+function cancelContentMotion(element) {
+    contentAnimations.get(element)?.cancel();
+    contentAnimations.delete(element);
+}
+function contentMotion(element, { leaving = false, delay = 0, distance = 40 } = {}) {
+    const previous = contentAnimations.get(element);
+    const current = previous?.playState === 'running' ? getComputedStyle(element) : null;
+    const from = current ? { opacity: current.opacity, transform: current.transform } : null;
+    cancelContentMotion(element);
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return null;
+    const animation = element.animate(leaving
+        ? [from || { opacity: 1, transform: 'none' }, { opacity: 0, transform: from?.transform || 'none' }]
+        : [from || { opacity: 0, transform: `translateX(${distance}px)` }, { opacity: 1, transform: 'translateX(0)' }],
+        { duration: leaving ? 83 : 300, delay: from ? 0 : delay, easing: leaving ? 'linear' : 'cubic-bezier(.1,.9,.2,1)', fill: 'both' });
+    contentAnimations.set(element, animation);
+    animation.finished.then(() => {
+        if (contentAnimations.get(element) === animation) {
+            contentAnimations.delete(element);
+            animation.cancel();
+        }
+    }).catch(() => {});
+    return animation;
+}
+function paneRegions(element) {
+    return [element.querySelector('.settings-header h1'), element.querySelector('.notebook-body, .settings-main-content')].filter(Boolean);
+}
+function cancelPaneMotion(element) {
+    paneAnimations.delete(element);
+    for (const region of paneRegions(element)) cancelContentMotion(region);
+}
+function enterPaneContent(element) {
+    paneRegions(element).forEach((region, index) => contentMotion(region, { delay: index * 33 }));
+}
+function showPane(element, animate = true) {
+    // Keep interrupted region positions; contentMotion continues from that frame.
+    paneAnimations.delete(element);
+    element.hidden = false; element.inert = false; element.classList.add('visible');
+    if (animate) enterPaneContent(element); else cancelPaneMotion(element);
+}
+function hidePane(element, immediate = false) {
+    element.classList.remove('visible'); element.inert = true;
+    const generation = {};
+    paneAnimations.set(element, generation);
+    if (immediate) { cancelPaneMotion(element); element.hidden = true; return; }
+    const animations = paneRegions(element).map(region => contentMotion(region, { leaving: true })).filter(Boolean);
+    if (!animations.length) { element.hidden = true; return; }
+    Promise.all(animations.map(animation => animation.finished)).then(() => {
+        if (paneAnimations.get(element) === generation && !element.classList.contains('visible')) element.hidden = true;
+    }).catch(() => {});
+}
+function selectNotebookPage(page = 'overview', focus = true, animate = true) {
+    if (!Object.hasOwn(notebookTitles, page)) page = 'overview';
+    const changed = notebookPage !== page;
+    notebookPage = page;
+    for (const item of document.querySelectorAll('.notebook-page')) item.hidden = item.id !== `notebook-${page}`;
+    document.getElementById('notebook-title').textContent = notebookTitles[page];
+    document.getElementById('notebook-back').setAttribute('aria-label', page === 'overview' ? 'Back to Cortana' : 'Back to Notebook');
+    document.getElementById('notebook-intro').hidden = page !== 'overview';
+    document.getElementById('notebook-save-status').hidden = page === 'overview' || page === 'reminders';
+    refreshVisualActivity();
+    document.querySelector('.notebook-content').scrollTop = 0;
+    if (animate && changed) enterPaneContent(document.getElementById('notebook-sidebar'));
+    if (focus) document.getElementById('notebook-back').focus({ preventScroll: true });
+    if (page === 'reminders') renderNotebookReminders();
+}
+async function persistNotebook() {
+    const generation = ++notebookSaveGeneration;
+    const status = document.getElementById('notebook-save-status');
+    status.textContent = 'Saving...';
+    try {
+        const result = await ipcRenderer.invoke('save-notebook', notebookData);
+        if (generation === notebookSaveGeneration) status.textContent = result.success ? 'Saved on this computer' : result.error;
+        return result.success;
+    } catch (_) { status.textContent = 'Could not save. Your changes are still here; try again.'; return false; }
+}
+function renderTodos() {
+    const list = document.getElementById('todo-list');
+    list.replaceChildren();
+    if (!notebookData.todos.length) {
+        const empty = document.createElement('p');
+        empty.textContent = 'All clear. Add something you want to do.';
+        list.appendChild(empty);
+    }
+    for (const item of notebookData.todos) {
+        const row = document.createElement('div'); row.className = 'todo-item';
+        const check = document.createElement('input'); check.type = 'checkbox'; check.checked = item.done; check.id = `todo-${item.id}`;
+        const label = document.createElement('label'); label.htmlFor = check.id; label.textContent = item.text;
+        check.onchange = () => { item.done = check.checked; persistNotebook(); };
+        const remove = document.createElement('button'); remove.className = 'notebook-delete'; remove.textContent = 'Delete'; remove.setAttribute('aria-label', `Delete ${item.text}`);
+        remove.onclick = () => { notebookData.todos = notebookData.todos.filter(todo => todo.id !== item.id); renderTodos(); persistNotebook(); };
+        row.append(check, label, remove); list.appendChild(row);
+    }
+}
+async function renderNotebookReminders() {
+    const list = document.getElementById('notebook-reminder-list');
+    try {
+        const reminders = await ipcRenderer.invoke('get-reminders');
+        list.replaceChildren();
+        if (!reminders.length) { const text = document.createElement('p'); text.textContent = 'No upcoming reminders.'; list.appendChild(text); }
+        for (const reminder of reminders) {
+            const row = document.createElement('div'); row.className = 'notebook-reminder';
+            const text = document.createElement('span'); text.textContent = `${reminder.text} — ${new Date(reminder.time).toLocaleString()}`;
+            const edit = document.createElement('button'); edit.className = 'notebook-delete'; edit.textContent = 'Edit';
+            edit.onclick = () => { closeNotebook(); showReminderUI({ id: reminder.id, initialText: reminder.text, initialTime: formatDateTimeForInput(new Date(reminder.time)), initialSound: reminder.sound }); };
+            const remove = document.createElement('button'); remove.className = 'notebook-delete'; remove.textContent = 'Delete';
+            remove.onclick = async () => { ipcRenderer.send('remove-reminder', reminder.id); await renderNotebookReminders(); };
+            row.append(text, edit, remove); list.appendChild(row);
+        }
+    } catch (_) { list.textContent = 'Reminders could not be loaded. Try opening this page again.'; }
+}
+function openNotebook(page = 'overview') {
+    _stopSpeechFromOutside?.();
+    cancelSpeechOutput();
+    hideSearchPanel();
+    clearTimeout(blurCleanupTimer);
+    closeSettings(true, { switching: true });
+    notebookPreviousFocus = document.activeElement;
+    const sidebar = document.getElementById('notebook-sidebar');
+    const alreadyOpen = sidebar.classList.contains('visible');
+    setNavigationPage('notebook');
+    document.getElementById('notebook-btn').setAttribute('aria-expanded', 'true');
+    selectNotebookPage(page, true, alreadyOpen);
+    if (!alreadyOpen) showPane(sidebar);
+    ipcRenderer.send('set-settings-visibility', true);
+    searchBar.disabled = true;
+    refreshVisualActivity();
+    renderTodos(); renderNotebookReminders();
+    document.getElementById('notebook-back').focus({ preventScroll: true });
+}
+function closeNotebook({ immediate = false, switching = false } = {}) {
+    const sidebar = document.getElementById('notebook-sidebar');
+    if (!sidebar || !sidebar.classList.contains('visible')) {
+        if (sidebar && immediate) hidePane(sidebar, true);
+        return;
+    }
+    hidePane(sidebar, immediate);
+    document.getElementById('notebook-btn').setAttribute('aria-expanded', 'false');
+    if (!switching) {
+        setNavigationPage('home');
+        ipcRenderer.send('set-settings-visibility', false);
+        searchBar.disabled = false;
+        searchBar.placeholder = 'Type here to search';
+        (notebookPreviousFocus && notebookPreviousFocus.isConnected && notebookPreviousFocus !== document.body && !notebookPreviousFocus.closest('[inert]') ? notebookPreviousFocus : document.getElementById('notebook-btn')).focus({ preventScroll: true });
+    }
+    refreshVisualActivity();
+}
+async function setupNotebookAndSystemControls() {
+    notebookData = await ipcRenderer.invoke('get-notebook');
+    notebookData.profile = { name: '', home: '', work: '', weatherCity: '', ...notebookData.profile };
+    notebookAnim = new AnimationManager(document.getElementById('notebook-idle-canvas'));
+    notebookAnim.renderer.active = false;
+    notebookAnim.setThemeColor(themeColor);
+    await notebookAnim.goToState(AnimationState.IDLE);
+    document.getElementById('notebook-btn').onclick = () => openNotebook();
+    document.getElementById('navigation-toggle').onclick = () => {
+        const expanded = document.getElementById('cortana-navigation').classList.toggle('expanded');
+        document.getElementById('navigation-toggle').setAttribute('aria-expanded', String(expanded));
+    };
+    document.getElementById('navigation-home').onclick = () => { closeNotebook(); closeSettings(); setNavigationPage('home'); };
+    document.getElementById('navigation-about').onclick = () => openNotebook('about');
+    document.getElementById('navigation-feedback').onclick = () => ipcRenderer.send('open-external-link', 'https://github.com/SoftBluey/Cortana-Electron/issues');
+    document.getElementById('notebook-back').onclick = () => notebookPage === 'overview' ? closeNotebook() : selectNotebookPage();
+    document.getElementById('todo-form').onsubmit = event => {
+        event.preventDefault();
+        const input = document.getElementById('todo-text');
+        const text = input.value.trim();
+        if (!text) return;
+        if (notebookData.todos.length >= 200) { document.getElementById('notebook-save-status').textContent = 'You can keep up to 200 tasks. Remove a task before adding another.'; return; }
+        notebookData.todos.push({ id: require('crypto').randomUUID(), text, done: false });
+        input.value = ''; renderTodos(); persistNotebook(); input.focus();
+    };
+    const notes = document.getElementById('notebook-notes-text'); notes.value = notebookData.notes;
+    notes.oninput = () => { notebookData.notes = notes.value; persistNotebook(); };
+    for (const tab of document.querySelectorAll('[data-page]')) tab.onclick = () => selectNotebookPage(tab.dataset.page);
+    for (const [id, key] of [['notebook-name','name']]) {
+        const input = document.getElementById(id); input.value = notebookData.profile[key];
+        input.oninput = () => { notebookData.profile[key] = input.value; persistNotebook(); };
+    }
+    document.getElementById('notebook-add-reminder').onclick = () => { closeNotebook(); showReminderUI(); };
+    document.addEventListener('keydown', event => {
+        const sidebar = document.getElementById('notebook-sidebar');
+        if (event.key === 'Escape' && document.getElementById('cortana-navigation').classList.contains('expanded')) { event.preventDefault(); collapseNavigation(); return; }
+        if (sidebar.classList.contains('visible') && event.key === 'Escape') { event.preventDefault(); notebookPage === 'overview' ? closeNotebook() : selectNotebookPage(); }
+        if (sidebar.classList.contains('visible') && event.key === 'Tab') {
+            const controls = [...document.querySelectorAll('#cortana-navigation button, #notebook-sidebar button, #notebook-sidebar input, #notebook-sidebar textarea, #notebook-sidebar select')].filter(el => !el.disabled && el.getClientRects().length);
+            const first = controls[0], last = controls[controls.length - 1];
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+            else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+        }
+        if (['Enter', ' '].includes(event.key) && event.target.matches('[role="button"]')) { event.preventDefault(); event.target.click(); }
+    });
+    for (const [id, key] of [['close-to-tray-toggle', 'closeToTray'], ['hotkey-listen-toggle', 'hotkeyStartsListening']]) {
+        document.getElementById(id).onchange = event => { ipcRenderer.send('set-setting', { key, value: event.target.checked }); showSavedToast(); };
+    }
+    document.getElementById('save-assistant-hotkey').onclick = async () => {
+        const value = document.getElementById('assistant-hotkey').value.trim();
+        const result = await ipcRenderer.invoke('set-assistant-hotkey', value);
+        document.getElementById('assistant-hotkey-status').textContent = result.success ? (value ? `Active: ${value}` : 'Shortcut disabled') : result.error;
+    };
+    document.getElementById('copy-speech-diagnostics').onclick = async () => {
+        const data = await ipcRenderer.invoke('speech-diagnostics');
+        require('electron').clipboard.writeText(JSON.stringify(data, null, 2));
+        document.getElementById('speech-diagnostics-status').textContent = 'Copied environment, speech stages and error codes. No API keys or recognized speech are included.';
+    };
+    document.getElementById('recognition-mode-select').onchange = event => {
+        ipcRenderer.send('set-setting', { key: 'recognitionMode', value: event.target.value });
+        showSavedToast();
+    };
+    document.getElementById('listening-sounds-toggle').onchange = event => {
+        listeningSounds = event.target.checked;
+        ipcRenderer.send('set-setting', { key: 'listeningSounds', value: listeningSounds });
+        showSavedToast();
+    };
+    // Chromium reports output/camera changes too. Only a changed input identity
+    // should reset capture; debounce bursts from virtual audio endpoints.
+    let inputIdentity = null, deviceChangeTimer;
+    const inputs = async () => require('./lib/audio-device-policy').inputFingerprint(await navigator.mediaDevices.enumerateDevices());
+    if (navigator.mediaDevices) {
+        inputIdentity = await inputs().catch(() => null);
+        navigator.mediaDevices.addEventListener('devicechange', () => {
+            clearTimeout(deviceChangeTimer);
+            deviceChangeTimer = setTimeout(async () => {
+                const next = await inputs().catch(() => null);
+                if (next === null || next === inputIdentity) return;
+                const hadIdentity = inputIdentity !== null;
+                inputIdentity = next;
+                if (hadIdentity) { ipcRenderer.send('speech-device-changed'); refreshSpeechDiagnostics(); }
+            }, 750);
+        });
     }
 }

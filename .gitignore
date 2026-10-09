@@ -2,8 +2,7 @@ CHANGELOG.md
 err.log
 out.log
 .winapp
-package-lock.json
-.winapp
+.verification/
 dist/
 node_modules/
 cortana_strings.txt

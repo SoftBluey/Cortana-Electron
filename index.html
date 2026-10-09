@@ -3,19 +3,71 @@
   <head>
     <meta charset="UTF-8" />
     <title>Cortana</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data: https:; media-src 'self' file: blob:; connect-src 'self' https: http://localhost:* http://127.0.0.1:* http://[::1]:*; object-src 'none'; base-uri 'none'; form-action 'none'" />
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
     <div id="app-container">
       <div class="main-container">
         <div id="drag-bar"></div>
-        <div id="settings-btn" role="button" tabindex="0" title="Settings">
-          <img id="settings-btn-icon" alt="Settings Icon" />
-        </div>
+        <nav id="cortana-navigation" aria-label="Cortana navigation">
+          <button id="navigation-toggle" aria-label="Expand navigation" aria-expanded="false"><span class="rail-icon">&#xE700;</span><span class="rail-label">Cortana</span></button>
+          <button id="navigation-home" aria-label="Home" aria-current="page"><span class="rail-icon">&#xE80F;</span><span class="rail-label">Home</span></button>
+          <button id="notebook-btn" aria-label="Notebook" aria-controls="notebook-sidebar" aria-expanded="false"><span class="rail-icon">&#xE82D;</span><span class="rail-label">Notebook</span></button>
+          <div class="navigation-bottom">
+            <button id="navigation-about" aria-label="About me"><span class="rail-icon">&#xE77B;</span><span class="rail-label">About me</span></button>
+            <button id="settings-btn" title="Settings" aria-label="Settings"><span class="rail-icon">&#xE713;</span><span class="rail-label">Settings</span><img id="settings-btn-icon" alt="" hidden /></button>
+            <button id="navigation-feedback" aria-label="Feedback"><span class="rail-icon">&#xE939;</span><span class="rail-label">Feedback</span></button>
+          </div>
+        </nav>
         <div id="close-btn" role="button" tabindex="0" title="Close Application">
           <img id="close-btn-icon" alt="Close Icon" />
         </div>
         <div id="cortana-container" class="content-pane">
+          <section id="notebook-sidebar" aria-label="Notebook" hidden>
+            <div class="settings-header">
+              <button id="notebook-back" aria-label="Back to Cortana">&#xE0A6;</button>
+              <h1 id="notebook-title">Notebook</h1>
+            </div>
+            <div class="notebook-content">
+              <div class="notebook-body">
+              <div id="notebook-intro" hidden>
+                <canvas id="notebook-idle-canvas" aria-hidden="true"></canvas>
+              </div>
+              <div id="notebook-overview" class="notebook-page">
+                <div class="notebook-directory" aria-label="Your Notebook">
+                  <button data-page="notes"><span class="directory-icon">&#xE70B;</span>Notes<span class="directory-arrow">&#xE76C;</span></button>
+                  <button data-page="todos"><span class="directory-icon">&#xE73A;</span>Tasks<span class="directory-arrow">&#xE76C;</span></button>
+                  <button data-page="reminders"><span class="directory-icon">&#xE787;</span>Reminders<span class="directory-arrow">&#xE76C;</span></button>
+                  <button data-page="about"><span class="directory-icon">&#xE77B;</span>About me<span class="directory-arrow">&#xE76C;</span></button>
+                </div>
+              </div>
+              <div id="notebook-about" class="notebook-page" hidden>
+                <h2>What should I call you?</h2>
+                <label for="notebook-name">Your name or nickname</label><input id="notebook-name" type="text" maxlength="80" autocomplete="off" />
+              </div>
+              <div id="notebook-todos" class="notebook-page" hidden>
+                <h2>Things to do</h2>
+                <form id="todo-form">
+                  <label for="todo-text">Add a task</label>
+                  <div class="todo-input-row"><input id="todo-text" maxlength="512" placeholder="What do you need to do?" required /><button type="submit">Add</button></div>
+                </form>
+                <div id="todo-list"></div>
+              </div>
+              <div id="notebook-notes" class="notebook-page" hidden>
+                <h2>Your notes</h2>
+                <label for="notebook-notes-text">Saved on this computer</label>
+                <textarea id="notebook-notes-text" maxlength="20000" rows="9" placeholder="Something worth remembering..."></textarea>
+              </div>
+              <div id="notebook-reminders" class="notebook-page" hidden>
+                <h2>Upcoming reminders</h2>
+                <button id="notebook-add-reminder" class="settings-button">Add reminder</button>
+                <div id="notebook-reminder-list"></div>
+              </div>
+              <p id="notebook-save-status" role="status" aria-live="polite"></p>
+              </div>
+            </div>
+          </section>
           <div id="animation-container">
             <canvas id="circle-canvas"></canvas>
             <div id="content-wrapper">
@@ -50,9 +102,9 @@
               </div>
             </div>
           </div>
-          <div id="settings-container">
+          <div id="settings-container" hidden inert>
             <div class="settings-header">
-              <button id="settings-back-btn">&#xE0A6;</button>
+              <button id="settings-back-btn" aria-label="Back to Cortana">&#xE0A6;</button>
               <h1>Settings</h1>
               <span id="settings-saved-toast" class="saved-toast">Saved</span>
             </div>
@@ -110,12 +162,12 @@
                     />
                   </div>
                   <p id="voice-warning" class="setting-warning">
-                    Cortana's default voice (Microsoft Zira Desktop) is not
+                    Cortana's default voice (Microsoft Zira) is not
                     available.
                   </p>
                   <div
                     id="eva-voice-container"
-                    class="setting-item"
+                    class="setting-item setting-column"
                     style="
                       display: none;
                       flex-direction: column;
@@ -191,6 +243,17 @@
                 </div>
                 <div class="settings-section">
                   <h2>Voice</h2>
+                  <div class="setting-item">
+                    <label for="recognition-mode-select">Speech recognition</label>
+                    <select id="recognition-mode-select">
+                      <option value="dictation">Online dictation</option>
+                      <option value="commands">Built-in commands (offline)</option>
+                    </select>
+                  </div>
+                  <div class="setting-item">
+                    <label for="listening-sounds-toggle">Listening sounds</label>
+                    <label class="toggle-switch"><input type="checkbox" id="listening-sounds-toggle" /><span class="slider"></span></label>
+                  </div>
                   <div class="setting-item">
                     <label for="hey-cortana-toggle">"Hey Cortana" wake word</label>
                     <label class="toggle-switch">
@@ -298,7 +361,7 @@
                       />
                     </div>
                     <div id="ai-custom-fields" style="display:none">
-                      <div class="setting-item" style="flex-direction: column; align-items: stretch;">
+                      <div class="setting-item setting-column" style="flex-direction: column; align-items: stretch;">
                         <label for="ai-system-prompt-input">System Prompt</label>
                         <textarea
                           id="ai-system-prompt-input"
@@ -352,13 +415,25 @@
                       <span class="slider"></span>
                     </label>
                   </div>
+                  <div class="setting-item">
+                    <label for="close-to-tray-toggle">Keep running when dismissed</label>
+                    <label class="toggle-switch"><input type="checkbox" id="close-to-tray-toggle" /><span class="slider"></span></label>
+                  </div>
+                  <p class="setting-warning" style="display:block">When this is off, dismissing Cortana quits the app. Reminders, timers and the assistant shortcut stop working until you open it again.</p>
+                  <div class="setting-item setting-column assistant-shortcut">
+                    <label for="assistant-hotkey">Assistant keyboard shortcut</label>
+                    <input id="assistant-hotkey" class="settings-text-input" placeholder="CommandOrControl+Shift+C" maxlength="128" />
+                    <button id="save-assistant-hotkey" class="settings-button">Apply shortcut</button>
+                    <span id="assistant-hotkey-status" role="status"></span>
+                  </div>
+                  <div class="setting-item">
+                    <label for="hotkey-listen-toggle">Shortcut starts listening</label>
+                    <label class="toggle-switch"><input type="checkbox" id="hotkey-listen-toggle" /><span class="slider"></span></label>
+                  </div>
+                  <p class="setting-warning" style="display:block">Map a compatible headset or keyboard button to this shortcut in your device software. Leave the shortcut empty to disable it.</p>
                 </div>
-                <div class="settings-section">
-                  <h2>Speech Recognition</h2>
-                  <p class="setting-warning" style="display:block;">
-                    Windows speech recognition always uses the system default
-                    microphone.
-                  </p>
+                <details id="speech-troubleshooting" class="settings-section">
+                  <summary>Troubleshooting</summary>
                   <div class="setting-item">
                     <label>Microphone</label>
                     <span id="speech-input-device" class="speech-device-name">Detecting...</span>
@@ -367,15 +442,9 @@
                     <label>Recognition status</label>
                     <span id="speech-recognition-status">Idle</span>
                   </div>
-                  <div class="setting-item">
-                    <label>Last recognition event</label>
-                    <span id="speech-last-event">None</span>
-                  </div>
-                  <div class="setting-item" style="flex-direction:column; align-items:flex-start; gap:6px;">
-                    <label>Recent recognition errors</label>
-                    <div id="speech-error-log" aria-live="polite" style="font-size:12px; opacity:0.85; width:100%;">None</div>
-                  </div>
-                </div>
+                  <button id="copy-speech-diagnostics" class="settings-button">Copy speech diagnostics</button>
+                  <p id="speech-diagnostics-status" role="status" class="setting-warning" style="display:block"></p>
+                </details>
                 <div class="settings-section">
                   <h2>Advanced</h2>
                   <button id="reset-voice-btn" class="settings-button">
@@ -432,6 +501,11 @@
       </div>
       <div id="search-panel" class="search-panel"></div>
       <div class="search-container">
+        <div id="speech-feedback" role="status" aria-live="polite" hidden>
+          <span id="speech-feedback-message"></span>
+          <button id="speech-feedback-settings" type="button">Speech settings</button>
+          <button id="speech-feedback-dismiss" type="button" aria-label="Dismiss speech message">&#xE711;</button>
+        </div>
         <div class="search-input-wrapper">
           <img id="search-icon" alt="Cortana Icon" />
           <textarea

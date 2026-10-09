@@ -3,6 +3,9 @@
     --primary-text-color: white;
     --hue-rotate-deg: 0deg;
     --text-color: #ffffff;
+    --motion-enter: 300ms;
+    --motion-exit: 160ms;
+    --motion-ease: cubic-bezier(.1, .9, .2, 1);
 }
 
 * {
@@ -57,7 +60,7 @@ body.movable-mode {
     transform: translateY(100%);
     contain: paint;
     background: #171717;
-    transition: transform 0.35s cubic-bezier(0.1, 0.9, 0.2, 1), opacity 0.35s cubic-bezier(0.1, 0.9, 0.2, 1);
+    transition: transform var(--motion-exit) cubic-bezier(.7, 0, 1, .5), opacity 83ms linear;
 }
 
 body.movable-mode #app-container {
@@ -70,12 +73,13 @@ body.movable-mode #app-container {
 
 #app-container.visible {
     opacity: 1;
-    transform: translateY(0);
+    transform: none;
+    transition: transform var(--motion-enter) var(--motion-ease), opacity 167ms linear;
 }
 
 body.slim-mode #app-container {
     height: 220px;
-    transition: transform 0.35s cubic-bezier(0.1, 0.9, 0.2, 1), opacity 0.35s cubic-bezier(0.1, 0.9, 0.2, 1), height 0.3s ease;
+    transition: transform var(--motion-enter) var(--motion-ease), opacity 167ms linear, height var(--motion-enter) var(--motion-ease);
     overflow: visible;
 }
 body.slim-mode .main-container {
@@ -206,8 +210,7 @@ body.slim-mode #search-panel {
     position: absolute;
     width: 100%;
     height: 100%;
-    transition: top 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94),
-                height 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    transition: top var(--motion-enter) var(--motion-ease), height var(--motion-enter) var(--motion-ease);
 }
 
 #circle-canvas {
@@ -217,17 +220,19 @@ body.slim-mode #search-panel {
     transform: translateX(-50%);
     height: 200px;
     width: auto;
-    transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    max-width: 100%;
+    object-fit: contain;
+    transform-origin: center top;
+    transition: transform var(--motion-enter) var(--motion-ease);
 }
 
 #content-wrapper {
     position: absolute;
     width: 90%;
-    left: 50%;
-    transform: translateX(-50%);
+    left: 5%;
     text-align: center;
     overflow: hidden;
-    transition: top 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    transition: top var(--motion-enter) var(--motion-ease);
 }
 
 /* Widen #content-wrapper to full width while it holds the search results
@@ -253,7 +258,7 @@ body.slim-mode #search-panel {
     transition: opacity 0.2s ease;
 }
 
-#results-display p.fade-in-item {
+#results-display p.fade-in-item, #results-display p.idle-greeting {
     font-family: 'Segoe UI Light', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     font-weight: 300;
 }
@@ -273,11 +278,6 @@ body.slim-mode #search-panel {
     }
     to {
         opacity: 0;
-        transform: scaleY(0);
-        height: 0;
-        margin: 0;
-        padding: 0;
-        border: 0;
     }
 }
 
@@ -335,9 +335,10 @@ body.slim-mode #search-panel {
 }
 
 #animation-container.active #circle-canvas {
-    top: 4px;
-    height: 110px;
+    top: 157px;
+    height: 200px;
     width: auto;
+    transform: translate(-50%, -153px) scale(.55);
 }
 
 #animation-container.active #content-wrapper {
@@ -473,7 +474,6 @@ body.slim-mode #search-panel {
     flex-direction: column;
     background-color: #171717;
     z-index: 100;
-    transform: translateZ(0);
 }
 
 .search-input-wrapper {
@@ -626,15 +626,17 @@ body.slim-mode #search-panel {
     background: #FFFFFF;
     overflow-y: auto;
     z-index: 50;
-    transform: translate3d(0, 100%, 0);
+    opacity: 0;
+    visibility: hidden;
     pointer-events: none;
-    will-change: transform;
-    transition: transform 0.35s cubic-bezier(0.1, 0.9, 0.2, 1);
+    transition: opacity 83ms linear, visibility 0s 83ms;
 }
 
 .search-panel.visible {
-    transform: translate3d(0, 0, 0);
+    opacity: 1;
+    visibility: visible;
     pointer-events: auto;
+    transition: opacity 167ms linear;
 }
 
 .search-panel::-webkit-scrollbar {
@@ -742,20 +744,26 @@ body.slim-mode #search-panel {
     color: white;
     display: none;
     flex-direction: column;
-    align-items: center;
-    padding: 30px 35px;
+    align-items: stretch;
+    padding: 16px;
+    overflow-y: auto;
     z-index: 5;
 }
 
 #reminder-container.visible,
 #custom-action-form-container.visible {
     display: flex;
-    animation: fadeIn 0.3s ease-in-out forwards;
+    animation: contentEntrance 200ms var(--motion-ease) both;
+}
+
+@keyframes contentEntrance {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
 }
 
 #reminder-container {
-    top: 160px;
-    height: calc(100% - 160px);
+    top: 120px;
+    height: calc(100% - 120px);
 }
 
 .reminder-title {
@@ -767,7 +775,8 @@ body.slim-mode #search-panel {
 
 .reminder-form {
     width: 100%;
-    height: 100%;
+    min-height: 0;
+    flex: 0 0 auto;
     display: flex;
     flex-direction: column;
 }
@@ -949,13 +958,12 @@ body.slim-mode #search-panel {
     display: flex;
     flex-direction: column;
     z-index: 20;
-    transform: translateX(100%);
-    transition: transform 0.35s cubic-bezier(0.1, 0.9, 0.2, 1);
+    transform: none;
     pointer-events: none;
 }
 
 #settings-container.visible {
-    transform: translateX(0);
+    transform: none;
     pointer-events: auto;
 }
 
@@ -965,6 +973,7 @@ body.slim-mode #search-panel {
     height: 45px;
     flex-shrink: 0;
 }
+.settings-header > button { flex: 0 0 45px; margin-right: 10px; }
 
 #settings-back-btn {
     font-family: 'Segoe MDL2 Assets', 'Segoe UI Symbol';
@@ -987,8 +996,8 @@ body.slim-mode #search-panel {
 }
 
 .settings-header h1 {
-    font-size: 16px;
-    font-weight: 600;
+    font-size: 18px;
+    font-weight: 400;
     flex-grow: 1;
     padding-left: 0;
     white-space: nowrap;
@@ -1498,4 +1507,103 @@ body.movable-mode #drag-bar {
 
 body.movable-mode #settings-btn {
     right: 0;
+}
+#reminder-time-input { font-size: 16px; min-width: 0; }
+#speech-feedback { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px; border-top: 2px solid var(--primary-color); background: #242424; color: white; font-size: 13px; line-height: 1.5; max-height: 180px; overflow-y: auto; }
+#speech-feedback-message { flex: 1 1 100%; overflow-wrap: anywhere; }
+#speech-feedback button { background: #333; border: 1px solid #777; color: white; padding: 5px 8px; cursor: pointer; }
+#speech-feedback-dismiss { margin-left: auto; font-family: 'Segoe MDL2 Assets'; }
+/* Classic Cortana Notebook, sharing the existing flat Windows controls. */
+[hidden] { display: none !important; }
+button:focus-visible, [role="button"]:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--primary-color); outline-offset: -2px; }
+#notebook-btn { position: absolute; left: 0; top: 0; width: 45px; height: 45px; z-index: 10; background: transparent; border: 0; color: #aaa; font: 16px 'Segoe MDL2 Assets'; cursor: pointer; -webkit-app-region: no-drag; }
+#notebook-btn:hover { background: #3e3e3e; color: white; }
+body.slim-mode #notebook-btn, body.slim-mode #notebook-sidebar { display: none; }
+#notebook-sidebar { position: absolute; inset: 0; z-index: 19; background: #171717; color: white; display: flex; flex-direction: column; }
+#notebook-sidebar h1 { font-size: 18px; font-weight: 400; }
+#notebook-back { width: 45px; height: 45px; border: 0; background: transparent; color: white; font: 16px 'Segoe MDL2 Assets'; cursor: pointer; }
+.notebook-content { padding: 12px 20px 20px; overflow-y: auto; flex: 1; }
+.notebook-content h2 { font-size: 19px; font-weight: 400; margin: 12px 0; }
+.notebook-content p, .notebook-content label { font-size: 13px; line-height: 1.5; }
+#notebook-intro { border-bottom: 1px solid #444; padding-bottom: 16px; }
+.notebook-tabs { display: flex; gap: 4px; margin: 12px 0 20px; }
+.notebook-tabs button { flex: 1; padding: 8px 4px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #aaa; cursor: pointer; }
+.notebook-tabs button[aria-current] { color: white; border-bottom-color: var(--primary-color); }
+.todo-input-row { display: flex; gap: 6px; margin: 8px 0 12px; }
+.notebook-content input[type="text"], #todo-text, #notebook-notes-text { background: #252525; border: 1px solid #666; color: white; padding: 8px; min-width: 0; width: 100%; border-radius: 0; }
+#notebook-notes-text { margin-top: 8px; resize: vertical; }
+.todo-input-row button, .notebook-delete { background: #333; border: 1px solid #666; color: white; padding: 6px 10px; cursor: pointer; }
+.todo-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid #333; }
+.todo-item label { flex: 1; overflow-wrap: anywhere; }
+.todo-item input:checked + label { text-decoration: line-through; color: #aaa; }
+.notebook-delete { padding: 3px 7px; font-size: 12px; }
+.notebook-reminder { border-bottom: 1px solid #333; padding: 12px 0; display: flex; gap: 8px; align-items: center; }
+.notebook-reminder span { flex: 1; overflow-wrap: anywhere; font-size: 13px; }
+#notebook-save-status { color: #aaa; min-height: 20px; margin-top: 10px; }
+@media (prefers-reduced-motion: reduce) { #app-container, #settings-container, .search-panel { transition-duration: 0.01s; } }
+
+/* 1607-style persistent rail. Expanded labels overlay rather than rescale text. */
+#cortana-navigation { position: absolute; inset: 0 auto 0 0; width: 208px; z-index: 30; background: #101010; overflow: hidden; clip-path: inset(0 160px 0 0); transition: clip-path var(--motion-exit) var(--motion-ease); }
+#cortana-navigation.expanded { clip-path: inset(0); transition-duration: var(--motion-enter); }
+#cortana-navigation button { position: relative; inset: auto; display: flex; align-items: center; width: 208px; height: 48px; border: 0; background: transparent; color: white; cursor: pointer; text-align: left; -webkit-app-region: no-drag; }
+#cortana-navigation #settings-btn { justify-content: flex-start; right: auto; padding: 0; }
+#cortana-navigation button { padding: 0; gap: 0; }
+#cortana-navigation button:hover { background: #292929; }
+#cortana-navigation button[aria-current="page"] { background: color-mix(in srgb, var(--primary-color) 65%, #101010); }
+.rail-icon { font: 16px 'Segoe MDL2 Assets'; width: 48px; flex-shrink: 0; text-align: center; }
+.rail-label { font-size: 14px; white-space: nowrap; }
+.navigation-bottom { position: absolute; bottom: 0; width: 100%; }
+#cortana-container { left: 48px; width: calc(100% - 48px); }
+#drag-bar { left: 48px; width: calc(100% - 48px); }
+#notebook-sidebar { background: #171717; overflow: hidden; }
+.notebook-content { padding: 8px 12px 20px; }
+.notebook-content, .settings-content { scrollbar-gutter: stable; }
+.notebook-directory { margin: 0 -12px; }
+.notebook-directory button { width: 100%; min-height: 46px; display: flex; align-items: center; gap: 10px; background: transparent; border: 0; color: white; text-align: left; padding: 8px 14px; font-size: 14px; cursor: pointer; }
+.notebook-directory button:hover { background: #303030; }
+.directory-icon, .directory-arrow { font: 16px 'Segoe MDL2 Assets'; }
+.directory-icon { width: 20px; }
+.directory-arrow { margin-left: auto; font-size: 10px; color: #aaa; }
+.notebook-directory hr { border: 0; border-top: 1px solid #3a3a3a; margin: 8px 14px; }
+.notebook-page > label { display: block; margin: 12px 0 5px; }
+.notebook-page > p { color: #aaa; margin: 12px 0; }
+.notebook-page > .settings-button { margin: 12px 0; }
+.notebook-content select { display: block; width: 100%; padding: 8px; background: #252525; border: 1px solid #666; color: white; }
+#notebook-idle-canvas { display: block; width: auto; height: 144px; max-width: 100%; object-fit: contain; margin: 0 auto 12px; }
+#notebook-save-status:empty { margin: 0; min-height: 0; }
+.settings-section > summary { cursor: pointer; color: #aaa; font-size: 13px; padding: 12px 0; }
+.settings-section > summary:hover { color: white; }
+#speech-troubleshooting:not([open]) > :not(summary) { display: none; }
+body.slim-mode #cortana-navigation { display: none; }
+body.slim-mode #cortana-container { left: 0; width: 100%; }
+@media (prefers-reduced-motion: reduce) { #cortana-navigation { transition: none; } }
+
+/* Settings occupy the remaining pane; controls wrap instead of compressing. */
+.settings-content { padding: 0 16px; min-width: 0; container-type: inline-size; }
+.settings-content .setting-item { gap: 10px; min-width: 0; flex-wrap: wrap; }
+.settings-content .setting-item > label:first-child { flex: 1 1 110px; min-width: 0; overflow-wrap: anywhere; }
+.settings-content .setting-item.setting-column > label:first-child { flex: 0 0 auto; }
+.settings-content select, .notebook-content select { font: inherit; color: white; background-color: #171717; border: 1px solid #888; padding: 8px 30px 8px 10px; border-radius: 0; appearance: none; background-image: var(--select-arrow-svg); background-repeat: no-repeat; background-position: right 8px center; background-size: .65em auto; min-width: 0; max-width: 100%; }
+.settings-content .setting-item > select { flex: 1 1 160px; width: 160px; max-width: 100%; }
+.settings-content select:hover, .notebook-content select:hover { background-color: #333; }
+.settings-content select:focus, .notebook-content select:focus { border-color: var(--primary-color); }
+.settings-content select option, .notebook-content select option { background: #171717; color: white; }
+.settings-content .settings-text-input { min-width: 0; max-width: 100%; }
+.settings-content .setting-item > .settings-text-input { flex: 1 1 160px; width: 160px; }
+.settings-content .assistant-shortcut { flex-direction: column; align-items: stretch; gap: 8px; }
+.settings-content .assistant-shortcut > #assistant-hotkey { flex: 0 0 auto; width: 100%; height: 34px; box-sizing: border-box; padding: 6px 8px; font-size: 13px; }
+.assistant-shortcut > .settings-button { align-self: flex-start; }
+#assistant-hotkey-status { font-size: 12px; overflow-wrap: anywhere; }
+.settings-content p { overflow-wrap: anywhere; }
+@container (max-width: 330px) {
+  .setting-item:has(> select, > .settings-text-input) > label:first-child { flex-basis: 100%; }
+  .setting-item > select, .setting-item > .settings-text-input { max-width: none; width: 100%; flex-basis: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        transition: none !important;
+        animation: none !important;
+    }
+    .fade-in-item { opacity: 1; }
 }

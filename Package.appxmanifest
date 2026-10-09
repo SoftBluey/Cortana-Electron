@@ -14,7 +14,7 @@
   <Identity
     Name="cortana-electron"
     Publisher="CN=bluey"
-    Version="1.0.0.0" />
+    Version="8.0.0.0" />
 
   <Properties>
     <DisplayName>cortana-electron</DisplayName>
@@ -26,7 +26,7 @@
   </Properties>
 
   <Dependencies>
-    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.18362.0" MaxVersionTested="10.0.26200.0" />
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26300.0" />
   </Dependencies>
 
   <Resources>
@@ -49,6 +49,7 @@
   </Applications>
 
   <Capabilities>
+    <Capability Name="internetClient" />
     <rescap:Capability Name="runFullTrust" />
     <DeviceCapability Name="microphone" />
   </Capabilities>
