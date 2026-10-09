@@ -6,7 +6,7 @@ fs.mkdirSync(output, { recursive: true });
 const label = process.argv.find(value => value.startsWith('--label='))?.slice(8) || 'performance';
 const profile = fs.mkdtempSync(path.join(output, 'performance-'));
 app.setPath('userData', profile); app.setAppPath(root); app.setLoginItemSettings = () => {};
-fs.writeFileSync(path.join(profile, 'settings.json'), JSON.stringify({ firstRunComplete: true, openAtLogin: false, heyCortana: false,
+fs.writeFileSync(path.join(profile, 'settings.json'), JSON.stringify({ firstRunComplete: true, firstRunRelease: '8.1.0', openAtLogin: false, heyCortana: false,
   isMovable: !process.argv.includes('--classic'), themeColor: '#c04090', useWindowsAccent: false,
   ttsEngine: process.argv.includes('--edge') ? 'edge' : 'system' }));
 const started = performance.now(), errors = [], result = { label };

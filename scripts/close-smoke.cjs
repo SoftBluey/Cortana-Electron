@@ -8,7 +8,7 @@ app.setPath('userData',fs.mkdtempSync(path.join(output,'close-')));app.setAppPat
 const shortcut='CommandOrControl+Shift+Alt+F12';let reopen;
 const originalRegister=globalShortcut.register.bind(globalShortcut);
 globalShortcut.register=(key,callback)=>{if(key===shortcut)reopen=callback;return originalRegister(key,callback);};
-fs.writeFileSync(path.join(app.getPath('userData'),'settings.json'),JSON.stringify({firstRunComplete:true,openAtLogin:false,heyCortana:false,isMovable:movable,closeToTray:dismiss,assistantHotkey:shortcut,hotkeyStartsListening:false}));
+fs.writeFileSync(path.join(app.getPath('userData'),'settings.json'),JSON.stringify({firstRunComplete:true,firstRunRelease:'8.1.0',openAtLogin:false,heyCortana:false,isMovable:movable,closeToTray:dismiss,assistantHotkey:shortcut,hotkeyStartsListening:false}));
 require('../main.js');
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 let started,acknowledged=false,ackMs,quitObserved=false;

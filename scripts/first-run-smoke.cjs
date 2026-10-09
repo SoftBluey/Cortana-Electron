@@ -8,7 +8,8 @@ if(!profile.toLowerCase().startsWith(output.toLowerCase()+path.sep))throw Error(
 const existing=process.argv.includes('--existing'),completed=process.argv.includes('--completed'),skip=process.argv.includes('--skip');
 const label=process.argv.find(value=>value.startsWith('--label='))?.slice(8)||'first-run';
 app.setPath('userData',profile);app.setAppPath(root);app.setLoginItemSettings=()=>{throw Error('Unexpected startup mutation');};
-if(existing&&!reuse)fs.writeFileSync(path.join(profile,'settings.json'),JSON.stringify({openAtLogin:false,heyCortana:false,isMovable:true,themeColor:'#c04090'}));
+if(process.argv.includes('--reset-tour')) { app.relaunch=()=>{};app.quit=()=>{}; }
+if(existing&&!reuse)fs.writeFileSync(path.join(profile,'settings.json'),JSON.stringify({openAtLogin:false,heyCortana:false,isMovable:true,themeColor:'#c04090',...(process.argv.includes('--legacy-complete')?{firstRunComplete:true}:{})}));
 if(!reuse)fs.writeFileSync(path.join(profile,'notebook.json'),JSON.stringify({notes:'Keep this note',todos:[{id:'keep',text:'Keep this task',done:false}],introduced:true,profile:{name:'',home:'',work:'',weatherCity:''}}));
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms)),checks=[],errors=[];
 require('../main.js');
@@ -70,7 +71,7 @@ app.whenReady().then(async()=>{
       await js("document.getElementById('first-run-continue').click();");
       await run('An unsaved setup can be left without blocking Home or claiming it was saved',"return !firstRun.visible&&!firstRunNeeded&&!searchBar.disabled&&!(await cortana.getSettings()).firstRunComplete&&notebookData.profile.name==='';");
     }else {
-    await run('A completion-save failure preserves saved details and permits a safe retry',"const invoke=ipcRenderer.invoke,before=(await cortana.getSettings()).firstRunComplete;ipcRenderer.invoke=(channel,...args)=>channel==='set-setting'&&args[0]?.key==='firstRunComplete'?Promise.resolve({success:false,error:'Test: completion not saved'}):invoke.call(ipcRenderer,channel,...args);try{document.getElementById('first-run-next').click();await new Promise(r=>setTimeout(r,150));const data=await cortana.getNotebook();return firstRun.visible&&!document.getElementById('first-run-next').disabled&&!document.getElementById('first-run-error').hidden&&data.profile.name==='Bluey'&&data.profile.weatherCity==='Chicago'&&(await cortana.getSettings()).firstRunComplete===before;}finally{ipcRenderer.invoke=invoke;}");
+    await run('A completion-save failure preserves saved details and permits a safe retry',"const invoke=ipcRenderer.invoke,before=await cortana.getSettings();ipcRenderer.invoke=(channel,...args)=>channel==='set-settings'&&args[0]?.firstRunRelease==='8.1.0'?Promise.resolve({success:false,error:'Test: completion not saved'}):invoke.call(ipcRenderer,channel,...args);try{document.getElementById('first-run-next').click();await new Promise(r=>setTimeout(r,150));const data=await cortana.getNotebook(),after=await cortana.getSettings();return firstRun.visible&&!document.getElementById('first-run-next').disabled&&!document.getElementById('first-run-error').hidden&&data.profile.name==='Bluey'&&data.profile.weatherCity==='Chicago'&&after.firstRunComplete===before.firstRunComplete&&after.firstRunRelease===before.firstRunRelease;}finally{ipcRenderer.invoke=invoke;}");
     await js("document.getElementById('first-run-name').focus();");
     win.focus();win.webContents.sendInputEvent({type:'keyDown',keyCode:'Return'});win.webContents.sendInputEvent({type:'char',keyCode:'\r'});win.webContents.sendInputEvent({type:'keyUp',keyCode:'Return'});await delay(250);
     await run('Finishing saves name and city, preserves old Notebook data and returns to Home',"const data=await cortana.getNotebook(),settings=await cortana.getSettings();return {passed:settings.firstRunComplete&&!firstRun.visible&&!searchBar.disabled&&!micBtn.disabled&&!animationContainer.inert&&data.profile.name==='Bluey'&&data.profile.weatherCity==='Chicago'&&data.notes==='Keep this note'&&data.todos[0].id==='keep'&&settings.heyCortana===false,data,complete:settings.firstRunComplete,visible:firstRun.visible,active:document.activeElement.id,buttonType:document.getElementById('first-run-next').type};");
@@ -80,10 +81,11 @@ app.whenReady().then(async()=>{
   }
   if(!process.argv.includes('--continue-for-now')) {
    await js("await showSettingsUI();document.getElementById('first-run-replay').click();");await delay(250);
-   await run('Completed or skipped tour remains available in Settings',"return firstRun.visible&&settingsContainer.hidden&&document.getElementById('first-run-next').textContent==='Next'&&(await cortana.getSettings()).firstRunComplete;");
+   await run('Completed or skipped tour remains available in Settings',"const settings=await cortana.getSettings();return firstRun.visible&&settingsContainer.hidden&&document.getElementById('first-run-next').textContent==='Next'&&settings.firstRunComplete&&settings.firstRunRelease==='8.1.0';");
    await js("document.getElementById('navigation-home').click();");
    await run('Leaving a replay returns to Home without restarting setup',"return !firstRun.visible&&!searchBar.disabled&&!firstRunNeeded;");
   }
+  if(process.argv.includes('--reset-tour')) await run('Resetting preferences preserves completed tour and personal data',"const result=await cortana.resetAllSettings(),settings=await cortana.getSettings(),data=await cortana.getNotebook();return result.success&&settings.firstRunComplete&&settings.firstRunRelease==='8.1.0'&&data.notes==='Keep this note'&&data.todos[0].id==='keep';");
   fs.writeFileSync(path.join(output,label+'.json'),JSON.stringify({profile,checks,errors},null,2));console.log('FIRST_RUN_RESULT',JSON.stringify({profile,passed:checks.length,total:checks.length,errors}));app.exit(errors.length?1:0);
  }catch(error){fs.writeFileSync(path.join(output,label+'.json'),JSON.stringify({profile,checks,errors,error:error.message},null,2));console.error(error);app.exit(1);}
 });

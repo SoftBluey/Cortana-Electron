@@ -13,7 +13,7 @@ app.setPath('userData', profile);
 app.setAppPath(root);
 app.setLoginItemSettings = () => {};
 if (!reuse) fs.writeFileSync(path.join(profile, 'settings.json'), JSON.stringify({
-  firstRunComplete: true, openAtLogin: false, heyCortana: false, isMovable: true, ttsEngine: 'system',
+  firstRunComplete: true, firstRunRelease: '8.1.0', openAtLogin: false, heyCortana: false, isMovable: true, ttsEngine: 'system',
 }));
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const label = process.argv.find(arg => arg.startsWith('--label='))?.split('=')[1] || 'smoke';
@@ -21,7 +21,7 @@ const workflows = process.argv.includes('--workflows');
 const classic = process.argv.includes('--classic');
 const recording = process.argv.includes('--record');
 let recorder;
-if (classic && !reuse) fs.writeFileSync(path.join(profile, 'settings.json'), JSON.stringify({ firstRunComplete: true, openAtLogin: false, heyCortana: false, isMovable: false, ttsEngine: 'system' }));
+if (classic && !reuse) fs.writeFileSync(path.join(profile, 'settings.json'), JSON.stringify({ firstRunComplete: true, firstRunRelease: '8.1.0', openAtLogin: false, heyCortana: false, isMovable: false, ttsEngine: 'system' }));
 require('../main.js');
 app.whenReady().then(async () => {
   try {

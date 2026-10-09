@@ -6,7 +6,7 @@ const root = path.resolve(__dirname, '..'), output = path.join(root, '.verificat
 fs.mkdirSync(output, { recursive: true });
 app.setPath('userData', fs.mkdtempSync(path.join(output, 'weather-update-')));
 app.setAppPath(root); app.setLoginItemSettings = () => {};
-fs.writeFileSync(path.join(app.getPath('userData'), 'settings.json'), JSON.stringify({firstRunComplete:true,openAtLogin:false,heyCortana:false,isMovable:true}));
+fs.writeFileSync(path.join(app.getPath('userData'), 'settings.json'), JSON.stringify({firstRunComplete:true,firstRunRelease:'8.1.0',openAtLogin:false,heyCortana:false,isMovable:true}));
 const label = process.argv.find(value => value.startsWith('--label='))?.slice(8) || 'weather-update';
 const version = require('../package.json').version, checks = [], errors = [];
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));

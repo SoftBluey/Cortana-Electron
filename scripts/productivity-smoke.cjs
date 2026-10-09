@@ -9,7 +9,7 @@ const label=process.argv.find(a=>a.startsWith('--label='))?.slice(8)||'productiv
 app.setPath('userData',profile);app.setAppPath(root);app.setLoginItemSettings=()=>{throw Error('No startup changes allowed');};
 Notification.prototype.show=()=>{};
 if(!reuse) {
- fs.writeFileSync(path.join(profile,'settings.json'),JSON.stringify({firstRunComplete:true,openAtLogin:false,heyCortana:false,isMovable:true,ttsEngine:'system'}));
+ fs.writeFileSync(path.join(profile,'settings.json'),JSON.stringify({firstRunComplete:true,firstRunRelease:'8.1.0',openAtLogin:false,heyCortana:false,isMovable:true,ttsEngine:'system'}));
  fs.writeFileSync(path.join(profile,'notebook.json'),JSON.stringify({notes:'Legacy note',introduced:true,todos:[{id:'legacy',text:'Legacy task',done:false}],profile:{name:'',home:'',work:'',weatherCity:''}}));
 }
 require('../main.js');

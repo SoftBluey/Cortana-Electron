@@ -135,6 +135,7 @@ let timers;
 const DEFAULT_SETTINGS = {
   interfaceRelease: 8,
   firstRunComplete: false,
+  firstRunRelease: '',
   openAtLogin: true,
   preferredVoice: "Microsoft Zira",
   searchEngine: "bing",
@@ -1529,7 +1530,7 @@ ipcMain.handle("set-custom-actions", async (event, actions) => {
     const previousSettings = settings;
     const previousReminders = reminders;
     // Keep the same reset scope: settings, actions and reminders; never Notebook or installed voices.
-    const saved = await saveSettings({ ...DEFAULT_SETTINGS, firstRunComplete: settings.firstRunComplete, customActions: [] }, true);
+    const saved = await saveSettings({ ...DEFAULT_SETTINGS, firstRunComplete: settings.firstRunComplete, firstRunRelease: settings.firstRunRelease, customActions: [] }, true);
     if (!saved.success) return saved;
     try {
       await saveReminders([]);

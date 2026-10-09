@@ -5077,7 +5077,7 @@ function setupFirstRun() {
                     document.getElementById('weather-city-input').value = latest.profile.weatherCity;
                 }
             }
-            const result = await ipcRenderer.invoke('set-setting', { key: 'firstRunComplete', value: true });
+            const result = await ipcRenderer.invoke('set-settings', { firstRunComplete: true, firstRunRelease: '8.1.0' });
             if (result.success) firstRunNeeded = false;
             return result;
         },
