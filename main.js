@@ -30,7 +30,7 @@ const cityTimezones = require("city-timezones");
 const { EdgeTTS } = require("node-edge-tts");
 const os = require("os");
 const { SpeechController, errorDetails } = require('./lib/speech-controller');
-const { createWriter, createSettingsSaver, createMutationQueue, validNotebook, migrateInterfaceSettings } = require('./lib/preferences');
+const { createWriter, createSettingsSaver, createMutationQueue, validNotebook, migrateInterfaceSettings, migrateFirstRunSettings } = require('./lib/preferences');
 const { releaseInfo } = require('./lib/release');
 const { parseShortcut } = require('./lib/shortcuts');
 const { normalizeEndpoint, isLoopback } = require('./lib/ai-endpoint');
@@ -134,6 +134,7 @@ let timers;
 
 const DEFAULT_SETTINGS = {
   interfaceRelease: 8,
+  firstRunComplete: false,
   openAtLogin: true,
   preferredVoice: "Microsoft Zira",
   searchEngine: "bing",
@@ -668,7 +669,7 @@ async function loadSettings() {
   }
 
   // Valid settings - merge with defaults, preserving unknown keys behavior
-  settings = { ...restoreDefaults(), ...migrateInterfaceSettings(validationResult.data) };
+  settings = { ...restoreDefaults(), ...migrateFirstRunSettings(migrateInterfaceSettings(validationResult.data)) };
 
   // Ensure defaults are applied for any missing keys
   await saveSettings();
@@ -1528,7 +1529,7 @@ ipcMain.handle("set-custom-actions", async (event, actions) => {
     const previousSettings = settings;
     const previousReminders = reminders;
     // Keep the same reset scope: settings, actions and reminders; never Notebook or installed voices.
-    const saved = await saveSettings({ ...DEFAULT_SETTINGS, customActions: [] }, true);
+    const saved = await saveSettings({ ...DEFAULT_SETTINGS, firstRunComplete: settings.firstRunComplete, customActions: [] }, true);
     if (!saved.success) return saved;
     try {
       await saveReminders([]);
@@ -2359,6 +2360,7 @@ function createWindow() {
     try { initialColor = normalizeAccentColor(systemPreferences.getAccentColor()) || initialColor; } catch (_) {}
   }
   const presentation = { themeColor: initialColor, useWindowsAccent: settings.useWindowsAccent,
+    firstRunComplete: settings.firstRunComplete,
     isMovable: settings.isMovable, idleGreetingMode: settings.idleGreetingMode,
     specificIdleGreeting: settings.specificIdleGreeting, customIdleGreeting: settings.customIdleGreeting,
     name: notebook.profile?.name || '' };

@@ -1622,4 +1622,33 @@ body.slim-mode #cortana-container { left: 0; width: 100%; }
     .todo-item input[type="checkbox"]:checked::before { content: none; }
 }
 #reminder-repeat { width:100%; padding:8px; margin:4px 0 12px; border:1px solid #888; border-radius:0; color:#fff; background:#252525; font:inherit; }
+
+/* Classic Cortana introduction: scrolling cards and a fixed pair of square buttons. */
+#first-run-panel { position:absolute; inset:0; z-index:20; background:#171717; color:white; display:flex; flex-direction:column; overflow:hidden; }
+#first-run-panel[hidden], #first-run-panel [hidden] { display:none !important; }
+body.first-run-visible #close-btn { z-index:40; }
+.first-run-header { flex:0 0 auto; text-align:center; padding:20px 20px 12px; border-bottom:1px solid #333; }
+#first-run-orb { width:68px; height:80px; display:block; margin:-20px auto -12px; }
+.first-run-header h1 { color:var(--text-color); font-size:20px; line-height:1.35; font-weight:400; }
+.first-run-scroll { flex:1 1 auto; min-height:0; overflow-y:auto; overscroll-behavior:contain; }
+.first-run-card { padding:20px 10px 24px; text-align:center; border-bottom:1px solid #333; }
+.first-run-card canvas { width:100%; max-width:266px; height:auto; aspect-ratio:298 / 204; display:block; margin:0 auto 14px; }
+.first-run-card p, #first-run-personal p { font-size:15px; line-height:1.4; overflow-wrap:anywhere; }
+.first-run-card p { padding:0 12px; }
+#first-run-panel .first-run-example { margin-top:8px; color:#aaa; font-size:13px; line-height:1.5; }
+#first-run-personal { padding:20px 16px; }
+.first-run-introduction { margin-bottom:20px; }
+#first-run-personal label { display:block; font-size:15px; margin:16px 0 6px; }
+#first-run-personal input { width:100%; border:1px solid #888; border-radius:0; padding:8px; background:#171717; color:white; font-size:15px; }
+.first-run-voice { border-top:1px solid #333; margin-top:24px; padding-top:16px; }
+.first-run-voice canvas { display:block; max-width:100%; width:240px; height:auto; aspect-ratio:320 / 174; margin:0 auto 16px; }
+.first-run-actions { flex:0 0 auto; display:flex; gap:4px; padding:10px 12px; background:#171717; border-top:1px solid #333; }
+.first-run-actions button { flex:1; min-width:0; height:34px; border:1px solid #888; border-radius:0; background:#333; color:white; font-size:15px; cursor:pointer; }
+#first-run-next { background:var(--primary-color); color:var(--first-run-button-text, white); border-color:var(--primary-color); }
+.first-run-actions button:hover { filter:brightness(1.15); }
+#first-run-panel :focus-visible { outline:2px solid var(--text-color); outline-offset:-2px; }
+#first-run-personal input:focus { border-color:var(--primary-color); }
+.first-run-actions button:disabled { opacity:.5; cursor:default; }
+#first-run-error { padding:8px 16px; color:#ffb4b4; font-size:13px; line-height:1.4; }
+#first-run-continue { align-self:flex-start; margin:0 16px 8px; background:transparent; border:0; color:var(--text-color); font-size:13px; text-decoration:underline; cursor:pointer; }
 @media(prefers-reduced-motion:reduce) {.search-panel,.search-panel.visible {transition:none;}}

@@ -24,6 +24,53 @@
           <img id="close-btn-icon" alt="Close Icon" />
         </div>
         <div id="cortana-container" class="content-pane">
+          <section id="first-run-panel" aria-labelledby="first-run-title" hidden>
+            <header class="first-run-header">
+              <canvas id="first-run-orb" aria-hidden="true"></canvas>
+              <h1 id="first-run-title">Here are some of the things I can do for you.</h1>
+            </header>
+            <div class="first-run-scroll" id="first-run-features" tabindex="0" aria-label="Things Cortana can do">
+              <article class="first-run-card">
+                <canvas data-tour-gif="reminder.gif" aria-hidden="true"></canvas>
+                <p>I can remind you to do something at a particular time.</p>
+                <p class="first-run-example">Try “remind me to stretch every day at 3 pm”.</p>
+              </article>
+              <article class="first-run-card">
+                <canvas data-tour-gif="speech.gif" aria-hidden="true"></canvas>
+                <p>You can ask me questions and get things done. Use the microphone, or type when you’re ready.</p>
+                <p class="first-run-example">Try “what time is it in Tokyo?”.</p>
+              </article>
+              <article class="first-run-card">
+                <canvas data-tour-gif="search.gif" aria-hidden="true"></canvas>
+                <p>I can find apps and files, and look things up on the web.</p>
+                <p class="first-run-example">Start typing to see what I find.</p>
+              </article>
+              <article class="first-run-card">
+                <canvas data-tour-gif="others.gif" aria-hidden="true"></canvas>
+                <p>I can keep your notes, lists and things to do together in your Notebook.</p>
+                <p class="first-run-example">Try “create a shopping list” or “my day”.</p>
+              </article>
+            </div>
+            <form id="first-run-personal" class="first-run-scroll" hidden>
+              <p class="first-run-introduction">These are optional. You can change them later in your Notebook and Settings.</p>
+              <label for="first-run-name">Your name or nickname</label>
+              <input id="first-run-name" type="text" maxlength="80" autocomplete="off" aria-describedby="first-run-name-hint" />
+              <p id="first-run-name-hint" class="first-run-example">Your name makes My day and reminder notifications more personal. It stays on this computer.</p>
+              <label for="first-run-weather">Weather city</label>
+              <input id="first-run-weather" type="text" maxlength="120" placeholder="e.g., Chicago" autocomplete="off" aria-describedby="first-run-weather-hint" />
+              <p id="first-run-weather-hint" class="first-run-example">Used for “my weather”. Leave it empty and I’ll ask which city to check.</p>
+              <div class="first-run-voice">
+                <canvas data-tour-gif="hey_cortana.gif" aria-hidden="true"></canvas>
+                <p>You can turn on “Hey Cortana” in Settings &gt; Voice when you’re ready. Typing and the microphone button work without it.</p>
+              </div>
+            </form>
+            <p id="first-run-error" role="alert" hidden></p>
+            <button id="first-run-continue" type="button" hidden>Continue for now</button>
+            <footer class="first-run-actions">
+              <button id="first-run-back" type="button">Not interested</button>
+              <button id="first-run-next" type="button">Next</button>
+            </footer>
+          </section>
           <section id="notebook-sidebar" aria-label="Notebook" hidden>
             <div class="settings-header">
               <button id="notebook-back" aria-label="Back to Cortana">&#xE0A6;</button>
@@ -420,6 +467,7 @@
                   </div>
                   <p id="update-status">Version <span id="current-version"></span></p>
                   <button id="check-updates-button" class="settings-button">Check for updates</button><p id="update-feedback" role="status" class="setting-hint"></p>
+                  <button id="first-run-replay" class="settings-button" type="button">Take a tour</button>
                   <div class="setting-item">
                     <label for="startup-toggle">Start with Windows</label>
                     <label class="toggle-switch">
@@ -551,6 +599,7 @@
     <script src="lib/ui-bridge.js"></script>
     <script src="lib/lists.js"></script>
     <script src="lib/weather-command.js"></script>
+    <script src="lib/first-run.js"></script>
     <script src="renderer.js"></script>
   </body>
 </html>

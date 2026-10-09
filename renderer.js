@@ -96,12 +96,15 @@ let micBtnBusy = false;
 let lastQuery = '';
 let anim = null;
 let notebookAnim = null;
+let firstRun = null;
+let firstRunNeeded = false;
 let windowVisible = !document.hidden;
 let windowFocused = true;
 let visualsActive = true;
 function refreshVisualActivity() {
     const visible = windowVisible && windowFocused && !document.hidden;
     visualsActive = visible &&
+        !firstRun?.visible &&
         !settingsContainer?.classList.contains('visible') && !document.getElementById('notebook-sidebar')?.classList.contains('visible');
     for (const [renderer, active] of [[anim?.renderer, visualsActive], [notebookAnim?.renderer,
         visible && document.getElementById('notebook-sidebar')?.classList.contains('visible') &&
@@ -111,6 +114,7 @@ function refreshVisualActivity() {
         if (!active) { clearTimeout(renderer.timer); renderer.timer = null; renderer._nextFrameAt = null; }
         else if (renderer.running && !renderer.timer) renderer._tick();
     }
+    firstRun?.setActivity(visible);
 }
 ipcRenderer.on('window-visibility', (_event, visible) => { windowVisible = visible; refreshVisualActivity(); });
 ipcRenderer.on('window-focus', (_event, focused) => { windowFocused = focused; refreshVisualActivity(); });
@@ -204,8 +208,8 @@ const pendingGifs = new Map();
 const GIF_CACHE_MAX = 20;
 const GIF_CACHE_BYTES = 96 * 1024 * 1024;
 function animationHeight() { return Math.round(200 * Math.min(2, window.devicePixelRatio || 1)); }
-async function loadAnimation(filename) {
-  const height = animationHeight(), key = `${filename}:${height}`;
+async function loadAnimation(filename, height = animationHeight()) {
+  const key = `${filename}:${height}`;
   if (gifCache.has(key)) {
     const cached = gifCache.get(key); gifCache.delete(key); gifCache.set(key, cached);
     return cached;
@@ -269,10 +273,10 @@ class GifRenderer {
     this._imageData = null;
   }
 
-  async load(filePath) {
+  async load(filePath, height) {
     const generation = this._loadGeneration = (this._loadGeneration || 0) + 1;
     const filename = path.basename(filePath);
-    const decoded = await loadAnimation(filename);
+    const decoded = await loadAnimation(filename, height);
     if (generation !== this._loadGeneration) return;
     this.stop(); this._lastFrame = null;
     this.frames = decoded.frames; this.gifWidth = decoded.gifWidth; this.gifHeight = decoded.gifHeight;
@@ -862,6 +866,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     anim.renderer.active = false;
     anim.setThemeColor(themeColor);
     applyMovableModeStyles(initialPresentation.isMovable === true);
+    setupFirstRun();
 
     let cancelWindowClose = null;
     function revealAppContainer() {
@@ -891,6 +896,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         const state = timeSinceHidden > 5000
             ? AnimationState.ENTRANCE
             : AnimationState.RESUME;
+        if (firstRun?.visible) return;
         anim.goToState(state);
     });
 
@@ -1081,6 +1087,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
 
     function startSpeechUI() {
+        firstRun?.suspend();
         document.getElementById('speech-feedback').hidden = true;
         cancelSpeechOutput();
         clearTimeout(finishSpeakingTimeout);
@@ -1514,7 +1521,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         // If the app is busy (mid-query) or hidden, the Windows notification
         // (fired in main.js) is enough — do NOT interrupt the current state.
         // Queue a spoken alert for when the app becomes free.
-        if (isBusy || document.hidden) {
+        if (isBusy || document.hidden || firstRun?.visible) {
             // Show a brief text update if the timer display is still on screen
             if (display) {
                 display.textContent = "⏰ Time's up!";
@@ -1537,7 +1544,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     animationContainer.className = 'idle';
     new ResizeObserver(([entry])=>document.getElementById('app-container').style.setProperty('--search-height', `${entry.target.getBoundingClientRect().height}px`)).observe(document.querySelector('.search-container'));
     await Promise.all([setupNotebookAndSystemControls(), loadAndApplySettings(),
-        anim.goToState(AnimationState.ENTRANCE).catch(error => console.warn('Initial orb could not be loaded:', error.message))]);
+        initialPresentation.firstRunComplete === false ? Promise.resolve() :
+            anim.goToState(AnimationState.ENTRANCE).catch(error => console.warn('Initial orb could not be loaded:', error.message))]);
     setupTTS();
     refreshEvaVoiceStatus();
 
@@ -1551,6 +1559,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     searchBar.placeholder = 'Type here to search';
     isBusy = false;
     searchIcon.src = cortanaIcon;
+    if (firstRunNeeded) await openFirstRun({ focus: false });
     window.cortana.rendererReady();
     } catch (e) {
         console.error('Init error:', e);
@@ -1970,6 +1979,8 @@ async function refreshSpeechDiagnostics() {
 }
 
 async function showSettingsUI() {
+    if (firstRun?.saving) return;
+    firstRun?.suspend();
     ++assistantRequestGeneration; searchResultsActive = false;
     const alreadyOpen = settingsContainer.classList.contains('visible');
     closeNotebook({ immediate: true, switching: true });
@@ -2021,6 +2032,7 @@ function closeSettings(silent = false, { switching = false } = {}) {
         setStateIdle();
         settingsBtn.focus({ preventScroll: true });
     }
+    if (!switching && firstRunNeeded) void openFirstRun({ resume: true });
 }
 
 function hexToHsl(H) {
@@ -2073,6 +2085,7 @@ function updateCloseButton(closeToTray) {
 
 async function loadAndApplySettings() {
     const settings = await ipcRenderer.invoke('get-settings');
+    firstRunNeeded = settings.firstRunComplete === false;
     document.getElementById('recognition-mode-select').value = settings.recognitionMode || 'dictation';
     listeningSounds = settings.listeningSounds !== false;
     document.getElementById('listening-sounds-toggle').checked = listeningSounds;
@@ -2376,6 +2389,7 @@ function applyThemeColor(color) {
     document.documentElement.style.setProperty('--primary-color', color);
     anim.setThemeColor(color);
     notebookAnim?.setThemeColor(color);
+    firstRun?.setThemeColor(color);
 
     const defaultHue = 207;
     const newHsl = hexToHsl(color);
@@ -2895,6 +2909,7 @@ function onActionFinished() {
 }
 
 function setStateIdle() {
+    if (firstRun?.visible) return;
     // Stopping capture while entering the Notebook must not invalidate its page load.
     if (document.getElementById('notebook-sidebar')?.classList.contains('visible')) return;
     ++assistantRequestGeneration;
@@ -5040,7 +5055,58 @@ function validateAndApplyActionFormState() {
     if (addStepButton) {
         addStepButton.disabled = false;
     }
-}let notebookData = { notes: '', todos: [], introduced: false, profile: { name: initialPresentation.name || '' } };
+}
+
+function setupFirstRun() {
+    firstRun = CortanaFirstRun.createTour({
+        host: document.getElementById('first-run-panel'),
+        createRenderer: canvas => new GifRenderer(canvas),
+        load: (renderer, file, height) => renderer.load(path.join(appRoot, file), Math.round(height * Math.min(2, window.devicePixelRatio || 1))),
+        getTheme: () => themeColor,
+        getProfile: () => notebookData.profile || {},
+        save: async profile => {
+            if (profile) {
+                const latest = await ipcRenderer.invoke('get-notebook');
+                const previous = { name: '', home: '', work: '', weatherCity: '', ...latest.profile };
+                if (previous.name !== profile.name || previous.weatherCity !== profile.weatherCity) {
+                    latest.profile = { ...previous, ...profile };
+                    const result = await ipcRenderer.invoke('save-notebook', latest);
+                    if (!result.success) return result;
+                    notebookData = latest;
+                    document.getElementById('notebook-name').value = latest.profile.name;
+                    document.getElementById('weather-city-input').value = latest.profile.weatherCity;
+                }
+            }
+            const result = await ipcRenderer.invoke('set-setting', { key: 'firstRunComplete', value: true });
+            if (result.success) firstRunNeeded = false;
+            return result;
+        },
+        onVisibility: visible => {
+            document.body.classList.toggle('first-run-visible', visible);
+            animationContainer.inert = reminderContainer.inert = visible;
+            animationContainer.style.display = visible ? 'none' : 'block';
+            searchBar.disabled = micBtn.disabled = visible;
+            ipcRenderer.send('set-settings-visibility', visible);
+            refreshVisualActivity();
+        },
+        onFinished: () => { firstRunNeeded = false; setNavigationPage('home'); setStateIdle(); searchBar.focus({ preventScroll: true }); },
+    });
+    document.getElementById('first-run-replay').onclick = () => void openFirstRun();
+    window.addEventListener('beforeunload', () => firstRun.destroy());
+}
+
+async function openFirstRun(options = {}) {
+    if (!firstRun || firstRun.saving) return;
+    ++assistantRequestGeneration;
+    _stopSpeechFromOutside?.(); cancelSpeechOutput(); clearTimeout(blurCleanupTimer);
+    hideSearchPanel(); clearSearchBar(); searchResultsActive = false;
+    closeNotebook({ immediate: true, switching: true }); closeSettings(true, { switching: true });
+    reminderContainer.classList.remove('visible');
+    collapseNavigation(); setNavigationPage('home');
+    await firstRun.open(options);
+}
+
+let notebookData = { notes: '', todos: [], introduced: false, profile: { name: initialPresentation.name || '' } };
 let notebookSaveGeneration = 0;
 let notebookPreviousFocus = null;
 let notebookPage = 'overview';
@@ -5189,6 +5255,8 @@ async function renderNotebookReminders() {
     } catch (_) { list.textContent = 'Reminders could not be loaded. Try opening this page again.'; }
 }
 function openNotebook(page = 'overview') {
+    if (firstRun?.saving) return;
+    firstRun?.suspend();
     ++assistantRequestGeneration; searchResultsActive = false;
     _stopSpeechFromOutside?.();
     cancelSpeechOutput();
@@ -5226,6 +5294,7 @@ function closeNotebook({ immediate = false, switching = false } = {}) {
         (notebookPreviousFocus && notebookPreviousFocus.isConnected && notebookPreviousFocus !== document.body && !notebookPreviousFocus.closest('[inert]') ? notebookPreviousFocus : document.getElementById('notebook-btn')).focus({ preventScroll: true });
     }
     refreshVisualActivity();
+    if (!switching && firstRunNeeded) void openFirstRun({ resume: true });
 }
 async function setupNotebookAndSystemControls() {
     notebookData = await ipcRenderer.invoke('get-notebook');
@@ -5240,7 +5309,13 @@ async function setupNotebookAndSystemControls() {
         document.getElementById('navigation-toggle').setAttribute('aria-expanded', String(expanded));
         document.getElementById('navigation-toggle').setAttribute('aria-label', expanded ? 'Collapse navigation' : 'Expand navigation');
     };
-    document.getElementById('navigation-home').onclick = () => { closeNotebook(); closeSettings(); setNavigationPage('home'); };
+    document.getElementById('navigation-home').onclick = () => {
+        if (firstRun?.saving) return;
+        firstRun?.suspend(); closeNotebook({ immediate: true, switching: true }); closeSettings(true, { switching: true });
+        setNavigationPage('home');
+        if (firstRunNeeded) void openFirstRun({ resume: true });
+        else { ipcRenderer.send('set-settings-visibility', false); searchBar.disabled = false; micBtn.disabled = false; setStateIdle(); }
+    };
     document.getElementById('navigation-about').onclick = () => openNotebook('about');
     document.getElementById('navigation-feedback').onclick = () => ipcRenderer.send('open-external-link', 'https://github.com/SoftBluey/Cortana-Electron/issues');
     document.getElementById('notebook-back').onclick = () => notebookPage === 'overview' ? closeNotebook() : selectNotebookPage();
