@@ -3,7 +3,7 @@ A custom, local Cortana client built with Electron, inspired by the classic desi
 
 We are not affiliated with Microsoft! We do not own the licenses for Cortana. This is just a faithful recreation project.
 
-<img width="378" height="660" alt="Cortana Electron 8.0.0" src="https://github.com/user-attachments/assets/845eca5a-4a70-4358-8837-0a9818e35b58" />
+<img width="378" height="660" alt="Cortana Electron" src="https://github.com/user-attachments/assets/845eca5a-4a70-4358-8837-0a9818e35b58" />
 
 ### About The Project
 
@@ -17,11 +17,11 @@ Download the **Setup `.exe` installer** from the [latest release](https://github
 
 Enable **Start with Windows** in Settings to launch quietly in the tray. Turning it off in Windows Startup apps keeps it off when Cortana next opens.
 
-Version **8.1.0** is in testing, with a welcome tour, named lists, recurring reminders, persistent named timers, a personal day summary, Windows media controls, and interface/startup improvements. The latest published installer is still **8.0.0**.
+**8.1.0** adds a welcome tour, named lists, repeating reminders, timers that survive a restart, My day, Windows media controls, and smoother animations and startup.
 
 ### Features
 
-*   **Welcome tour:** See what Cortana can do when you first install her or upgrade from a version without the tour. You can add an optional name and weather city, or skip it. Your existing settings, notes, lists and reminders are kept. Replay it from Settings > System > Take a tour.
+*   **Welcome tour:** See what Cortana can do when you first install her or upgrade from 8.0.0. You can add an optional name and weather city, or skip it. Finishing or skipping is remembered across restarts and preference resets, including upgrades from earlier test builds. Your existing settings, notes, lists and reminders are kept. Replay it from Settings > System > Take a tour.
 *   **Voice Search:** Use the microphone for voice commands, with an offline mode for built-in commands. Recognition may fail on affected Windows systems; see the known limitations below. Typed commands remain available.
 *   **"Hey Cortana" Wake Word:** Optional, off by default. Opens a slim UI ready for your voice command, even when the app is hidden. Subject to the same recognition limitations as voice search.
 *   **Edge Neural Text-to-Speech:** High-quality Microsoft Edge Neural voices for natural-sounding responses. System TTS (like Windows Zira) is also available as a fallback.
@@ -110,6 +110,6 @@ Speech recognition and the listening-related speaker pop remain unresolved on af
 
 If you run into a speech problem, open **Settings > Troubleshooting > Copy speech diagnostics** and include the details in your report. Diagnostics exclude recognized speech and API keys.
 
-See the [8.0.0 release notes](https://github.com/SoftBluey/Cortana-Electron/releases/tag/v8.0.0) for the major changes and remaining limitations.
+See the [release notes](https://github.com/SoftBluey/Cortana-Electron/releases) for the changes and remaining limitations.
 
 ### This project is licensed under the GNU General Public License v3.0, see the LICENSE file for details.
