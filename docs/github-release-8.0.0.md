@@ -20,10 +20,10 @@
 
 **The reported Windows WinRT recognition failure and listening-related speaker pop are still unresolved.** This update improves the app's speech handling, but does not claim to fix that Windows/API problem. Manual voice search and “Hey Cortana” may still fail on affected systems. Typed commands remain available.
 
-Use the **Setup `.exe`** for the normal Windows installation and startup option. The `.appx` is an unsigned build for package verification; it needs trusted signing before general distribution. The `.exe` does not currently provide package identity for supported WinRT dictation. Normal `.exe` installation does not need Developer Mode.
+Download the **Setup `.exe`** to install Cortana. Installation does not need Developer Mode. The installer is unsigned and does not currently provide package identity for supported WinRT dictation. Checksums are included for the download.
 
 ## Checked for this release
 
-40 unit tests passed, along with 22 interface workflows in both classic and movable window modes. Opening text, rapid navigation, reduced motion and packaged startup were also checked. The attached smoke-test video shows the interface checks; microphone actions in that demonstration are simulated.
+40 unit tests passed, along with 22 interface workflows in both classic and movable window modes. Opening text, rapid navigation, reduced motion and packaged startup were also checked. A smoke-test demonstration was recorded separately; microphone actions in that demonstration are simulated.
 
 Windows 10, ARM64 and additional real microphone/headset combinations still need testing. Please report anything that slips through, especially if you can include steps to reproduce it.
