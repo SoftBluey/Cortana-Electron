@@ -32,9 +32,13 @@ const { createWriter, createSettingsSaver, createMutationQueue, validNotebook, m
 const { releaseInfo } = require('./lib/release');
 const { parseShortcut } = require('./lib/shortcuts');
 const { normalizeEndpoint, isLoopback } = require('./lib/ai-endpoint');
+const { validRecurrence, nextOccurrence, validRecurrenceClock } = require('./lib/recurrence');
+const { createMedia } = require('./lib/media');
+const { createTimers } = require('./lib/timers');
 const { createStartup } = require('./lib/startup');
 const APP_ID = 'com.blueysoft.cortana-electron';
 const atomicWriteFile = createWriter();
+const generatedTtsFiles = new Set();
 const mutateReminders = createMutationQueue();
 let speech = null;
 let appScanInterval = null;
@@ -123,8 +127,7 @@ let lastAppScanTime = 0;
 
 let reminders = [];
 
-let activeTimer = null;
-let timerIdCounter = 0;
+let timers;
 
 const DEFAULT_SETTINGS = {
   interfaceRelease: 8,
@@ -259,7 +262,7 @@ const REMINDER_CHECKPOINT_MS = Math.min(
 
 const MAX_TIMER_MS = 30 * 24 * 60 * 60 * 1000;
 
-function validateReminderInput({ reminder, reminderTime, sound }) {
+function validateReminderInput({ reminder, reminderTime, sound, recurrence = null }) {
   if (typeof reminder !== 'string' || !reminder.trim()) {
     return { success: false, error: 'Please enter something to be reminded about.' };
   }
@@ -268,6 +271,7 @@ function validateReminderInput({ reminder, reminderTime, sound }) {
     return { success: false, error: 'Please choose a valid reminder time.' };
   }
 
+  if (!validRecurrence(recurrence)) return {success:false,error:'Choose a supported repeat schedule.'};
   const timestamp = Date.parse(reminderTime);
   if (!Number.isFinite(timestamp)) {
     return { success: false, error: 'Please choose a valid reminder time.' };
@@ -275,6 +279,9 @@ function validateReminderInput({ reminder, reminderTime, sound }) {
 
   if (timestamp <= Date.now()) {
     return { success: false, error: 'Reminder time must be in the future.' };
+  }
+  if (recurrence === 'weekdays' && [0,6].includes(new Date(timestamp).getDay())) {
+    return {success:false,error:'Choose a weekday for the first reminder.'};
   }
 
   if (sound !== undefined && typeof sound !== 'string') {
@@ -287,6 +294,8 @@ function validateReminderInput({ reminder, reminderTime, sound }) {
       text: reminder.trim(),
       time: new Date(timestamp).toISOString(),
       sound: sound || settings.reminderSound || 'notify.wav',
+      recurrence,
+      recurrenceClock: recurrence ? {hour:new Date(timestamp).getHours(),minute:new Date(timestamp).getMinutes()} : null,
     },
   };
 }
@@ -369,11 +378,18 @@ function fireReminder(reminder) {
   }
 
   clearReminderTimeout(reminder);
+  const nextTime = nextOccurrence(reminder.time, reminder.recurrence, Date.now(), reminder.recurrenceClock);
+  const nextReminder = nextTime ? {...reminder,time:nextTime,timeout:null} : null;
+  const next = nextReminder ? reminders.map(item=>item===reminder?nextReminder:item) : reminders.filter(item=>item!==reminder);
+  try { await saveReminders(next); }
+  catch(error) { reminder.timeout=setTimeout(()=>fireReminder(reminder),10000);console.error('Reminder delivery will retry after a save failure:',error.message);return; }
+  reminders=next;
+  if(nextReminder)scheduleReminder(nextReminder);
 
   if (Notification.isSupported()) {
     new Notification({
       title: '⏰ Reminder',
-      body: `It's time for: ${reminder.text}`,
+      body: `${notebook.profile?.name.trim() ? notebook.profile.name.trim()+', ' : ''}it's time for: ${reminder.text}`,
       icon: path.join(assetsPath, 'cortana.png'),
     }).show();
   }
@@ -390,8 +406,6 @@ function fireReminder(reminder) {
     );
   }
 
-  reminders = reminders.filter((item) => item.id !== reminder.id);
-  await saveReminders().catch(error => console.error('Failed to persist fired reminder:', error));
   });
 }
 
@@ -429,11 +443,13 @@ function scheduleReminder(reminder) {
 async function saveReminders(snapshot = reminders) {
   if (!remindersWritable) throw new Error('The existing reminders file could not be read. It has been retained; check its permissions or contents before adding reminders.');
   try {
-    const remindersToSave = snapshot.map(({ id, text, time, sound }) => ({
+    const remindersToSave = snapshot.map(({ id, text, time, sound, recurrence, recurrenceClock }) => ({
       id,
       text,
       time,
       sound,
+      recurrence,
+      recurrenceClock,
     }));
     await atomicWriteFile(
       REMINDERS_FILE,
@@ -462,12 +478,14 @@ async function loadReminders() {
           typeof item.text === 'string' &&
           item.text.trim() &&
           typeof item.time === 'string' &&
-          Number.isFinite(Date.parse(item.time))
+          Number.isFinite(Date.parse(item.time)) && validRecurrence(item.recurrence) && validRecurrenceClock(item.recurrenceClock)
         );
       })
       .map((item) => ({
         id: item.id,
         text: item.text.trim(),
+        recurrence: item.recurrence || null,
+        recurrenceClock: item.recurrenceClock || (item.recurrence ? {hour:new Date(item.time).getHours(),minute:new Date(item.time).getMinutes()} : null),
         time: new Date(Date.parse(item.time)).toISOString(),
         sound:
           typeof item.sound === 'string'
@@ -780,9 +798,18 @@ if (gotTheLock) {
   iconPath = path.join(assetsPath, "icon.ico");
 
   await loadSettings();
+  const timerFile=path.join(app.getPath('userData'),'timers.json');
+  timers=createTimers({read:async()=>JSON.parse(await fs.readFile(timerFile,'utf8')),
+    write:values=>atomicWriteFile(timerFile,JSON.stringify(values,null,2)),
+    onFire:({id,label})=>{
+      if(Notification.isSupported())new Notification({title:'⏰ Timer',body:label?`${label}: time's up!`:"Time's up!",icon:path.join(assetsPath,'cortana.png')}).show();
+      if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('timer-fired',{id,label});
+    }});
+  await timers.load();
   await loadReminders();
 
   powerMonitor.on('resume', async () => {
+    timers.resume();
     console.log('[powerMonitor] System resumed — rescheduling reminders and invalidating stale recognizers.');
 
     const reminderSnapshot = [...reminders];
@@ -873,7 +900,7 @@ if (gotTheLock) {
     clearInterval(appScanInterval);
     clearInterval(updateCheckInterval);
     reminders.forEach(clearReminderTimeout);
-    if (activeTimer) clearTimeout(activeTimer.timeout);
+    timers?.stop();
     if (!speech.shuttingDown) {
       event.preventDefault();
       speech.shutdown().catch(error => logSpeech('shutdown-failed', errorDetails(error)))
@@ -1324,6 +1351,19 @@ function registerIpcHandlers() {
     return result;
   });
   ipcMain.handle('get-hotkey-status', () => ({ accelerator: registeredHotkey, configured: settings.assistantHotkey }));
+  ipcMain.handle('search-suggestions', async (_event, query) => {
+    if (typeof query !== 'string' || query.length > 512 || !query.trim()) return [];
+    return new Promise(resolve => {
+      const req=https.get('https://suggestqueries.google.com/complete/search?client=chrome&q='+encodeURIComponent(query),res=>{
+        let data=''; res.on('data',chunk=>{ data+=chunk; if(data.length>65536)req.destroy(); });
+        res.on('error',()=>resolve([])); res.on('end',()=>{try{const values=JSON.parse(data)[1];resolve(Array.isArray(values)?values.filter(v=>typeof v==='string').slice(0,4):[]);}catch{resolve([]);}});
+      }); req.on('error',()=>resolve([])); req.setTimeout(3000,()=>{req.destroy();resolve([]);});
+    });
+  });
+  ipcMain.handle('release-tts-file', async (_event, filename) => {
+    if (!generatedTtsFiles.delete(filename)) return false;
+    await fs.unlink(filename).catch(()=>{}); return true;
+  });
   ipcMain.handle('get-notebook', () => notebook);
   ipcMain.handle('save-notebook', async (_event, value) => {
     if (!notebookWritable) return { success: false, error: 'Your Notebook could not be read safely. The original file has been kept; check it before saving changes.' };
@@ -1649,7 +1689,7 @@ function isPathControlValue(fsPath) {
   return !fsPath || /[\0-\x1f\x7f]/.test(fsPath);
 }
 
-ipcMain.on("open-path", (event, fsPath) => {
+ipcMain.on("open-path", (event, fsPath, failureCommand) => {
     if (typeof fsPath !== 'string' || !fsPath.trim() || fsPath.length > MAX_PATH_LENGTH) {
       return;
     }
@@ -1661,9 +1701,15 @@ ipcMain.on("open-path", (event, fsPath) => {
     shell.openPath(normalizedPath).then((result) => {
       if (result) {
         console.error(`Failed to open path ${normalizedPath}:`, result);
+        if (failureCommand === 'open-application' && !event.sender.isDestroyed()) {
+          event.sender.send('command-failed', { command: 'open-application' });
+        }
       }
     }).catch((err) => {
       console.error(`Failed to open path ${normalizedPath}:`, err);
+      if (failureCommand === 'open-application' && !event.sender.isDestroyed()) {
+        event.sender.send('command-failed', { command: 'open-application' });
+      }
     });
   });
 
@@ -1776,6 +1822,7 @@ ipcMain.on("run-special-command", (event, command) => {
       if (MS_SETTINGS_URI_WHITELIST.has(command)) {
         shell.openExternal(command).catch((err) => {
           console.error(`Failed to open URI ${command}:`, err);
+          if (!event.sender.isDestroyed()) event.sender.send('command-failed', { command: 'open-application' });
         });
       } else {
         console.warn('[run-special-command] Rejected unrecognized ms-settings: URI:', command);
@@ -1806,6 +1853,7 @@ ipcMain.on("run-special-command", (event, command) => {
       });
       child.on('error', (error) => {
         console.error(`Failed to execute special command "${command}":`, error);
+        if (!event.sender.isDestroyed()) event.sender.send('command-failed', { command: 'open-application' });
       });
       return;
     }
@@ -1870,6 +1918,7 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
           text: newReminder.text,
           time: newReminder.time,
           sound: newReminder.sound,
+          recurrence: newReminder.recurrence,
         },
       };
     } catch (error) {
@@ -1881,98 +1930,21 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
     }
   }));
 
-  ipcMain.handle('start-timer', (event, payload) => {
-    const ms = payload && payload.ms;
-    const label =
-      payload && typeof payload.label === 'string'
-        ? payload.label
-        : '';
-
-    const validation = validateTimerDuration(ms);
-    if (!validation.success) return validation;
-
-    // Reject creation of a second timer - only one timer is supported
-    if (activeTimer) {
-      return {
-        success: false,
-        error: 'A timer is already running. Cancel it before starting another.'
-      };
-    }
-
-    const id = ++timerIdCounter;
-    const endTime = Date.now() + ms;
-
-    const timeout = setTimeout(() => {
-      if (!activeTimer || activeTimer.id !== id) return;
-      activeTimer = null;
-
-      if (Notification.isSupported()) {
-        new Notification({
-          title: '⏰ Timer',
-          body: label || "Time's up!",
-          icon: path.join(assetsPath, 'cortana.png'),
-        }).show();
-      }
-
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('timer-fired', { id, label });
-      }
-    }, ms);
-
-    activeTimer = {
-      id,
-      timeout,
-      endTime,
-      durationMs: ms,
-      label,
-    };
-
-    return {
-      success: true,
-      id,
-      endTime,
-    };
-  });
-
-  ipcMain.handle('cancel-timer', async (event, id) => {
-    if (activeTimer && activeTimer.id === id) {
-      clearTimeout(activeTimer.timeout);
-      activeTimer = null;
-      return { success: true };
-    }
-    return { success: false, error: 'Timer not found or already cancelled.' };
-  });
-
-  ipcMain.handle('get-active-timer', () => {
-    if (!activeTimer) {
-      return { id: null, label: '', remaining: 0, active: false, endTime: 0 };
-    }
-    const remaining = Math.max(0, activeTimer.endTime - Date.now());
-    return {
-      id: activeTimer.id,
-      label: activeTimer.label,
-      remaining: remaining,
-      active: true,
-      endTime: activeTimer.endTime,
-    };
-  });
-
-  ipcMain.handle('get-timer-remaining', (event, id) => {
-    if (!activeTimer || activeTimer.id !== id) {
-      return { remaining: 0, active: false };
-    }
-    return { remaining: Math.max(0, activeTimer.endTime - Date.now()), active: true };
-  });
+  ipcMain.handle('start-timer', (_event,payload)=>timers.start(payload));
+  ipcMain.handle('cancel-timer', (_event,id)=>timers.cancel(id));
+  ipcMain.handle('get-timers', ()=>timers.list());
+  ipcMain.handle('get-active-timer', ()=>timers.list().at(-1)||{id:null,label:'',remaining:0,active:false,endTime:0});
+  ipcMain.handle('get-timer-remaining', (_event,id)=>timers.list().find(t=>t.id===id)||{remaining:0,active:false});
 
   ipcMain.handle(
     "update-reminder",
-    (event, { id, reminder, reminderTime, sound }) => mutateReminders(async () => {
+    (event, { id, reminder, reminderTime, sound, recurrence }) => mutateReminders(async () => {
       const reminderIndex = reminders.findIndex((r) => r.id === id);
       if (reminderIndex === -1) {
         return { success: false, error: 'Reminder not found.' };
       }
 
-      const validation = validateReminderInput({ reminder, reminderTime, sound });
+      const validation = validateReminderInput({ reminder, reminderTime, sound, recurrence });
       if (!validation.success) return validation;
 
       const existingReminder = reminders[reminderIndex];
@@ -1981,6 +1953,9 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
         text: validation.value.text,
         time: validation.value.time,
         sound: validation.value.sound,
+        recurrence: validation.value.recurrence,
+        recurrenceClock: existingReminder.recurrence===validation.value.recurrence&&existingReminder.time===validation.value.time
+          ? existingReminder.recurrenceClock : validation.value.recurrenceClock,
         timeout: null,
       };
       const next = reminders.map(item => item === existingReminder ? updatedReminder : item);
@@ -2002,6 +1977,7 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
           text: updatedReminder.text,
           time: updatedReminder.time,
           sound: updatedReminder.sound,
+          recurrence: updatedReminder.recurrence,
         },
       };
     })
@@ -2023,7 +1999,7 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
   }));
 
   ipcMain.handle("get-reminders", () => {
-    return reminders.map(({ id, text, time, sound }) => ({ id, text, time, sound }));
+    return reminders.map(({ id, text, time, sound, recurrence }) => ({ id, text, time, sound, recurrence }));
   });
 
   ipcMain.handle("get-app-version", () => {
@@ -2081,16 +2057,11 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
     try {
       const parts = cityInput
         .trim()
+        .replace(/[?!.]+$/, '')
         .split(",")
         .map((s) => s.trim());
       const cityName = parts[0];
-      let regionFilter = parts.length > 1 ? parts.slice(1).join(", ") : null;
-
-      // Expand abbreviations
-      if (regionFilter) {
-        const expanded = regionAliases[regionFilter.toLowerCase()];
-        if (expanded) regionFilter = expanded;
-      }
+      const regionFilters = parts.slice(1).map(region => regionAliases[region.toLowerCase()] || region);
 
       const matches = cityTimezones.lookupViaCity(cityName);
       if (!matches || matches.length === 0) {
@@ -2098,15 +2069,17 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
       }
 
       let filtered = matches;
-      if (regionFilter) {
-        const lowerRegion = regionFilter.toLowerCase();
+      if (regionFilters.length) {
         filtered = matches.filter(
-          (m) =>
+          (m) => regionFilters.every(region => {
+            const lowerRegion = region.toLowerCase();
+            return !!lowerRegion && (
             (m.province && m.province.toLowerCase().includes(lowerRegion)) ||
-            m.country.toLowerCase().includes(lowerRegion)
+            m.country.toLowerCase().includes(lowerRegion));
+          })
         );
         if (filtered.length === 0) {
-          filtered = matches;
+          throw new Error(`Could not find a matching region for city: ${cityInput}`);
         }
       }
 
@@ -2119,7 +2092,7 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
             country: m.country,
             timezone: m.timezone,
             fullQuery: m.province
-              ? `${m.city}, ${m.province}`
+              ? `${m.city}, ${m.province}, ${m.country}`
               : `${m.city}, ${m.country}`,
           })),
         };
@@ -2234,6 +2207,7 @@ ipcMain.handle("synthesize-edge-tts", async (event, { text, voice, pitch, rate }
       });
       await tts.ttsPromise(text, outFile);
 
+      generatedTtsFiles.add(outFile);
       return { success: true, filePath: outFile };
     } catch (error) {
       console.error("Edge TTS synthesis failed:", error);
@@ -2242,39 +2216,25 @@ ipcMain.handle("synthesize-edge-tts", async (event, { text, voice, pitch, rate }
     }
   });
 
-  ipcMain.handle("media-control", async (event, action) => {
-    const vkMap = {
-      volup: 0xAF, voldown: 0xAE, mute: 0xAD,
-      playpause: 0xB3, next: 0xB0, prev: 0xB1, stop: 0xB2,
-    };
-    const vk = vkMap[action];
-    if (!vk) return { success: false, error: "Unknown action" };
-
-    try {
-      const psPath = path.join(os.tmpdir(), `cortana-key-${Date.now()}.ps1`);
-      const psContent = `Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public class MediaKey {
-[DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte sc, int fl, int ex);
-public static void Press(byte k) { keybd_event(k,0,0,0); System.Threading.Thread.Sleep(50); keybd_event(k,0,2,0); }
-}
-"@
-[MediaKey]::Press(${vk})
-Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
-`;
-      await fs.writeFile(psPath, psContent);
-      return new Promise((resolve) => {
-        exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psPath}"`, (error, stdout, stderr) => {
-          if (error) console.error("media-control error:", stderr || error.message);
-          resolve({ success: !error });
-        });
+  const media=createMedia({
+    dispose:value=>{if(value)try{require(app.isPackaged?path.join(__dirname,'.winapp','bindings','lifetime'):'#winapp/bindings/lifetime').releaseProjected(value);}catch(error){console.error('Media resource release failed:',error.message);}},
+    getManager:async()=>{
+      const runtime=require('@microsoft/dynwinrt');
+      try{runtime.roInitialize(0);}catch(error){if(!/80010106|changed.*mode/i.test(error.message))throw error;runtime.roInitialize(1);}
+      const {GlobalSystemMediaTransportControlsSessionManager}=require(app.isPackaged?path.join(__dirname,'.winapp','bindings'):'#winapp/bindings');
+      return GlobalSystemMediaTransportControlsSessionManager.requestAsync(AbortSignal.timeout(5000));
+    },
+    volume:(action,level)=>new Promise(resolve=>{
+      const script=app.isPackaged?path.join(process.resourcesPath,'media.ps1'):path.join(__dirname,'media.ps1');
+      const args=['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',script,'-Action',action];
+      if(action==='setvolume')args.push('-Level',String(level));
+      execFile('powershell.exe',args,{windowsHide:true,timeout:10000,maxBuffer:32768},(error,stdout)=>{
+        try{resolve(JSON.parse(stdout));}catch{resolve({success:false,error:'Windows could not access the default playback device.'});}
       });
-    } catch (e) {
-      console.error("media-control setup error:", e);
-      return { success: false, error: e.message };
-    }
+    }),
   });
+  ipcMain.handle('media-control',(_event,payload)=>media.control(payload));
+  ipcMain.handle('media-state',()=>media.state());
 
   ipcMain.handle("wikipedia-lookup", async (event, query) => {
     try {
@@ -2385,12 +2345,11 @@ function createWindow() {
     focusable: true,
     show: false,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      preload: path.join(__dirname, 'preload.js'),
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: false,
       backgroundThrottling: true,
-      // TODO: Complete context-isolation migration in a dedicated change.
-      // renderer.js currently depends on Node APIs for GIF decoding,
-      // filesystem asset loading, path handling, HTTPS suggestions, and audio cleanup.
     },
   };
 

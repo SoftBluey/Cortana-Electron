@@ -3,6 +3,7 @@ const { app, BrowserWindow, globalShortcut } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
+const appVersion = require('../package.json').version;
 const output = path.join(root, '.verification');
 fs.mkdirSync(output, { recursive: true });
 const reuse = process.argv.find(arg => arg.startsWith('--profile='))?.slice('--profile='.length);
@@ -37,7 +38,7 @@ app.whenReady().then(async () => {
     if (recording) {
       win.show(); win.focus();
       recorder = await require('./record-window.cjs').recordWindow(win, output, label);
-      recorder.caption('Cortana Electron 8.0.0\nAutomated UI smoke tests · disposable profile');
+      recorder.caption(`Cortana Electron ${appVersion}\nAutomated UI smoke tests · disposable profile`);
       await delay(2500);
     }
     if (process.argv.includes('--quit')) {
@@ -352,7 +353,7 @@ app.whenReady().then(async () => {
         const result = await generateCategorizedResults('open downloads');
         generateWebSuggestions = original;
         delete navigator.onLine;
-        return calls === 0 && result[0].items[0].title === 'Execute "open downloads"';
+        return calls === 0 && result[0].items[0].title === 'Run "open downloads"';
       `);
       await run('Settings controls and speech diagnostics', `
         await showSettingsUI();
@@ -445,7 +446,7 @@ app.whenReady().then(async () => {
         const diagnosticsCollapsed = !troubleshooting.open && !document.getElementById('copy-speech-diagnostics').getClientRects().length;
         closeSettings();
         const version = await ipcRenderer.invoke('get-app-version');
-        return correct && diagnosticsCollapsed && version === '8.0.0' || {stage:'finished',correct,diagnosticsCollapsed,version};
+        return correct && diagnosticsCollapsed && version === ${JSON.stringify(appVersion)} || {stage:'finished',correct,diagnosticsCollapsed,version};
       `);
       win.show(); win.focus(); await delay(250);
       await run('Notebook shares idle animation, tint and visibility lifecycle', `

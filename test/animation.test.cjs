@@ -104,6 +104,7 @@ test('offline weather gives useful feedback without starting a network request',
   const weather = source.slice(source.indexOf('async function getWeather('), source.indexOf('function getWeatherDescription('));
   let requests = 0, message = '';
   await vm.runInNewContext(weather + ';getWeather("Chicago");', {
+    assistantRequestGeneration: 0,
     navigator: { onLine: false }, fetch: () => { requests++; }, onActionFinished() {},
     displayAndSpeak: value => { message = value; },
   });

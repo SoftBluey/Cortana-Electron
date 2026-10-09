@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { SpeechController } = require('../lib/speech-controller');
 const mode = process.argv.includes('--commands') ? 'commands' : 'dictation';
+const wake = process.argv.includes('--wake');
 const output = path.resolve(__dirname, '../.verification');
 fs.mkdirSync(output, { recursive: true });
 app.setPath('userData', fs.mkdtempSync(path.join(output, 'winrt-probe-')));
@@ -18,6 +19,17 @@ app.whenReady().then(async () => {
     getMode: () => mode, log: record,
     send: (channel, data) => record(channel, channel === 'speech-result' ? { textPresent: !!data?.text } : channel === 'speech-error' ? { error: data } : {}),
   });
+  if (wake) {
+    try {
+      await speech.setWake(true);
+      await new Promise(resolve => setTimeout(resolve, 4000));
+    } finally {
+      await speech.shutdown();
+      fs.writeFileSync(path.join(output, 'winrt-wake-probe.json'), JSON.stringify(records, null, 2));
+      app.quit();
+    }
+    return;
+  }
   const stopping = setTimeout(() => speech.stop(false, 'probe-duration').catch(error => record('stop-error', { error: error.message })), 6000);
   try { await speech.startManual(); }
   finally {

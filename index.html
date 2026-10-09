@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <title>Cortana</title>
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data: https:; media-src 'self' file: blob:; connect-src 'self' https: http://localhost:* http://127.0.0.1:* http://[::1]:*; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data: https:; media-src 'self' file: blob:; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'" />
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
@@ -20,7 +20,7 @@
             <button id="navigation-feedback" aria-label="Feedback"><span class="rail-icon">&#xE939;</span><span class="rail-label">Feedback</span></button>
           </div>
         </nav>
-        <div id="close-btn" role="button" tabindex="0" title="Dismiss Cortana" aria-label="Dismiss Cortana">
+        <div id="close-btn" role="button" tabindex="0" title="Hide Cortana in the notification area" aria-label="Hide Cortana in the notification area">
           <img id="close-btn-icon" alt="Close Icon" />
         </div>
         <div id="cortana-container" class="content-pane">
@@ -36,23 +36,36 @@
               </div>
               <div id="notebook-overview" class="notebook-page">
                 <div class="notebook-directory" aria-label="Your Notebook">
+                  <button id="notebook-my-day"><span class="directory-icon">&#xE8FD;</span>My day<span class="directory-arrow">&#xE76C;</span></button>
                   <button data-page="notes"><span class="directory-icon">&#xE70B;</span>Notes<span class="directory-arrow">&#xE76C;</span></button>
-                  <button data-page="todos"><span class="directory-icon">&#xE73A;</span>Tasks<span class="directory-arrow">&#xE76C;</span></button>
+                  <button data-page="todos"><span class="directory-icon">&#xE73A;</span>Lists &amp; tasks<span class="directory-arrow">&#xE76C;</span></button>
                   <button data-page="reminders"><span class="directory-icon">&#xE787;</span>Reminders<span class="directory-arrow">&#xE76C;</span></button>
                   <button data-page="about"><span class="directory-icon">&#xE77B;</span>About me<span class="directory-arrow">&#xE76C;</span></button>
                 </div>
               </div>
+              <div id="notebook-day" class="notebook-page" hidden>
+                <h2 id="notebook-day-greeting">Here's your day</h2>
+                <p id="notebook-day-date"></p>
+                <p id="notebook-day-status" role="status" aria-live="polite"></p>
+                <div id="notebook-day-content"></div>
+              </div>
               <div id="notebook-about" class="notebook-page" hidden>
-                <h2>What should I call you?</h2>
+                <h2>What should I call you?</h2><p>Your name labels your day summary and personalizes reminder notifications. You can ask “what’s my name?” or say “call me Bluey”. It stays on this computer.</p>
                 <label for="notebook-name">Your name or nickname</label><input id="notebook-name" type="text" maxlength="80" autocomplete="off" />
               </div>
               <div id="notebook-todos" class="notebook-page" hidden>
-                <h2>Things to do</h2>
+                <div class="notebook-list-heading">
+                  <h2 id="list-heading">Things to do</h2>
+                  <button id="delete-list" class="notebook-delete notebook-icon-button" type="button" aria-label="Delete this list" title="Delete this list" hidden>&#xE74D;</button>
+                </div>
+                <label for="notebook-list-select">Your lists</label><select id="notebook-list-select"></select>
                 <form id="todo-form">
                   <label for="todo-text">Add a task</label>
-                  <div class="todo-input-row"><input id="todo-text" maxlength="512" placeholder="What do you need to do?" required /><button type="submit">Add</button></div>
+                  <div class="todo-input-row"><input id="todo-text" type="text" maxlength="512" placeholder="What do you need to do?" required /><button type="submit">Add</button></div>
                 </form>
                 <div id="todo-list"></div>
+                <form id="list-form"><label for="list-name">Create a list</label><div class="todo-input-row"><input id="list-name" type="text" maxlength="80" placeholder="Name your list" required /><button type="submit">Create</button></div></form>
+                <p class="list-command-help">Try “add milk to my shopping list”. Your lists stay on this computer.</p>
               </div>
               <div id="notebook-notes" class="notebook-page" hidden>
                 <h2>Your notes</h2>
@@ -95,7 +108,8 @@
               <label for="reminder-time-input" class="reminder-label-gray"
                 >On this date and time</label
               >
-              <input type="datetime-local" id="reminder-time-input" /><p id="reminder-save-error" role="status" class="setting-warning" hidden></p>
+              <input type="datetime-local" id="reminder-time-input" />
+              <label for="reminder-repeat">Repeat</label><select id="reminder-repeat"><option value="">Once</option><option value="daily">Every day</option><option value="weekdays">Weekdays</option><option value="weekly">Every week</option></select><p id="reminder-save-error" role="status" class="setting-warning" hidden></p>
               <div class="reminder-actions">
                 <button id="reminder-save-btn">Save</button>
                 <button id="reminder-cancel-btn">Cancel</button>
@@ -205,7 +219,7 @@
                     <label for="idle-greeting-mode-select">Idle Greeting</label>
                     <select id="idle-greeting-mode-select">
                       <option value="random">Random</option>
-                      <option value="specific">Specific</option>
+                      <option value="specific">Choose a greeting</option>
                       <option value="custom">Custom</option>
                     </select>
                   </div>
@@ -316,7 +330,7 @@
                   <h2>AI</h2>
                   <p class="setting-hint">Optional answers from your chosen provider when a built-in command does not match. Online providers receive those questions; local providers need their server running. Built-in commands still work with this off.</p>
                   <div class="setting-item">
-                    <label for="ai-toggle">Use AI Responses</label>
+                    <label for="ai-toggle">Use AI replies</label>
                     <label class="toggle-switch">
                       <input type="checkbox" id="ai-toggle" />
                       <span class="slider"></span>
@@ -509,7 +523,7 @@
           </div>
         </div>
       </div>
-      <div id="search-panel" class="search-panel"></div>
+      <div id="search-panel-viewport"><div id="search-panel" class="search-panel" inert></div></div>
       <div class="search-container">
         <div id="speech-feedback" role="status" aria-live="polite" hidden>
           <span id="speech-feedback-message"></span>
@@ -530,6 +544,12 @@
         </div>
       </div>
     </div>
+    <script src="lib/ai-endpoint.js"></script>
+    <script src="lib/shortcuts.js"></script>
+    <script src="lib/voice-policy.js"></script>
+    <script src="lib/audio-device-policy.js"></script>
+    <script src="lib/ui-bridge.js"></script>
+    <script src="lib/lists.js"></script>
     <script src="renderer.js"></script>
   </body>
 </html>

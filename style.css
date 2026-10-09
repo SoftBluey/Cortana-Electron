@@ -116,7 +116,7 @@ body.slim-mode #search-panel {
 }
 
 .main-container {
-    height: calc(100% - 45px);
+    height: calc(100% - var(--search-height,45px));
     position: relative;
     background-color: #171717;
     overflow: hidden;
@@ -541,13 +541,13 @@ body.slim-mode #search-panel {
 }
 
 #search-bar:focus,
-.search-panel.visible ~ .search-container #search-bar {
+#app-container.search-panel-open .search-container #search-bar {
     background-color: #f3f3f3;
     color: black;
 }
 
 .search-input-wrapper:focus-within #search-icon,
-.search-panel.visible ~ .search-container .search-input-wrapper #search-icon {
+#app-container.search-panel-open .search-container .search-input-wrapper #search-icon {
     filter: none;
 }
 
@@ -616,29 +616,10 @@ body.slim-mode #search-panel {
     50% { background: rgba(220, 50, 50, 0.25); }
 }
 
-/* Search panel styling */
-.search-panel {
-    position: absolute;
-    top: 0;
-    bottom: 45px;
-    left: 0;
-    right: 0;
-    background: #FFFFFF;
-    overflow-y: auto;
-    z-index: 50;
-    opacity: 0;
-    visibility: hidden;
-    pointer-events: none;
-    transition: opacity 83ms linear, visibility 0s 83ms;
-}
-
-.search-panel.visible {
-    opacity: 1;
-    visibility: visible;
-    pointer-events: auto;
-    transition: opacity 167ms linear;
-}
-
+/* UWP-inspired entrance: upward slide, 250ms deceleration; input stays fixed. */
+#search-panel-viewport { position:absolute; inset:0 0 var(--search-height,45px) 48px; overflow:hidden; z-index:25; pointer-events:none; }
+.search-panel { position:absolute; inset:0; background:#fff; overflow-y:auto; overscroll-behavior:contain; opacity:1; visibility:hidden; pointer-events:none; transform:translateY(100%); transition:transform 167ms cubic-bezier(1,0,1,1),visibility 0s 167ms; }
+.search-panel.visible { transform:translateY(0); visibility:visible; pointer-events:auto; transition:transform 250ms cubic-bezier(0,0,0,1); }
 .search-panel::-webkit-scrollbar {
     width: 5px;
 }
@@ -1523,22 +1504,33 @@ body.slim-mode #notebook-btn, body.slim-mode #notebook-sidebar { display: none; 
 #notebook-sidebar h1 { font-size: 18px; font-weight: 400; }
 #notebook-back { width: 45px; height: 45px; border: 0; background: transparent; color: white; font: 16px 'Segoe MDL2 Assets'; cursor: pointer; }
 .notebook-content { padding: 12px 20px 20px; overflow-y: auto; flex: 1; }
-.notebook-content h2 { font-size: 19px; font-weight: 400; margin: 12px 0; }
-.notebook-content p, .notebook-content label { font-size: 13px; line-height: 1.5; }
+.notebook-content { font-size: 15px; line-height: 1.5; }
+.notebook-content h2 { font-size: 20px; font-weight: 400; margin: 12px 0; }
+.notebook-content p, .notebook-content label { font-size: inherit; line-height: inherit; }
 #notebook-intro { border-bottom: 1px solid #444; padding-bottom: 16px; }
 .notebook-tabs { display: flex; gap: 4px; margin: 12px 0 20px; }
 .notebook-tabs button { flex: 1; padding: 8px 4px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #aaa; cursor: pointer; }
 .notebook-tabs button[aria-current] { color: white; border-bottom-color: var(--primary-color); }
-.todo-input-row { display: flex; gap: 6px; margin: 8px 0 12px; }
-.notebook-content input[type="text"], #todo-text, #notebook-notes-text { background: #252525; border: 1px solid #666; color: white; padding: 8px; min-width: 0; width: 100%; border-radius: 0; }
+.todo-input-row { display: flex; gap: 8px; margin: 8px 0 12px; }
+.notebook-content input[type="text"], #notebook-notes-text, .notebook-content select { box-sizing: border-box; background: #171717; border: 1px solid #888; color: white; padding: 8px 12px; min-width: 0; width: 100%; border-radius: 0; font: inherit; }
+.notebook-content input[type="text"]:hover, #notebook-notes-text:hover, .notebook-content select:hover { background: #333; }
+.notebook-content input[type="text"]:focus, #notebook-notes-text:focus, .notebook-content select:focus { border-color: var(--primary-color); }
+.notebook-content input::placeholder, #notebook-notes-text::placeholder { color: #a2a2a2; }
+.todo-input-row input { flex: 1 1 auto; }
 #notebook-notes-text { margin-top: 8px; resize: vertical; }
-.todo-input-row button, .notebook-delete { background: #333; border: 1px solid #666; color: white; padding: 6px 10px; cursor: pointer; }
-.todo-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid #333; }
-.todo-item label { flex: 1; overflow-wrap: anywhere; }
+.todo-input-row button, .notebook-delete { flex: 0 0 auto; background: #1a1a1a; border: 1px solid #555; border-radius: 0; color: white; padding: 4px 12px; min-height: 32px; font: inherit; cursor: pointer; }
+.todo-input-row button:hover, .notebook-delete:hover { background: #2e2e2e; }
+.todo-input-row button:active, .notebook-delete:active { background: #111; }
+.todo-item { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 8px 0; border-bottom: 1px solid #333; }
+.todo-item label { flex: 1; min-width: 0; overflow-wrap: anywhere; cursor: pointer; }
+.todo-item input[type="checkbox"] { appearance: none; flex: 0 0 20px; width: 20px; height: 20px; margin: 0; border: 2px solid #aaa; border-radius: 0; background: transparent; color: var(--primary-text-color); cursor: pointer; }
+.todo-item input[type="checkbox"]:hover { border-color: white; }
+.todo-item input[type="checkbox"]:checked { border-color: var(--primary-color); background: var(--primary-color); }
+.todo-item input[type="checkbox"]:checked::before { content: '\E73E'; display: block; font: 14px/16px 'Segoe MDL2 Assets'; text-align: center; }
 .todo-item input:checked + label { text-decoration: line-through; color: #aaa; }
-.notebook-delete { padding: 3px 7px; font-size: 12px; }
+.notebook-icon-button { width: 32px; height: 32px; padding: 0; font: 14px 'Segoe MDL2 Assets'; }
 .notebook-reminder { border-bottom: 1px solid #333; padding: 12px 0; display: flex; gap: 8px; align-items: center; }
-.notebook-reminder span { flex: 1; overflow-wrap: anywhere; font-size: 13px; }
+.notebook-reminder span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 #notebook-save-status { color: #aaa; min-height: 20px; margin-top: 10px; }
 @media (prefers-reduced-motion: reduce) { #app-container, #settings-container, .search-panel { transition-duration: 0.01s; } }
 
@@ -1568,7 +1560,7 @@ body.slim-mode #notebook-btn, body.slim-mode #notebook-sidebar { display: none; 
 .notebook-page > label { display: block; margin: 12px 0 5px; }
 .notebook-page > p { color: #aaa; margin: 12px 0; }
 .notebook-page > .settings-button { margin: 12px 0; }
-.notebook-content select { display: block; width: 100%; padding: 8px; background: #252525; border: 1px solid #666; color: white; }
+.notebook-content select { display: block; }
 #notebook-idle-canvas { display: block; width: auto; height: 144px; max-width: 100%; object-fit: contain; margin: 0 auto 12px; }
 #notebook-save-status:empty { margin: 0; min-height: 0; }
 .settings-section > summary { cursor: pointer; color: #aaa; font-size: 13px; padding: 12px 0; }
@@ -1613,3 +1605,21 @@ body.slim-mode #cortana-container { left: 0; width: 100%; }
 .settings-content .setting-item.setting-column > textarea.settings-text-input { flex: 0 0 auto; width: 100%; min-height: 96px; }
 #settings-save-error { margin: 8px 16px; }
 #reminder-save-error:not([hidden]), #notebook-reminder-error:not([hidden]), #settings-save-error:not([hidden]) { display: block; }
+
+.notebook-list-heading { display: flex; align-items: center; gap: 12px; }
+.notebook-list-heading h2 { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+#notebook-list-select { margin: 6px 0 16px; }
+#list-form { margin-top: 24px; padding-top: 16px; border-top: 1px solid #333; }
+.notebook-content .list-command-help, .notebook-secondary { color: #aaa; font-size: 13px; line-height: 1.5; }
+#notebook-day-greeting { overflow-wrap: anywhere; }
+#notebook-day-date { margin-top: -4px; }
+#notebook-day-status:empty { display: none; }
+.notebook-summary-section { border-top: 1px solid #333; padding: 8px 0 12px; }
+.notebook-summary-row { display: flex; flex-direction: column; gap: 2px; padding: 8px 0; overflow-wrap: anywhere; }
+.notebook-summary-section > p { margin: 8px 0; }
+@media (forced-colors: active) {
+    .todo-item input[type="checkbox"] { appearance: auto; }
+    .todo-item input[type="checkbox"]:checked::before { content: none; }
+}
+#reminder-repeat { width:100%; padding:8px; margin:4px 0 12px; border:1px solid #888; border-radius:0; color:#fff; background:#252525; font:inherit; }
+@media(prefers-reduced-motion:reduce) {.search-panel,.search-panel.visible {transition:none;}}

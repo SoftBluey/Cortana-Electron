@@ -17,7 +17,7 @@ Download the **Setup `.exe` installer** from the [latest release](https://github
 
 Enable **Start with Windows** in Settings to launch quietly in the tray. Turning it off in Windows Startup apps keeps it off when Cortana next opens.
 
-This checkout includes unreleased startup and interface fixes. The published installer is still 8.0.0; the fix for re-enabling startup after disabling it in Task Manager will be included in a future release.
+Version **8.1.0** is in testing, with named lists, recurring reminders, persistent named timers, a personal day summary, Windows media controls, and interface/startup fixes. The latest published installer is still **8.0.0**.
 
 ### Features
 
@@ -25,16 +25,19 @@ This checkout includes unreleased startup and interface fixes. The published ins
 *   **"Hey Cortana" Wake Word:** Optional, off by default. Opens a slim UI ready for your voice command, even when the app is hidden. Subject to the same recognition limitations as voice search.
 *   **Edge Neural Text-to-Speech:** High-quality Microsoft Edge Neural voices for natural-sounding responses. System TTS (like Windows Zira) is also available as a fallback.
 *   **Embedded Web Search:** DuckDuckGo results appear inside Cortana. The browser search engine in Settings controls searches opened in your browser.
-*   **Optional AI replies:** Connect to an OpenAI-compatible provider with your own API key and model, or run a local server such as Ollama or LM Studio. Online providers receive questions that do not match a built-in command.
-*   **Notebook:** Keep local notes, tasks and reminders, and tell Cortana what to call you!
-*   **Assistant Shortcut:** Configure a global keyboard shortcut in Settings, optionally starting voice recognition. Compatible hardware buttons can be mapped to it through device software.
-*   **Background Preference:** Keep Cortana in the notification area for reminders and timers, or choose to quit when dismissed. They need Cortana running.
+*   **Optional AI replies:** Connect to an OpenAI-compatible provider with your own API key and model, or run a local server such as Ollama or LM Studio. Local servers do not need an API key unless you set one up. You can edit the model and reply instructions for any provider in Settings. Online providers receive questions that do not match a built-in command.
+*   **Notebook:** Keep local notes and named lists. Try "create a shopping list", "add milk to my shopping list", "read my shopping list", or "mark milk as done on my shopping list". Existing tasks are kept in Tasks. Duplicate item names require choosing the item in the Notebook.
+*   **My day:** Ask "my day" or open it in the Notebook for today's reminders, unfinished list items and running timers. "Call me Bluey" saves a local nickname for the summary, reminder notifications and "what is my name". The name is not added to online AI requests.
+*   **Media and volume:** "Pause music" and "play music" request the intended playback state from players that expose Windows media controls. "Mute" and "unmute" are explicit; "set volume to 30 percent" sets the default playback device. "Volume status" reads its current level.
+*   **Assistant Shortcut:** Configure a global keyboard shortcut in Settings, such as "Ctrl+Shift+C", optionally starting voice recognition. Compatible hardware buttons can be mapped to it through device software.
+*   **Background Preference:** Keep Cortana in the notification area for reminders and timers, or choose to quit when dismissed. They alert while Cortana runs. On restart, overdue timers alert once and recurring reminders deliver one overdue alert and advance to their next occurrence.
 *   **Built-in Skills:**
     *   **Weather Forecast:** Ask "weather in Chicago" to get current conditions. In this checkout, Settings also lets you choose a default weather city. Weather needs an internet connection.
-    *   **Calculator:** Type any simple math equation to get a quick answer.
-    *   **Time Lookup:** Ask for the time locally ("What time is it?") or in any major city ("Time in Tokyo"). Supports 12-hour and 24-hour formats.
+    *   **Calculator:** Type a simple calculation, like "12 * 3", to get a quick answer.
+    *   **Time Lookup:** Ask for the time locally ("What time is it?") or in a city ("What is the time in Tokyo"). Supports 12-hour and 24-hour formats.
     *   **Jokes:** Ask Cortana to tell you a joke.
-    *   **Reminders:** Cortana can remind you to do things.
+    *   **Reminders:** Try "remind me to call Nana tomorrow at 3 pm" or "remind me to stretch every Friday at 3 pm". The form supports daily, weekdays and weekly repeats. Weekly repeats use the selected date's weekday.
+    *   **Timers:** Run up to 20 timers, such as "set a timer for 5 minutes named tea". Use "show timers" or "cancel tea timer". Timers survive quitting and restarting. Cancellation asks you to choose when more than one is running.
     *   **More:** Cortana can launch applications, tell you the day, and give you a drumroll!
 
 ### Built With
@@ -93,9 +96,12 @@ The installer is saved in `dist`. Development runs do not add Electron to Window
 npm run check
 npm test
 npm run smoke -- --workflows
+npm run checkup -- --live
 ```
 
 The smoke test checks interface workflows with a temporary profile and saves its results under `.verification`. It does not change your normal settings or Windows startup registration. Microphone actions are simulated.
+
+The checkup adds command, timer, reminder, conversion, response-cancellation and local AI integration checks. `--live` also tests weather, embedded search, Wikipedia, Edge speech synthesis, release checks and Everything availability. Desktop actions are recorded without executing them; the checkup uses a temporary profile and no personal API keys. Omit `--live` to skip the explicit service checks.
 
 ### Known limitations and troubleshooting
 

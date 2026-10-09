@@ -1,11 +1,3 @@
-const { ipcRenderer } = require('electron');
-const path = require('path');
-const https = require('https');
-const { isLoopback } = require('./lib/ai-endpoint');
-const { formatShortcut } = require('./lib/shortcuts');
-const { defaultVoice: findDefaultVoice, resolveVoice } = require('./lib/voice-policy');
-const { parseGIF, decompressFrames } = require('gifuct-js');
-
 window.onerror = (msg, src, line, col, err) => {
     console.error('[renderer] Uncaught:', msg, src, line, err && err.stack);
 };
@@ -78,8 +70,7 @@ let timerDuration = null;
 let activeTimerLabel = null;
 let timerPanelInterval = null;
 
-const isPackaged = ipcRenderer.sendSync('get-is-packaged');
-const appRoot = path.resolve(__dirname, isPackaged ? '../assets' : 'assets');
+const appRoot = window.cortana.assetRoot;
 
 const cortanaIcon = path.join(appRoot, 'cortana.png');
 const searchIconPng = path.join(appRoot, 'search.png');
@@ -234,7 +225,7 @@ class GifRenderer {
     const generation = this._loadGeneration = (this._loadGeneration || 0) + 1;
     this.stop();
     this._lastFrame = null;
-    const filename = require('path').basename(filePath);
+    const filename = path.basename(filePath);
     const cached = gifCache.get(filename);
 
     if (cached) {
@@ -249,73 +240,11 @@ class GifRenderer {
       return;
     }
 
-    const buffer = await require('fs').promises.readFile(filePath);
+    const decoded = await window.cortana.decodeAnimation(filename);
     if (generation !== this._loadGeneration) return;
-    const gif = parseGIF(buffer);
-    const rawFrames = decompressFrames(gif);
-
-    this.gifWidth = gif.lsd.width;
-    this.gifHeight = gif.lsd.height;
-    this.canvas.width = this.gifWidth;
-    this.canvas.height = this.gifHeight;
+    Object.assign(this, decoded);
+    this.canvas.width = this.gifWidth; this.canvas.height = this.gifHeight;
     this._imageData = this.ctx.createImageData(this.gifWidth, this.gifHeight);
-
-    this.frames = [];
-    let prevData = new Uint8ClampedArray(this.gifWidth * this.gifHeight * 4);
-    let prevDisposal = 0;
-
-    for (const raw of rawFrames) {
-      const { left, top, width, height } = raw.dims;
-      const pixels = raw.pixels;
-      const colorTable = raw.colorTable;
-      const frameData = new Uint8ClampedArray(this.gifWidth * this.gifHeight * 4);
-
-      if (prevDisposal === 0 || prevDisposal === 1) {
-        frameData.set(prevData);
-      }
-
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const si = y * width + x;
-          const di = ((top + y) * this.gifWidth + (left + x)) * 4;
-
-          const index = pixels[si];
-          const color = colorTable[index];
-          if (!color) continue;
-
-          const pr = color[0];
-          const pg = color[1];
-          const pb = color[2];
-
-          const lum = getLuminance(pr, pg, pb);
-
-          if (lum < CHROMA_KEY_THRESHOLD) {
-            frameData[di] = 0;
-            frameData[di + 1] = 0;
-            frameData[di + 2] = 0;
-            frameData[di + 3] = 0;
-          } else {
-            frameData[di] = pr;
-            frameData[di + 1] = pg;
-            frameData[di + 2] = pb;
-            frameData[di + 3] = 255;
-          }
-        }
-      }
-
-      // Animations are tinted monochrome. Store one intensity byte instead of four RGBA bytes.
-      const intensity = new Uint8Array(this.gifWidth * this.gifHeight);
-      for (let i = 0; i < intensity.length; i++) {
-        const offset = i * 4;
-        intensity[i] = frameData[offset + 3] ? Math.round(getLuminance(frameData[offset], frameData[offset + 1], frameData[offset + 2])) : 0;
-      }
-      this.frames.push({ data: intensity, delay: Math.max(raw.delay, 20) });
-
-      prevData = raw.disposalType === 2
-        ? new Uint8ClampedArray(this.gifWidth * this.gifHeight * 4)
-        : new Uint8ClampedArray(frameData);
-      prevDisposal = raw.disposalType;
-    }
 
     const bytes = this.frames.reduce((total, frame) => total + frame.data.byteLength, 0);
     let cachedBytes = [...gifCache.values()].reduce((total, entry) => total + (entry.bytes || 0), 0);
@@ -936,6 +865,7 @@ window.addEventListener('DOMContentLoaded', async () => {
             return;
         }
         closeSettings(true);
+        if (notebookPage === 'day') { closeNotebook({ immediate: true }); setStateIdle(); }
         entranceReceived = true;
         revealAppContainer();
         const state = timeSinceHidden > 5000
@@ -1503,6 +1433,7 @@ window.addEventListener('DOMContentLoaded', async () => {
             cleanup();
             if (!appContainer.classList.contains('visible')) {
                 ipcRenderer.send('hide-window');
+                if (notebookPage === 'day') closeNotebook({ immediate: true });
                 setStateIdle();
             }
         };
@@ -1521,9 +1452,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     ipcRenderer.on('command-failed', (event, { command }) => {
         let errorText = "I couldn't complete that command. Try again.";
         if (command === 'open-application') {
-            errorText = "I couldn't open that app. Check that it is still installed and try again.";
+            errorText = "I couldn't open that app. Check that it's still installed.";
         } else if (command === 'run-command') {
-            errorText = "I couldn't run that command. Check the command and any file paths, then try again.";
+            errorText = "I couldn't run that command. Check the command and file paths.";
         }
         displayAndSpeak(errorText, onActionFinished, {}, true);
     });
@@ -1532,10 +1463,6 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     ipcRenderer.on('play-reminder-sound', (event, soundFile) => {
         playReminderSound(soundFile);
-        setTimeout(() => {
-            isBusy = false;
-            setStateIdle();
-        }, 4000);
     });
 
     ipcRenderer.on('settings-force-close', () => {
@@ -1555,20 +1482,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
 
     ipcRenderer.on('timer-fired', (event, { id, label }) => {
-        // Clean up countdown display
-        if (timerCountdownInterval) {
-            clearInterval(timerCountdownInterval);
-            timerCountdownInterval = null;
-        }
-        activeTimerId = null;
-        timerEndTime = null;
-        timerDuration = null;
-        activeTimerLabel = null;
-        stopTimerPanelInterval();
-
-        const display = document.getElementById('timer-display');
-        if (display) display.textContent = "Time's up!";
-
+        if (document.getElementById('timer-list')) void showTimersPanel({announce:false});
+        const display = id===activeTimerId ? document.getElementById('timer-display') : null;
+        if(id===activeTimerId) { clearInterval(timerCountdownInterval);timerCountdownInterval=null;activeTimerId=null;timerEndTime=null;timerDuration=null;activeTimerLabel=null; }
+        if(display)display.textContent="Time's up!";
         // Always play the chime — this works even when media is playing
         // because we use a short Audio object, not the TTS engine
         const notifyAudio = new Audio(path.join(appRoot, 'notify.wav'));
@@ -1588,7 +1505,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         // App is idle and visible — speak the alert
         setStateActive();
         anim.goToState(AnimationState.SPEAKING_BEGIN);
-        speak("Time's up! Your timer has finished.", () => {
+        speak(label ? `${label}: time's up!` : "Time's up! Your timer has finished.", () => {
             isBusy = false;
             searchBar.disabled = false;
             searchBar.placeholder = 'Type here to search';
@@ -1603,6 +1520,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         revealAppContainer();
         anim.goToState(AnimationState.ENTRANCE);
     }
+    new ResizeObserver(([entry])=>document.getElementById('app-container').style.setProperty('--search-height', `${entry.target.getBoundingClientRect().height}px`)).observe(document.querySelector('.search-container'));
     await setupNotebookAndSystemControls();
     await loadAndApplySettings();
     setupTTS();
@@ -1633,7 +1551,9 @@ const PANEL_ICONS = {
   web: 'web',
 };
 
+let searchPanelGeneration = 0;
 async function onSearchInput(event) {
+    const generation=++searchPanelGeneration;
     cancelSpeechOutput();
     const query = searchBar.value.trim();
     if (query.length === 0) {
@@ -1641,7 +1561,7 @@ async function onSearchInput(event) {
         return;
     }
     const categories = await generateCategorizedResults(query);
-    if (searchBar.value.trim() !== query) return;
+    if (generation!==searchPanelGeneration || searchBar.disabled || searchBar.value.trim() !== query) return;
     showSearchPanel(categories);
 }
 
@@ -1678,16 +1598,17 @@ async function generateCategorizedResults(query) {
 
     const cortanaItems = [];
 
-    const matchedSkill = matchAssistantSkill(lowerQuery);
-    const matchedCommand = commands.find(c => lowerQuery.match(c.regex));
+    const matchedSkill = matchAssistantSkill(query);
+    const matchedCommand = commands.find(c => query.match(c.regex));
 
     if (matchedSkill || matchedCommand) {
         cortanaItems.push({
             type: 'cortana',
-            title: `Execute "${query}"`,
-            subtitle: 'Run this Cortana function',
+            title: `Run "${query}"`,
+            subtitle: 'Use a built-in command',
             icon: PANEL_ICONS.cortana,
             action: () => {
+                ++assistantRequestGeneration;
                 lastQuery = query;
                 isBusy = true;
                 setStateActive();
@@ -1695,7 +1616,7 @@ async function generateCategorizedResults(query) {
                 if (matchedSkill) {
                     executeAssistantSkill(matchedSkill);
                 } else {
-                    matchedCommand.handler(lowerQuery.match(matchedCommand.regex));
+                    matchedCommand.handler(query.match(matchedCommand.regex), query);
                 }
             }
         });
@@ -1704,7 +1625,7 @@ async function generateCategorizedResults(query) {
     if (navigator.onLine) cortanaItems.push({
         type: 'cortana',
         title: `Search for "${query}"`,
-        subtitle: 'Continue with Cortana regular',
+        subtitle: 'Search the web with Cortana',
         icon: PANEL_ICONS.cortana,
         action: () => {
             lastQuery = query;
@@ -1820,36 +1741,13 @@ async function generateCategorizedResults(query) {
 }
 
 function generateWebSuggestions(query) {
-    if (!navigator.onLine) return Promise.resolve([]);
-    return new Promise((resolve) => {
-        const url = `https://suggestqueries.google.com/complete/search?client=chrome&q=${encodeURIComponent(query)}`;
-        const options = {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-        };
-        const req = https.get(url, options, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                try {
-                    const json = JSON.parse(data);
-                    const suggestions = json[1] || [];
-                    resolve(suggestions.slice(0, 4));
-                } catch {
-                    resolve([]);
-                }
-            });
-        });
-        req.on('error', () => resolve([]));
-        req.setTimeout(3000, () => { req.destroy(); resolve([]); });
-    });
+    return navigator.onLine ? ipcRenderer.invoke('search-suggestions', query).catch(()=>[]) : Promise.resolve([]);
 }
 
 function showSearchPanel(categories) {
     selectedPanelIndex = -1;
     allPanelItems = [];
-    searchPanel.innerHTML = '';
+    searchPanel.innerHTML = ''; searchPanel.scrollTop = 0;
     micBtn.style.display = 'none';
 
     let globalIndex = 0;
@@ -1913,6 +1811,7 @@ function showSearchPanel(categories) {
     });
 
     if (allPanelItems.length > 0) {
+        searchPanel.inert = false; document.getElementById('app-container').classList.add('search-panel-open');
         searchPanel.classList.add('visible');
         selectedPanelIndex = 0;
         updatePanelSelection();
@@ -1933,6 +1832,8 @@ function getIconChar(type) {
 }
 
 function hideSearchPanel() {
+    ++searchPanelGeneration;
+    searchPanel.inert = true; document.getElementById('app-container').classList.remove('search-panel-open');
     searchPanel.classList.remove('visible');
     allPanelItems = [];
     selectedPanelIndex = -1;
@@ -1992,7 +1893,9 @@ function updatePanelSelection() {
     allPanelItems.forEach((item, index) => {
         if (index === selectedPanelIndex) {
             item.el.classList.add('selected');
-            item.el.scrollIntoView({ block: 'nearest' });
+            const top=item.el.offsetTop, bottom=top+item.el.offsetHeight;
+            if(top<searchPanel.scrollTop)searchPanel.scrollTop=top;
+            else if(bottom>searchPanel.scrollTop+searchPanel.clientHeight)searchPanel.scrollTop=bottom-searchPanel.clientHeight;
         } else {
             item.el.classList.remove('selected');
         }
@@ -2143,12 +2046,20 @@ function updateGreetingUI() {
     customGreetingContainer.style.display = (mode === 'custom') ? 'block' : 'none';
 }
 
+function updateCloseButton(closeToTray) {
+    const button = document.getElementById('close-btn');
+    const text = closeToTray ? 'Hide Cortana in the notification area' : 'Quit Cortana';
+    button.title = text;
+    button.setAttribute('aria-label', text);
+}
+
 async function loadAndApplySettings() {
     const settings = await ipcRenderer.invoke('get-settings');
     document.getElementById('recognition-mode-select').value = settings.recognitionMode || 'dictation';
     listeningSounds = settings.listeningSounds !== false;
     document.getElementById('listening-sounds-toggle').checked = listeningSounds;
     document.getElementById('close-to-tray-toggle').checked = settings.closeToTray !== false;
+    updateCloseButton(settings.closeToTray !== false);
     document.getElementById('hotkey-listen-toggle').checked = settings.hotkeyStartsListening === true;
     document.getElementById('assistant-hotkey').value = formatShortcut(settings.assistantHotkey);
     const hotkey = await ipcRenderer.invoke('get-hotkey-status');
@@ -2540,8 +2451,8 @@ function onResetThemeColors() {
 async function onResetAllSettings() {
     const confirmation = confirm(
         'Reset settings, reminders and custom actions?\n\n' +
-        'This restores settings to their defaults (including Start with Windows), removes all reminders and custom actions, and restarts Cortana. Running timers will stop.\n\n' +
-        'Your Notebook data and installed Windows voices will be kept. This cannot be undone.'
+        'This restores settings to their defaults (including Start with Windows), removes all reminders and custom actions, and restarts Cortana. Saved timers and your Notebook are kept.\n\n' +
+        'Your notes, tasks, About me details and installed Windows voices will be kept. This cannot be undone.'
     );
     if (!confirmation) return;
     resetAllBtn.disabled = true;
@@ -2719,9 +2630,10 @@ function updateAIProviderUI(provider) {
     aiModelItem.style.display = provider ? '' : 'none';
     aiApiUrlItem.style.display = showLocalOrCustom ? '' : 'none';
 
+    const isLocal = isLoopback(aiApiUrlInput.value);
+    document.querySelector('label[for="openai-api-key-input"]').textContent = isLocal ? 'API key (optional)' : 'API key';
     openaiApiKeyInput.placeholder =
-        preset?.keyHint ||
-        (preset?.local ? 'No API key needed' : 'sk-...');
+        isLocal ? 'Leave blank if not needed' : preset?.keyHint || 'sk-...';
 }
 
 function onOpenAIKeyChanged() {
@@ -2734,6 +2646,7 @@ function onAIModelChanged() {
 
 function onAIApiUrlChanged() {
     aiApiUrl = aiApiUrlInput.value;
+    updateAIProviderUI(aiPresetSelect.value);
     saveSetting('aiApiUrl', aiApiUrlInput.value);
 }
 
@@ -2762,6 +2675,9 @@ function onCustomIdleGreetingChanged(event) {
 }
 
 function displayAndSpeak(text, callback, options = {}, isError = false) {
+    const generation = assistantRequestGeneration;
+    const output = outputGeneration;
+    const current = () => generation === assistantRequestGeneration && output === outputGeneration;
     resultsDisplay.innerHTML = '';
     requestSound.pause();
     requestSound.currentTime = 0;
@@ -2783,6 +2699,7 @@ function displayAndSpeak(text, callback, options = {}, isError = false) {
             if (errorHandled) return;
             errorHandled = true;
             errorSound.onended = null;
+            if (!current()) return;
 
             const currentState = anim.state;
             const wasSpeaking = currentState === AnimationState.SPEAKING || currentState === AnimationState.SPEAKING_BEGIN;
@@ -2794,6 +2711,7 @@ function displayAndSpeak(text, callback, options = {}, isError = false) {
             }
 
             setTimeout(() => {
+                if (!current()) return;
                 speak(text, () => {
                     isBusy = false;
                     searchBar.disabled = false;
@@ -2863,7 +2781,7 @@ let currentEdgeAudio = null;
 let currentEdgeFilePath = null;
 let outputGeneration = 0;
 function removeSpeechFile(filename) {
-    if (filename) require('fs').promises.unlink(filename).catch(() => {});
+    if (filename) ipcRenderer.invoke('release-tts-file', filename).catch(() => {});
 }
 function cancelSpeechOutput() {
     ++outputGeneration;
@@ -2913,7 +2831,7 @@ async function speakEdge(text, finish, generation) {
         return;
     }
     currentEdgeFilePath = result.filePath;
-    const audio = new Audio(require('url').pathToFileURL(result.filePath).href);
+    const audio = new Audio(window.cortana.fileUrl(result.filePath));
     currentEdgeAudio = audio;
     const cleanup = () => {
         removeSpeechFile(result.filePath);
@@ -2956,7 +2874,10 @@ function onActionFinished() {
 }
 
 function setStateIdle() {
+    // Stopping capture while entering the Notebook must not invalidate its page load.
+    if (document.getElementById('notebook-sidebar')?.classList.contains('visible')) return;
     ++assistantRequestGeneration;
+    resultsDisplay.classList.remove('day-summary');
     searchIcon.src = cortanaIcon;
     if (settingsContainer.classList.contains('visible')) return;
     if (animationContainer.className === 'idle' && document.activeElement === searchBar &&
@@ -3042,6 +2963,7 @@ function getSearchUrl(query) {
 }
 
 async function performWebSearch(query) {
+    const generation = ++assistantRequestGeneration;
     if (!navigator.onLine) {
         displayAndSpeak('Web search needs an internet connection. You can still open apps and folders, calculate, set reminders and timers, and use your Notebook.', onActionFinished);
         return;
@@ -3067,7 +2989,7 @@ async function performWebSearch(query) {
     let result;
     try { result = await ipcRenderer.invoke('search-web', query); }
     catch (_) { result = { success: false }; }
-    if (!searchResultsActive) return;
+    if (!searchResultsActive || generation !== assistantRequestGeneration) return;
 
     resultsDisplay.innerHTML = '';
     if (result.success && result.results.length > 0) {
@@ -3116,6 +3038,7 @@ async function performWebSearch(query) {
         showWebLink();
         anim.goToState(AnimationState.SPEAKING_BEGIN);
         setTimeout(() => {
+            if (generation !== assistantRequestGeneration) return;
             isBusy = false;
             anim.goToState(AnimationState.TRANSITION_TO_IDLE);
         }, 1000);
@@ -3209,9 +3132,9 @@ function presentAssistantResponse(response) {
 const assistantSkills = [
     {
         match(query) {
-            const locationMatch = query.match(/(?:what's|what is) the time (?:in|for|at) (.+)/i);
+            const locationMatch = query.match(/(?:(?:what's|what is) the time|what time is it) (?:in|for|at) (.+)/i);
             if (locationMatch) return { kind: 'location', location: locationMatch[1] };
-            if (/what(?:'s| is) the time|what time is it/i.test(query)) return { kind: 'local' };
+            if (/^(?:what(?:'s| is) the time|what time is it)[?!.]*$/i.test(query)) return { kind: 'local' };
             return null;
         },
         execute(context) {
@@ -3242,11 +3165,15 @@ function matchAssistantSkill(query) {
 }
 
 async function executeAssistantSkill({ skill, context }) {
+    const generation = assistantRequestGeneration;
     try {
         const response = skill.execute(context);
         // Keep synchronous skills synchronous, including their presentation.
-        presentAssistantResponse(response instanceof Promise ? await response : response);
+        const resolved = response instanceof Promise ? await response : response;
+        if (generation !== assistantRequestGeneration) return;
+        presentAssistantResponse(resolved);
     } catch (error) {
+        if (generation !== assistantRequestGeneration) return;
         console.error('Assistant skill failed:', error);
         presentAssistantResponse(createAssistantResponse("Sorry, something went wrong. Try again in a little bit.", { isError: true }));
     }
@@ -3338,7 +3265,8 @@ function calculateResponse(query) {
             
             if (numStr === '') throw new Error('Expected number');
             
-            const num = parseFloat(numStr);
+            if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(numStr)) throw new Error('Invalid number');
+            const num = Number(numStr);
             if (isNaN(num)) throw new Error('Invalid number');
             
             return num;
@@ -3363,6 +3291,8 @@ function calculateResponse(query) {
 }
 
 async function getWeather(location) {
+    const generation = assistantRequestGeneration;
+    location = location.trim().replace(/[?!.]+$/, '');
     if (!navigator.onLine) {
         displayAndSpeak('Weather needs an internet connection. Local commands and your Notebook still work offline.', onActionFinished);
         return;
@@ -3370,6 +3300,7 @@ async function getWeather(location) {
     let responseText;
     try {
         const geoResponse = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(location)}&count=1`, { signal: AbortSignal.timeout(10000) });
+        if (generation !== assistantRequestGeneration) return;
         if (!geoResponse.ok) {
             responseText = `Sorry, I had trouble connecting to the location service.`;
             displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, true);
@@ -3377,6 +3308,7 @@ async function getWeather(location) {
         }
 
         const geoData = await geoResponse.json();
+        if (generation !== assistantRequestGeneration) return;
         if (!geoData.results || geoData.results.length === 0) {
             responseText = `Sorry, I couldn't find a location named ${location}.`;
             displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, true);
@@ -3394,6 +3326,7 @@ async function getWeather(location) {
         const windPhrase = isImperial ? 'miles per hour' : 'kilometers per hour';
 
         const weatherResponse = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current_weather=true&temperature_unit=${tempUnit}&wind_speed_unit=${windUnit}`, { signal: AbortSignal.timeout(10000) });
+        if (generation !== assistantRequestGeneration) return;
         if (!weatherResponse.ok) {
             responseText = `Sorry, I couldn't get the weather for ${locationNameForSpeech}.`;
             displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, true);
@@ -3401,6 +3334,7 @@ async function getWeather(location) {
         }
 
         const weatherData = await weatherResponse.json();
+        if (generation !== assistantRequestGeneration) return;
         const { temperature, windspeed, weathercode } = weatherData.current_weather;
         const conditions = getWeatherDescription(weathercode);
 
@@ -3410,6 +3344,7 @@ async function getWeather(location) {
         displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, false);
 
     } catch (error) {
+        if (generation !== assistantRequestGeneration) return;
         responseText = "Sorry, something went wrong. Try again in a little bit.";
         displayAndSpeak(responseText, onActionFinished, { showWebLink: true }, true);
     }
@@ -3501,9 +3436,10 @@ function updateSaveButtonState() {
 
 function showReminderUI(options = {}) {
     ++reminderFormRevision;
-    const { initialText = '', initialTime = '', initialSound = '', id = null } = options;
+    const { initialText = '', initialTime = '', initialSound = '', initialRecurrence = null, id = null } = options;
     editingReminderId = id;
     editingReminderSound = initialSound;
+    document.getElementById('reminder-repeat').value = initialRecurrence || '';
     document.getElementById('reminder-save-error').hidden = true;
 
     animationContainer.style.display = 'block';
@@ -3646,83 +3582,43 @@ function parseReminderRequest(fullText) {
 
 function parseDateTime(text) {
     const now = new Date();
-    let date = new Date(now);
-    text = text.toLowerCase();
-    text = normalizeTemporalNumberWords(text);
-    let timeFound = false;
-    let hasSpecificHour = false;
-
-    if (text.includes('tonight')) {
-        date.setHours(21, 0, 0, 0);
-        timeFound = true;
-        hasSpecificHour = true;
-    }
-    else if (text.includes('tomorrow')) {
-        date.setDate(now.getDate() + 1);
-        timeFound = true;
-    }
-    else {
-        const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-        for (let i = 0; i < days.length; i++) {
-            if (text.includes(days[i])) {
-                const dayIndex = i;
-                const currentDay = now.getDay();
-                let dayDiff = dayIndex - currentDay;
-                if (dayDiff <= 0) {
-                    dayDiff += 7;
-                }
-                date.setDate(now.getDate() + dayDiff);
-                timeFound = true;
-                break;
-            }
-        }
+    text = normalizeTemporalNumberWords(text.toLowerCase().trim().replace(/[!.?]+$/, ''));
+    // Parse durations before clock times, and consume the entire input. Date's
+    // setHours silently normalizes invalid clocks such as 25:00 or 12:75.
+    const relative = text.match(/^(?:in\s+)?(\d+)\s*(second|minute|hour|day)s?$/);
+    if (relative) {
+        const ms = Number(relative[1]) * { second: 1000, minute: 60000, hour: 3600000, day: 86400000 }[relative[2]];
+        const result = new Date(now.getTime() + ms);
+        return ms > 0 && Number.isSafeInteger(ms) && Number.isFinite(result.getTime()) ? result : null;
     }
 
-    const timeMatch = text.match(/(\d{1,2})(:\d{2})?\s?(am|pm)?/);
-    if (timeMatch) {
-        let [_, hourStr, minuteStr, ampm] = timeMatch;
-        let hour = parseInt(hourStr, 10);
-        let minute = minuteStr ? parseInt(minuteStr.slice(1), 10) : 0;
-
-        if (ampm === 'pm' && hour < 12) {
-            hour += 12;
-        } else if (ampm === 'am' && hour === 12) {
-            hour = 0;
-        }
-
-        date.setHours(hour, minute, 0, 0);
-        if (date < now && !timeFound) {
-            date.setDate(date.getDate() + 1);
-        }
-        timeFound = true;
-        hasSpecificHour = true;
+    const date = new Date(now);
+    const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    text = text.replace(/^on\s+/, '');
+    const day = text.match(/\b(today|tonight|tomorrow|(?:next\s+)?sunday|(?:next\s+)?monday|(?:next\s+)?tuesday|(?:next\s+)?wednesday|(?:next\s+)?thursday|(?:next\s+)?friday|(?:next\s+)?saturday)\b/);
+    if (day) {
+        if (day[1] === 'tomorrow') date.setDate(date.getDate() + 1);
+        const index = days.indexOf(day[1].replace(/^next\s+/, ''));
+        if (index >= 0) date.setDate(date.getDate() + ((index - now.getDay() + 7) % 7 || 7));
+        text = text.replace(day[0], '').trim();
+    }
+    text = text.replace(/^at\s+/, '').trim();
+    if (!text) {
+        if (!day) return null;
+        date.setHours(day[1] === 'tonight' ? 21 : 9, 0, 0, 0);
+        return date;
     }
 
-    const relativeTimeMatch = text.match(/(\d+)\s*(minute|second|hour)s?/);
-    if (relativeTimeMatch) {
-        const timeValue = parseInt(relativeTimeMatch[1]);
-        const unit = relativeTimeMatch[2];
-        let newDate;
-        if (unit === 'minute') {
-            newDate = new Date(now.getTime() + timeValue * 60000);
-        } else if (unit === 'second') {
-            newDate = new Date(now.getTime() + timeValue * 1000);
-        } else if (unit === 'hour') {
-            newDate = new Date(now.getTime() + timeValue * 3600000);
-        }
-        if (newDate) {
-            date = newDate;
-            timeFound = true;
-            hasSpecificHour = true;
-        }
-    }
-    
-    if (!timeFound) return null;
-
-    if (!hasSpecificHour) {
-        date.setHours(9, 0, 0, 0);
-    }
-
+    const clock = text.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
+    if (!clock) return null;
+    let hour = Number(clock[1]);
+    const minute = Number(clock[2] || 0);
+    const ampm = clock[3];
+    if (minute > 59 || (ampm ? hour < 1 || hour > 12 : hour > 23)) return null;
+    if (ampm) hour = hour % 12 + (ampm === 'pm' ? 12 : 0);
+    date.setHours(hour, minute, 0, 0);
+    // A clock without an explicit day means its next occurrence.
+    if (!day && date <= now) date.setDate(date.getDate() + 1);
     return date;
 }
 
@@ -3762,8 +3658,10 @@ async function onSaveReminder() {
     }
     const wasEditing = !!editingReminderId;
     const reminderPayload = { reminder, reminderTime: reminderDate.toISOString(),
-        sound: editingReminderSound || reminderSoundSettingInput.value || 'notify.wav' };
+        sound: editingReminderSound || reminderSoundSettingInput.value || 'notify.wav',
+        recurrence: document.getElementById('reminder-repeat').value || null };
     savingReminder = true; reminderSaveBtn.disabled = true; reminderSaveBtn.textContent = 'Saving...';
+    document.getElementById('reminder-repeat').disabled = true;
     reminderCancelBtn.disabled = true; reminderTextInput.disabled = true; reminderTimeInput.disabled = true; status.hidden = true;
     let result;
     try {
@@ -3772,6 +3670,7 @@ async function onSaveReminder() {
     } catch (_) { result = { success: false, error: 'Could not save this reminder. Your draft is still here; try again.' }; }
     finally {
         savingReminder = false; reminderSaveBtn.textContent = 'Save';
+        document.getElementById('reminder-repeat').disabled = false;
         reminderCancelBtn.disabled = false; reminderTextInput.disabled = false; reminderTimeInput.disabled = false;
         updateSaveButtonState();
     }
@@ -3788,6 +3687,7 @@ async function onSaveReminder() {
 }
 
 async function handleOpenApplication(appName, silent = false) {
+    const generation = assistantRequestGeneration;
     // Handle special Windows commands
     const specialCommands = {
         'settings': 'ms-settings:',
@@ -3820,10 +3720,12 @@ async function handleOpenApplication(appName, silent = false) {
     if (!silent) displayAndSpeak(`Looking for ${appName}...`, onActionFinished, {}, false);
 
     const apps = await ipcRenderer.invoke('find-application', appName);
+    if (generation !== assistantRequestGeneration) return;
 
     if (apps.length === 0) {
         anim.goToState(AnimationState.THINKING);
         const fallbackResult = await ipcRenderer.invoke('open-application-fallback', appName);
+        if (generation !== assistantRequestGeneration) return;
         if (fallbackResult.success) {
             if (!silent) {
                 const responseText = `I couldn't find "${appName}" in your Start Menu, but I'm opening it directly.`;
@@ -3831,18 +3733,18 @@ async function handleOpenApplication(appName, silent = false) {
             } else { isBusy = false; setStateIdle(); }
         } else {
             if (!silent) {
-                const responseText = `I couldn't find "${appName}" and couldn't open it directly.`;
+                const responseText = `I couldn't open "${appName}". Check that it's installed.`;
                 displayAndSpeak(responseText, onActionFinished, {}, true);
             } else { isBusy = false; setStateIdle(); }
         }
     } else if (apps.length === 1) {
-        ipcRenderer.send('open-path', apps[0].path);
+        ipcRenderer.send('open-path', apps[0].path, 'open-application');
         if (!silent) {
             const responseText = `Opening ${apps[0].name}...`;
             displayAndSpeak(responseText, onActionFinished, {}, false);
         } else { isBusy = false; setStateIdle(); }
     } else if (silent) {
-        ipcRenderer.send('open-path', apps[0].path);
+        ipcRenderer.send('open-path', apps[0].path, 'open-application');
         isBusy = false;
         setStateIdle();
     } else {
@@ -3860,7 +3762,7 @@ async function handleOpenApplication(appName, silent = false) {
             btn.textContent = app.name;
             btn.className = 'choice-button fade-in-item';
             btn.onclick = () => {
-                ipcRenderer.send('open-path', app.path);
+                ipcRenderer.send('open-path', app.path, 'open-application');
                 displayAndSpeak(`Opening ${app.name}...`, onActionFinished, {}, false);
             };
             resultsDisplay.appendChild(btn);
@@ -3909,7 +3811,7 @@ async function showReminders() {
 
             const time = document.createElement('span');
             const reminderDate = new Date(reminder.time);
-            time.textContent = reminderDate.toLocaleString([], formatReminderListOptions());
+            time.textContent = reminderDate.toLocaleString([], formatReminderListOptions()) + (reminder.recurrence ? ` · ${reminder.recurrence}` : '');
             time.className = 'reminder-time';
 
             textContainer.appendChild(text);
@@ -3927,7 +3829,7 @@ async function showReminders() {
                     initialText: reminder.text,
                     initialTime: formatDateTimeForInput(reminderDate),
                     // Use the sound property if available, otherwise default to settings
-                    initialSound: reminder.sound || reminderSound || "notify.wav",
+                    initialSound: reminder.sound || reminderSound || "notify.wav", initialRecurrence: reminder.recurrence,
                     id: reminder.id
                 });
             };
@@ -3964,114 +3866,124 @@ function stopTimerPanelInterval() {
     }
 }
 
-function cancelActiveTimer() {
-    if (activeTimerId !== null) {
-        ipcRenderer.invoke('cancel-timer', activeTimerId);
-        activeTimerId = null;
-    }
-    if (timerCountdownInterval) {
-        clearInterval(timerCountdownInterval);
-        timerCountdownInterval = null;
-    }
+async function cancelActiveTimer(id = activeTimerId) {
+    if (id === null) return false;
+    const result = await ipcRenderer.invoke('cancel-timer',id);
+    if (!result.success) { displayAndSpeak(result.error,onActionFinished,{},true);return false; }
+    if(id===activeTimerId) { activeTimerId=null; timerEndTime=null; timerDuration=null; activeTimerLabel=null; clearInterval(timerCountdownInterval);timerCountdownInterval=null; }
+    return true;
+}
+async function cancelNamedTimer(name) {
+    const timers=await ipcRenderer.invoke('get-timers');
+    const matches=name?timers.filter(t=>t.label.toLowerCase()===name.toLowerCase().trim()):timers;
+    if(matches.length!==1) { if(!matches.length)displayAndSpeak("I couldn't find that timer.",onActionFinished);else await showTimersPanel();return; }
+    if(await cancelActiveTimer(matches[0].id))displayAndSpeak('Timer cancelled.',onActionFinished);
+}
+async function showTimersPanel({announce=true} = {}) {
+    const generation=assistantRequestGeneration;
     stopTimerPanelInterval();
-    timerEndTime = null;
-    timerDuration = null;
-    activeTimerLabel = null;
+    const timers=await ipcRenderer.invoke('get-timers');
+    if(generation!==assistantRequestGeneration)return;
+    resultsDisplay.replaceChildren();
+    const title=document.createElement('p');title.className='reminder-list-title';title.textContent=timers.length?'Your timers':"You don't have any timers running.";resultsDisplay.append(title);
+    const list=document.createElement('div');list.id='timer-list';list.className='reminder-list';resultsDisplay.append(list);
+    const labels=[];
+    for(const timer of timers) {
+      const row=document.createElement('div');row.className='reminder-list-item';
+      const body=document.createElement('div');body.className='reminder-text-container';
+      const name=document.createElement('span');name.className='reminder-text';name.textContent=timer.label||'Timer';
+      const time=document.createElement('span');time.className='reminder-time';body.append(name,time);
+      const cancel=document.createElement('button');cancel.className='reminder-action-btn delete';cancel.textContent='Cancel';cancel.setAttribute('aria-label','Cancel '+name.textContent);
+      cancel.onclick=async()=>{cancel.disabled=true;if(await cancelActiveTimer(timer.id))await showTimersPanel();else cancel.disabled=false;};
+      row.append(body,cancel);list.append(row);labels.push({time,endTime:timer.endTime});
+    }
+    const update=()=>{for(const {time,endTime} of labels){const seconds=Math.max(0,Math.ceil((endTime-Date.now())/1000));time.textContent=`${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')} remaining`; } if(!list.isConnected)stopTimerPanelInterval();};
+    update();if(timers.length)timerPanelInterval=setInterval(update,500);
+    if(announce) { anim.goToState(AnimationState.SPEAKING_BEGIN);speak(timers.length?`You have ${timers.length} timer${timers.length===1?'':'s'} running.`:"You don't have any timers running.",onActionFinished); }
 }
 
-function showTimersPanel() {
-    stopTimerPanelInterval();
-    resultsDisplay.innerHTML = '';
-
-    const finishPanelSpeech = () => {
-        isBusy = false;
-        searchBar.disabled = false;
-        searchBar.placeholder = 'Type here to search';
-        anim.goToState(AnimationState.SPEAKING_END, { nextState: AnimationState.TRANSITION_TO_IDLE });
-    };
-
-    if (activeTimerId === null) {
-        const emptyP = document.createElement('p');
-        emptyP.className = 'fade-in-item';
-        emptyP.textContent = "You don't have any timers running.";
-        resultsDisplay.appendChild(emptyP);
-        anim.goToState(AnimationState.SPEAKING_BEGIN);
-        speak("You don't have any timers running.", finishPanelSpeech);
-        return;
+// Local productivity commands share the same deterministic routing for typing and speech.
+async function handleListCommand(query) {
+    const generation=assistantRequestGeneration;
+    const command=CortanaLists.parse(query);if(!command)return;
+    const previous=structuredClone(notebookData);
+    const result=CortanaLists.apply(notebookData,command,()=>crypto.randomUUID());
+    if(result.changed && !await persistNotebook()) { notebookData=previous;renderTodos();displayAndSpeak("I couldn't save that list change. Please try again.",onActionFinished,{},true);return; }
+    if(generation!==assistantRequestGeneration)return;
+    if(result.listId)selectedListId=result.listId;
+    renderTodos();
+    displayAndSpeak(result.message,onActionFinished,{},!result.success);
+    if(result.listId) {
+      const button=document.createElement('button');button.className='settings-button';button.textContent='Open list';button.onclick=()=>openNotebook('todos');resultsDisplay.append(button);
     }
-
-    const title = document.createElement('p');
-    title.className = 'fade-in-item reminder-list-title';
-    title.textContent = 'Here are your timers.';
-    resultsDisplay.appendChild(title);
-
-    const list = document.createElement('div');
-    list.className = 'reminder-list';
-
-    const item = document.createElement('div');
-    item.className = 'reminder-list-item fade-in-item';
-
-    const textContainer = document.createElement('div');
-    textContainer.className = 'reminder-text-container';
-
-    const text = document.createElement('span');
-    text.className = 'reminder-text';
-    text.textContent = activeTimerLabel || 'Timer';
-
-    const time = document.createElement('span');
-    time.className = 'reminder-time';
-
-    textContainer.appendChild(text);
-    textContainer.appendChild(time);
-
-    const actions = document.createElement('div');
-    actions.className = 'reminder-item-actions';
-
-    const cancelBtn = document.createElement('button');
-    cancelBtn.textContent = 'Cancel';
-    cancelBtn.className = 'reminder-action-btn delete';
-    cancelBtn.onclick = () => {
-        cancelActiveTimer();
-        stopTimerPanelInterval();
-        item.style.animation = 'fadeOut 0.3s forwards';
-        setTimeout(() => showTimersPanel(), 300);
-    };
-
-    actions.appendChild(cancelBtn);
-    item.appendChild(textContainer);
-    item.appendChild(actions);
-    list.appendChild(item);
-    resultsDisplay.appendChild(list);
-
-    const updateRemaining = (info) => {
-        if (!info || !info.active) return;
-        const mins = Math.floor(info.remaining / 60000);
-        const secs = Math.floor((info.remaining % 60000) / 1000);
-        time.textContent = `${mins}:${secs.toString().padStart(2, '0')} remaining`;
-    };
-
-    ipcRenderer.invoke('get-timer-remaining', activeTimerId)
-        .then(updateRemaining)
-        .catch(() => {});
-    timerPanelInterval = setInterval(() => {
-        if (document.hidden || !windowVisible || !time.isConnected) return;
-        if (activeTimerId === null) {
-            stopTimerPanelInterval();
-            return;
+}
+function parseRecurringRequest(text) {
+    const match=text.trim().match(/^(.+?) (?:every (day|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|daily|on weekdays) at (.+)$/i);
+    if(!match)return null;
+    const frequency=(match[2]||(/on weekdays/i.test(match[0])?'weekday':'day')).toLowerCase();
+    let date=parseDateTime((['day','weekday'].includes(frequency)?'':frequency+' at ')+match[3]);
+    if(!date)return null;
+    if(frequency==='weekday')while([0,6].includes(date.getDay()))date.setDate(date.getDate()+1);
+    return {reminderText:match[1],timeText:formatDateTimeForInput(date),recurrence:frequency==='day'?'daily':frequency==='weekday'?'weekdays':'weekly'};
+}
+async function showMyDay() {
+    openNotebook('day');
+    isBusy = false;
+    return renderMyDay({ announce: true });
+}
+let myDayGeneration = 0;
+async function renderMyDay({ announce = false } = {}) {
+    const generation = ++myDayGeneration;
+    const request = assistantRequestGeneration;
+    const current = () => generation === myDayGeneration && request === assistantRequestGeneration &&
+        notebookPage === 'day' && document.getElementById('notebook-sidebar').classList.contains('visible');
+    const content = document.getElementById('notebook-day-content');
+    const status = document.getElementById('notebook-day-status');
+    const name = notebookData.profile?.name.trim();
+    document.getElementById('notebook-day-greeting').textContent = name ? `Here's your day, ${name}` : "Here's your day";
+    document.getElementById('notebook-day-date').textContent = new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
+    content.replaceChildren();
+    status.textContent = 'Getting your day ready...';
+    try {
+        const [reminders, timers] = await Promise.all([ipcRenderer.invoke('get-reminders'), ipcRenderer.invoke('get-timers')]);
+        if (!current()) return;
+        const end = new Date(); end.setHours(23, 59, 59, 999);
+        const due = reminders.filter(r => Date.parse(r.time) <= end.getTime()).sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
+        const pending = CortanaLists.all(notebookData).flatMap(list => list.items.filter(item => !item.done).map(item => ({ list: list.name, text: item.text })));
+        status.textContent = '';
+        for (const [title, items, empty] of [
+            ['Today’s reminders', due.map(r => ({ text: r.text, detail: new Date(r.time).toLocaleTimeString([], formatTimeOptions()) })), 'No reminders today.'],
+            ['Things to do', pending.map(item => ({ text: item.text, detail: item.list })), 'All clear.'],
+            ['Timers', timers.map(t => ({ text: t.label || 'Timer', detail: `${Math.ceil(t.remaining / 60000)} min remaining` })), 'No timers running.']
+        ]) {
+            const section = document.createElement('section'); section.className = 'notebook-summary-section';
+            const heading = document.createElement('h2'); heading.textContent = title; section.append(heading);
+            for (const item of items) {
+                const row = document.createElement('div'); row.className = 'notebook-summary-row';
+                const text = document.createElement('span'); text.textContent = item.text;
+                const detail = document.createElement('span'); detail.className = 'notebook-secondary'; detail.textContent = item.detail;
+                row.append(text, detail); section.append(row);
+            }
+            if (!items.length) { const text = document.createElement('p'); text.className = 'notebook-secondary'; text.textContent = empty; section.append(text); }
+            content.append(section);
         }
-        ipcRenderer.invoke('get-timer-remaining', activeTimerId)
-            .then(info => {
-                if (!info.active) { stopTimerPanelInterval(); return; }
-                updateRemaining(info);
-            })
-            .catch(() => stopTimerPanelInterval());
-    }, 500);
-
-    anim.goToState(AnimationState.SPEAKING_BEGIN);
-    speak(`You have a timer running: ${activeTimerLabel || 'timer'}.`, finishPanelSpeech);
+        if (announce) speak(`${name ? name + "'s day" : 'Your day'}: ${due.length} reminder${due.length === 1 ? '' : 's'} today, ${pending.length} item${pending.length === 1 ? '' : 's'} to do, and ${timers.length} running timer${timers.length === 1 ? '' : 's'}.`);
+    } catch (_) {
+        if (current()) status.textContent = "I couldn't load your day. Open My day again to try once more.";
+    }
+}
+async function rememberName(name) {
+    const previous=notebookData.profile.name;
+    notebookData.profile.name=name.trim();
+    if(await persistNotebook()){document.getElementById('notebook-name').value=notebookData.profile.name;displayAndSpeak(`I'll call you ${notebookData.profile.name}. Try “my day” for your personal summary.`,onActionFinished);}
+    else {notebookData.profile.name=previous;displayAndSpeak("I couldn't save your name. Please try again.",onActionFinished,{},true);}
 }
 
 const priorityCommands = [
+    {regex:/^(?:create|make)(?: a| my)? .+ list[.!?]*$|^add .+ to (?:my |the )?.+ list[.!?]*$|^(?:show|read|open)(?: me)? (?:my |the )?.+ list[.!?]*$|^(?:mark|check off) .+ (?:on|in|from) (?:my |the )?.+ list[.!?]*$|^remove .+ from (?:my |the )?.+ list[.!?]*$/i,handler:(match,original)=>handleListCommand(original||match[0])},
+    {regex:/^(?:my day|show my day|what(?:'s| is) on my (?:day|agenda)|daily (?:summary|briefing))[.!?]*$/i,handler:showMyDay},
+    {regex:/^(?:what(?:'s| is) my name|who am i)[?!.]*$/i,handler:()=>displayAndSpeak(notebookData.profile?.name.trim()?`You're ${notebookData.profile.name.trim()}.`:"You haven't told me your name yet. Say “call me” followed by your name.",onActionFinished)},
+    {regex:/^call me (.{1,80})$/i,handler:(match,original)=>rememberName((original||match[0]).replace(/^call me /i,''))},
     { regex: /^(?:open|show)(?: my)? (desktop|documents|downloads|pictures|music|videos|home)(?: folder)?$/i,
       handler: async match => {
         const result = await ipcRenderer.invoke('open-local-folder', match[1].toLowerCase());
@@ -4105,8 +4017,9 @@ const priorityCommands = [
                 /^(?:remind me(?: to)?|create a reminder(?: for)?)\s+/i,
                 ''
             );
-            const { reminderText, timeText } = parseReminderRequest(stripped);
-            showReminderUI({ initialText: reminderText, initialTime: timeText });
+            const recurring = parseRecurringRequest(stripped);
+            const { reminderText, timeText } = recurring || parseReminderRequest(stripped);
+            showReminderUI({ initialText: reminderText, initialTime: timeText, initialRecurrence: recurring?.recurrence });
         }
     },
     {
@@ -4145,7 +4058,21 @@ const priorityCommands = [
     },
 ];
 
+async function controlMedia(action, confirmation, level) {
+    const generation = assistantRequestGeneration;
+    try {
+        const result = await ipcRenderer.invoke('media-control', level===undefined?action:{action,level});
+        if (generation !== assistantRequestGeneration) return;
+        displayAndSpeak(result.success ? confirmation : (result.error || "I couldn't control your media or volume. Try again."), onActionFinished, {}, !result.success);
+    } catch (_) {
+        if (generation !== assistantRequestGeneration) return;
+        displayAndSpeak("I couldn't control your media or volume. Try again.", onActionFinished, {}, true);
+    }
+}
+
 const commands = [
+    {regex:/^(?:set|turn)(?: the)? volume (?:to )?(\d{1,3})(?: ?%| percent)?[.!]*$/i,handler:match=>controlMedia('setvolume',`Volume set to ${match[1]} percent.`,Number(match[1]))},
+    {regex:/^(?:what(?:'s| is)(?: the| my)? volume|volume status)[?!.]*$/i,handler:async()=>{const generation=assistantRequestGeneration;const state=await ipcRenderer.invoke('media-state');if(generation!==assistantRequestGeneration)return;displayAndSpeak(state.success?`Volume is ${Math.round(state.volume)} percent${state.muted?', muted':''}.`:state.error,onActionFinished,{},!state.success);}},
     ...priorityCommands,
     {
         regex: /(?:what's|what is) (?:the date|today's date)|what day is it|what's today/i,
@@ -4188,9 +4115,9 @@ const commands = [
         }
     },
     {
-        regex: /what can you do|what are your skills|help|what can i ask you\??/i,
+        regex: /^(?:what can you do|what are your skills|help|what can i ask you)[!.?]*$/i,
         handler: () => {
-            const response = "I can help with your day. I can tell you the time, date, and weather; do math and unit conversions; set reminders, timers, and alarms; control volume; open apps; prepare calendar events; look things up; tell jokes; and search the web.";
+            const response = "Try “my day”, “create a shopping list”, “add milk to my shopping list”, “remind me to stretch every day at 3 pm”, or “set a timer for 5 minutes named tea”. I can tell you the time, date, and weather; do math and unit conversions; set reminders, timers, and alarms; control volume; open apps; prepare calendar events; look things up; tell jokes; and search the web.";
             displayAndSpeak(response, onActionFinished, {}, false);
         }
     },
@@ -4210,7 +4137,7 @@ const commands = [
     },
     {
         regex: new RegExp(
-            `^(?:set|start) a timer (?:for )?(?:about )?(\\d+|(?:${Object.keys(temporalNumberWords).join('|')})(?:[\\s-](?:${Object.keys(temporalNumberWords).join('|')}))*)\\s*(minute|min|second|sec|hour|hr)s?\\s*$`,
+            `^(?:set|start) a timer (?:for )?(?:about )?(\\d+|(?:${Object.keys(temporalNumberWords).join('|')})(?:[\\s-](?:${Object.keys(temporalNumberWords).join('|')}))*)\\s*(minute|min|second|sec|hour|hr)s?(?: (?:named|called) (.{1,128}))?\\s*$`,
             'i'
         ),
         handler: (match) => {
@@ -4223,19 +4150,12 @@ const commands = [
             else if (unit.startsWith('sec')) ms = value * 1000;
             else if (unit.startsWith('hour') || unit.startsWith('hr')) ms = value * 3600000;
             else { displayAndSpeak("Sorry, I didn't understand that time unit.", onActionFinished, {}, true); return; }
-            startTimer(value, unit, ms);
+            startTimer(value, unit, ms, match[3] || '');
         }
     },
     {
-        regex: /^(?:cancel|stop|delete)(?: the)? timer$/i,
-        handler: () => {
-            if (activeTimerId !== null) {
-                cancelActiveTimer();
-                displayAndSpeak("Timer cancelled.", onActionFinished, {}, false);
-            } else {
-                displayAndSpeak("There's no timer running.", onActionFinished, {}, false);
-            }
-        }
+        regex: /^(?:cancel|stop|delete)(?: the| my)? (?:(.+?) )?timer$/i,
+        handler: match => cancelNamedTimer(match[1] || ''),
     },
     {
         regex: /^\s*(?:(?:what|which)\s+timers?\s+do\s+i\s+have|what\s+(?:are|is)\s+my\s+timers?|what'?s\s+my\s+timers?|my\s+timers?|show\s+(?:my\s+)?timers?|list\s+(?:my\s+)?timers?|(?:active|current)\s+timers?|check\s+(?:my\s+)?timers?|how\s+long\s+is\s+left(?:\s+on\s+(?:the\s+|my\s+)?timers?)?|how\s+much\s+time\s+(?:is\s+)?left|timers?\s+status)\s*[!.?]*\s*$/i,
@@ -4294,51 +4214,44 @@ const commands = [
     },
     {
         regex: /^(mute|unmute)( volume| sound| system)?(!|\.)?$/i,
-        handler: () => {
-            ipcRenderer.invoke('media-control', 'mute');
-            displayAndSpeak("OK.", onActionFinished, {}, false);
+        handler: match => {
+            return controlMedia(match[1].toLowerCase(),match[1].toLowerCase()==='mute'?'Sound muted.':'Sound unmuted.');
         }
     },
     {
         regex: /^(volume|turn(?: the)? volume) (up|increase|raise|louder)( please)?(!|\.)?$/i,
         handler: () => {
-            ipcRenderer.invoke('media-control', 'volup');
-            displayAndSpeak("Got it.", onActionFinished, {}, false);
+            return controlMedia('volup', 'Got it.');
         }
     },
     {
         regex: /^(volume|turn(?: the)? volume) (down|decrease|lower|quieter)( please)?(!|\.)?$/i,
         handler: () => {
-            ipcRenderer.invoke('media-control', 'voldown');
-            displayAndSpeak("Sure thing.", onActionFinished, {}, false);
+            return controlMedia('voldown', 'Sure thing.');
         }
     },
     {
-        regex: /^(?:play|pause|unpause|resume)(?: music| media| audio| song| track)?$/i,
-        handler: () => {
-            ipcRenderer.invoke('media-control', 'playpause');
-            displayAndSpeak("There you go.", onActionFinished, {}, false);
+        regex: /^(play|pause|unpause|resume)(?: music| media| audio| song| track)?$/i,
+        handler: match => {
+            const action=match[1].toLowerCase()==='pause'?'pause':'play';return controlMedia(action,action==='pause'?'Paused.':'Playing.');
         }
     },
     {
         regex: /^(?:next|skip)(?: track| song| music)?$/i,
         handler: () => {
-            ipcRenderer.invoke('media-control', 'next');
-            displayAndSpeak("Skipping ahead.", onActionFinished, {}, false);
+            return controlMedia('next', 'Skipping ahead.');
         }
     },
     {
         regex: /^(?:previous|prev)(?: track| song| music)?$/i,
         handler: () => {
-            ipcRenderer.invoke('media-control', 'prev');
-            displayAndSpeak("Going back.", onActionFinished, {}, false);
+            return controlMedia('prev', 'Going back.');
         }
     },
     {
         regex: /^stop(?: media| music| audio| track| song)?$/i,
         handler: () => {
-            ipcRenderer.invoke('media-control', 'stop');
-            displayAndSpeak("Stopped.", onActionFinished, {}, false);
+            return controlMedia('stop', 'Stopped.');
         }
     },
     {
@@ -4382,7 +4295,7 @@ const commands = [
         }
     },
     {
-        regex: /^(\d+(?:\.\d+)?)\s*(celsius|c|fahrenheit|f|kelvin|k)\s+(?:to|in)\s+(celsius|c|fahrenheit|f|kelvin|k)\s*$/i,
+        regex: /^(?:convert )?([+-]?\d+(?:\.\d+)?)\s*(celsius|c|fahrenheit|f|kelvin|k)\s+(?:to|in)\s+(celsius|c|fahrenheit|f|kelvin|k)\s*$/i,
         handler: (match) => {
             const value = parseFloat(match[1]);
             const from = match[2].toLowerCase();
@@ -4398,9 +4311,9 @@ const commands = [
             else if (f === 'f' && t === 'k') { result = (value - 32) * 5/9 + 273.15; }
             else if (f === 'k' && t === 'f') { result = (value - 273.15) * 9/5 + 32; }
             else { displayAndSpeak("Sorry, I can't convert between those units.", onActionFinished, {}, true); return; }
-            const fromLabel = from[0].toUpperCase();
-            const toLabel = to[0].toUpperCase();
-            displayAndSpeak(`${value}${String.fromCharCode(176)}${fromLabel} is ${result.toFixed(1)}${String.fromCharCode(176)}${toLabel}.`, onActionFinished, { showWebLink: true }, false);
+            const fromLabel = f === 'k' ? 'K' : `°${f.toUpperCase()}`;
+            const toLabel = t === 'k' ? 'K' : `°${t.toUpperCase()}`;
+            displayAndSpeak(`${value}${fromLabel} is ${result.toFixed(1)}${toLabel}.`, onActionFinished, { showWebLink: true }, false);
         }
     },
     {
@@ -4414,38 +4327,46 @@ const commands = [
                 displayAndSpeak("Sorry, I can't convert between those units.", onActionFinished, {}, true);
                 return;
             }
-            displayAndSpeak(`${value} ${from} is ${result.toFixed(2)} ${formatUnitLabel(result, to)}.`, onActionFinished, { showWebLink: true }, false);
+            displayAndSpeak(`${value} ${formatUnitLabel(value, from)} is ${result.toFixed(2)} ${formatUnitLabel(result, to)}.`, onActionFinished, { showWebLink: true }, false);
         }
     },
     {
         regex: /^(?:schedule|create|add|make) (?:an? |a )?(?:event|appointment|calendar event|meeting|reminder|call)(?: for| about|:)?\s+(.+)/i,
         handler: (match) => {
+            const generation = assistantRequestGeneration;
             const full = match[1].trim();
+            const reminderRequest = parseReminderRequest(full);
             const timeMatch = full.match(/(.+?)\s+(?:for|at|on)\s+(.+)/i);
-            let title, timeText;
-            if (timeMatch) {
+            let title, timeText, parsedDate;
+            if (reminderRequest.timeText && reminderRequest.reminderText) {
+                title = reminderRequest.reminderText.replace(/\s+(?:for|at|on)$/i, '');
+                parsedDate = new Date(reminderRequest.timeText);
+            } else if (timeMatch) {
                 title = timeMatch[1].trim();
                 timeText = timeMatch[2].trim();
             } else {
                 title = full;
                 timeText = null;
             }
-            if (!timeText) {
+            if (!parsedDate && !timeText) {
                 displayAndSpeak("What time should I schedule that for?", onActionFinished, {}, false);
                 return;
             }
-            const parsedDate = parseDateTime(timeText);
+            parsedDate = parsedDate || parseDateTime(timeText);
             if (!parsedDate) {
                 displayAndSpeak(`Sorry, I couldn't understand "${timeText}". Try "schedule meeting for tomorrow at 3 pm".`, onActionFinished, {}, true);
                 return;
             }
             ipcRenderer.invoke('create-calendar-event', { title, dateTime: parsedDate.toISOString() }).then(result => {
+                if (generation !== assistantRequestGeneration) return;
                 if (result.success) {
                     const friendlyTime = parsedDate.toLocaleString([], formatDateTimeOptions());
                     displayAndSpeak(`I've opened "${title}" for ${friendlyTime} in your calendar app. Save it there to add it to your calendar.`, onActionFinished, {}, false);
                 } else {
                     displayAndSpeak(result.error || "I couldn't prepare that calendar event. Try again.", onActionFinished, {}, true);
                 }
+            }).catch(() => {
+                if (generation === assistantRequestGeneration) displayAndSpeak("I couldn't prepare that calendar event. Try again.", onActionFinished, {}, true);
             });
         }
     },
@@ -4458,6 +4379,7 @@ const commands = [
     {
         regex: /^(?:what is |tell me about |who (?:is|was) |define )(.+)$|^what does (.+) mean\??$/i,
         handler: (match) => {
+            const generation = assistantRequestGeneration;
             const topic = (match[1] || match[2] || '').trim().replace(/[?!.]+$/, '');
             if (!navigator.onLine) {
                 displayAndSpeak('Wikipedia needs an internet connection. You can still use local commands and your Notebook.', onActionFinished);
@@ -4470,6 +4392,7 @@ const commands = [
             p.textContent = `Looking up "${topic}"...`;
             resultsDisplay.appendChild(p);
             ipcRenderer.invoke('wikipedia-lookup', topic).then(result => {
+                if (generation !== assistantRequestGeneration) return;
                 if (result.success) {
                     resultsDisplay.innerHTML = '';
                     const header = document.createElement('p');
@@ -4494,6 +4417,7 @@ const commands = [
                     displayAndSpeak(result.error || "Sorry, something went wrong. Try again in a little bit.", onActionFinished, {}, true);
                 }
             }).catch(() => {
+                if (generation !== assistantRequestGeneration) return;
                 performWebSearch(topic);
             });
         }
@@ -4577,7 +4501,7 @@ function wouldCommandMatch(text) {
     return false;
 }
 
-async function startTimer(value, unit, ms) {
+async function startTimer(value, unit, ms, name = '') {
     if (!Number.isFinite(ms) || !Number.isSafeInteger(ms) || ms <= 0) {
       displayAndSpeak(
         'Please choose a valid timer duration.',
@@ -4587,19 +4511,18 @@ async function startTimer(value, unit, ms) {
       );
       return;
     }
-
-    // Cancel any existing timer
-    if (activeTimerId !== null) {
-      await ipcRenderer.invoke('cancel-timer', activeTimerId);
-      activeTimerId = null;
+    if (ms > 30 * 24 * 60 * 60 * 1000) {
+      displayAndSpeak('Timers can be set for up to 30 days.', onActionFinished, {}, true);
+      return;
     }
+
     if (timerCountdownInterval) {
       clearInterval(timerCountdownInterval);
       timerCountdownInterval = null;
     }
     stopTimerPanelInterval();
 
-    const label = `Your ${value} ${unit}${value !== 1 ? 's' : ''} timer is up!`;
+    const label = name.trim();
     
     anim.goToState(AnimationState.THINKING);
     const result = await ipcRenderer.invoke('start-timer', { ms, label });
@@ -4617,10 +4540,10 @@ async function startTimer(value, unit, ms) {
     activeTimerId = result.id;
     timerEndTime = result.endTime;
     timerDuration = ms;
-    activeTimerLabel = `${value} ${unit}${value !== 1 ? 's' : ''}`;
+    activeTimerLabel = name || `${value} ${unit}${value !== 1 ? 's' : ''}`;
 
     anim.goToState(AnimationState.SPEAKING_BEGIN);
-    speak(`Timer set for ${value} ${unit}${value !== 1 ? 's' : ''}.`, () => {
+    speak(`${name ? name + ': ' : ''}Timer set for ${value} ${unit}${value !== 1 ? 's' : ''}.`, () => {
       if (!timerEndTime) return;
       onActionFinished();
     });
@@ -4712,6 +4635,8 @@ function convertUnit(value, from, to) {
 }
 
 function formatUnitLabel(rawResult, unit) {
+    // Abbreviations do not take a plural suffix: "ms" means milliseconds.
+    if (['mm', 'cm', 'm', 'km', 'mg', 'g', 'kg', 'oz', 'lb', 'ml', 'l', 'gal'].includes(unit)) return unit;
     const displayed = Number(Number(rawResult).toFixed(2));
     if (Math.abs(displayed) === 1) return unit;
 
@@ -4745,14 +4670,14 @@ function processQuery(query) {
         return;
     }
 
-    const matchedSkill = matchAssistantSkill(lowerCaseQuery);
+    const matchedSkill = matchAssistantSkill(query);
     if (matchedSkill) {
         executeAssistantSkill(matchedSkill);
         return;
     }
 
     for (const command of commands) {
-        const match = lowerCaseQuery.match(command.regex);
+        const match = query.match(command.regex);
         if (match) {
             command.handler(match, query);
             return;
@@ -5055,27 +4980,11 @@ function playReminderSound(soundFile) {
     if (path.isAbsolute(soundFile)) {
         // If it's an absolute path, convert it to a file URL for the Audio constructor
         fullFilePath = soundFile;
-        soundPath = 'file://' + soundFile.replace(/\\/g, '/');
+        soundPath = window.cortana.fileUrl(soundFile);
     } else {
         // If it's just a filename, construct the path relative to appRoot (for backward compatibility)
         fullFilePath = path.join(appRoot, soundFile);
-        soundPath = 'file://' + fullFilePath.replace(/\\/g, '/');
-    }
-    
-    const fs = require('fs');
-    if (!fs.existsSync(fullFilePath)) {
-        console.warn(`Reminder sound file not found: ${fullFilePath}, using fallback`);
-        // Use fallback immediately if file doesn't exist
-        if (soundFile !== "notify.wav") {
-            const fallbackPath = path.join(appRoot, "notify.wav");
-            if (fs.existsSync(fallbackPath)) {
-                const fallbackAudio = new Audio('file://' + fallbackPath.replace(/\\/g, '/'));
-                fallbackAudio.play().catch(fallbackError => {
-                    console.error('Failed to play fallback reminder sound:', fallbackError);
-                });
-            }
-        }
-        return;
+        soundPath = window.cortana.fileUrl(fullFilePath);
     }
     
     const audio = new Audio(soundPath);
@@ -5084,7 +4993,7 @@ function playReminderSound(soundFile) {
         console.error(`Failed to play reminder sound ${soundFile}:`, error);
         // Fallback: try with the default notify.wav if a custom sound fails
         if (soundFile !== "notify.wav") {
-            const fallbackPath = 'file://' + path.join(appRoot, "notify.wav").replace(/\\/g, '/');
+            const fallbackPath = window.cortana.fileUrl(path.join(appRoot, 'notify.wav'));
             const fallbackAudio = new Audio(fallbackPath);
             fallbackAudio.play().catch(fallbackError => {
                 console.error('Failed to play fallback reminder sound:', fallbackError);
@@ -5127,7 +5036,8 @@ function validateAndApplyActionFormState() {
 let notebookSaveGeneration = 0;
 let notebookPreviousFocus = null;
 let notebookPage = 'overview';
-const notebookTitles = { overview: 'Notebook', about: 'About me', reminders: 'Reminders', todos: 'Tasks', notes: 'Notes' };
+let selectedListId = 'tasks';
+const notebookTitles = { overview: 'Notebook', day: 'My day', about: 'About me', reminders: 'Reminders', todos: 'Lists & tasks', notes: 'Notes' };
 function setNavigationPage(page) {
     for (const [id, name] of [['navigation-home','home'], ['notebook-btn','notebook'], ['settings-btn','settings']]) {
         const button = document.getElementById(id);
@@ -5201,7 +5111,7 @@ function selectNotebookPage(page = 'overview', focus = true, animate = true) {
     document.getElementById('notebook-title').textContent = notebookTitles[page];
     document.getElementById('notebook-back').setAttribute('aria-label', page === 'overview' ? 'Back to Cortana' : 'Back to Notebook');
     document.getElementById('notebook-intro').hidden = page !== 'overview';
-    document.getElementById('notebook-save-status').hidden = page === 'overview' || page === 'reminders';
+    document.getElementById('notebook-save-status').hidden = ['overview', 'reminders', 'day'].includes(page);
     refreshVisualActivity();
     document.querySelector('.notebook-content').scrollTop = 0;
     if (animate && changed) enterPaneContent(document.getElementById('notebook-sidebar'));
@@ -5227,18 +5137,24 @@ async function persistNotebook() {
 function renderTodos() {
     const list = document.getElementById('todo-list');
     list.replaceChildren();
-    if (!notebookData.todos.length) {
+    if (!(CortanaLists.all(notebookData).find(list=>list.id===selectedListId)?.items || notebookData.todos).length) {
         const empty = document.createElement('p');
         empty.textContent = 'All clear. Add something you want to do.';
         list.appendChild(empty);
     }
-    for (const item of notebookData.todos) {
+    const current = CortanaLists.all(notebookData).find(list=>list.id===selectedListId) || CortanaLists.all(notebookData)[0];
+    selectedListId=current.id;
+    document.getElementById('list-heading').textContent=current.name;
+    document.getElementById('delete-list').hidden=current.id==='tasks';
+    const select=document.getElementById('notebook-list-select');select.replaceChildren();
+    for(const entry of CortanaLists.all(notebookData)) {const option=document.createElement('option');option.value=entry.id;option.textContent=entry.name;select.append(option);}select.value=current.id;
+    for (const item of current.items) {
         const row = document.createElement('div'); row.className = 'todo-item';
         const check = document.createElement('input'); check.type = 'checkbox'; check.checked = item.done; check.id = `todo-${item.id}`;
         const label = document.createElement('label'); label.htmlFor = check.id; label.textContent = item.text;
         check.onchange = () => { item.done = check.checked; persistNotebook(); };
-        const remove = document.createElement('button'); remove.className = 'notebook-delete'; remove.textContent = 'Delete'; remove.setAttribute('aria-label', `Delete ${item.text}`);
-        remove.onclick = () => { notebookData.todos = notebookData.todos.filter(todo => todo.id !== item.id); renderTodos(); persistNotebook(); };
+        const remove = document.createElement('button'); remove.className = 'notebook-delete notebook-icon-button'; remove.textContent = '\uE74D'; remove.title = `Delete ${item.text}`; remove.setAttribute('aria-label', `Delete ${item.text}`);
+        remove.onclick = () => { if(current.id==='tasks')notebookData.todos=notebookData.todos.filter(todo=>todo.id!==item.id);else current.items=current.items.filter(todo=>todo.id!==item.id); renderTodos(); persistNotebook(); };
         row.append(check, label, remove); list.appendChild(row);
     }
 }
@@ -5252,7 +5168,7 @@ async function renderNotebookReminders() {
             const row = document.createElement('div'); row.className = 'notebook-reminder';
             const text = document.createElement('span'); text.textContent = `${reminder.text} — ${new Date(reminder.time).toLocaleString([], formatDateTimeOptions())}`;
             const edit = document.createElement('button'); edit.className = 'notebook-delete'; edit.textContent = 'Edit';
-            edit.onclick = () => { closeNotebook(); showReminderUI({ id: reminder.id, initialText: reminder.text, initialTime: formatDateTimeForInput(new Date(reminder.time)), initialSound: reminder.sound }); };
+            edit.onclick = () => { closeNotebook(); showReminderUI({ id: reminder.id, initialText: reminder.text, initialTime: formatDateTimeForInput(new Date(reminder.time)), initialSound: reminder.sound, initialRecurrence: reminder.recurrence }); };
             const remove = document.createElement('button'); remove.className = 'notebook-delete'; remove.textContent = 'Delete';
             remove.setAttribute('aria-label', 'Delete ' + reminder.text);
             remove.onclick = async () => {
@@ -5282,6 +5198,7 @@ function openNotebook(page = 'overview') {
     refreshVisualActivity();
     renderTodos(); renderNotebookReminders();
     document.getElementById('notebook-back').focus({ preventScroll: true });
+    clearTimeout(blurCleanupTimer);
 }
 function closeNotebook({ immediate = false, switching = false } = {}) {
     const sidebar = document.getElementById('notebook-sidebar');
@@ -5296,6 +5213,7 @@ function closeNotebook({ immediate = false, switching = false } = {}) {
         ipcRenderer.send('set-settings-visibility', false);
         searchBar.disabled = false;
         searchBar.placeholder = 'Type here to search';
+        if (notebookPage === 'day') setStateIdle();
         (notebookPreviousFocus && notebookPreviousFocus.isConnected && notebookPreviousFocus !== document.body && !notebookPreviousFocus.closest('[inert]') ? notebookPreviousFocus : document.getElementById('notebook-btn')).focus({ preventScroll: true });
     }
     refreshVisualActivity();
@@ -5307,6 +5225,7 @@ async function setupNotebookAndSystemControls() {
     notebookAnim.renderer.active = false;
     notebookAnim.setThemeColor(themeColor);
     await notebookAnim.goToState(AnimationState.IDLE);
+    document.getElementById('notebook-my-day').onclick = () => showMyDay();
     document.getElementById('notebook-btn').onclick = () => openNotebook();
     document.getElementById('navigation-toggle').onclick = () => {
         const expanded = document.getElementById('cortana-navigation').classList.toggle('expanded');
@@ -5322,10 +5241,14 @@ async function setupNotebookAndSystemControls() {
         const input = document.getElementById('todo-text');
         const text = input.value.trim();
         if (!text) return;
-        if (notebookData.todos.length >= 200) { document.getElementById('notebook-save-status').textContent = 'You can keep up to 200 tasks. Remove a task before adding another.'; return; }
-        notebookData.todos.push({ id: require('crypto').randomUUID(), text, done: false });
+        const current=CortanaLists.all(notebookData).find(list=>list.id===selectedListId);
+        if (current.items.length >= 200) { document.getElementById('notebook-save-status').textContent = 'You can keep up to 200 tasks. Remove a task before adding another.'; return; }
+        current.items.push({ id: crypto.randomUUID(), text, done: false });
         input.value = ''; renderTodos(); persistNotebook(); input.focus();
     };
+    document.getElementById('notebook-list-select').onchange=event=>{selectedListId=event.target.value;renderTodos();};
+    document.getElementById('list-form').onsubmit=async event=>{event.preventDefault();const input=document.getElementById('list-name');const result=CortanaLists.apply(notebookData,{action:'create',name:input.value},()=>crypto.randomUUID());if(result.success){selectedListId=result.listId;input.value='';renderTodos();await persistNotebook();}else document.getElementById('notebook-save-status').textContent=result.message;};
+    document.getElementById('delete-list').onclick=()=>{const list=notebookData.lists?.find(list=>list.id===selectedListId);if(!list||!confirm(`Delete your ${list.name} list and its ${list.items.length} items?`))return;notebookData.lists=notebookData.lists.filter(item=>item!==list);selectedListId='tasks';renderTodos();persistNotebook();};
     const notes = document.getElementById('notebook-notes-text'); notes.value = notebookData.notes;
     notes.oninput = () => { notebookData.notes = notes.value; persistNotebook(); };
     for (const tab of document.querySelectorAll('[data-page]')) tab.onclick = () => selectNotebookPage(tab.dataset.page);
@@ -5359,7 +5282,11 @@ async function setupNotebookAndSystemControls() {
         if (['Enter', ' '].includes(event.key) && event.target.matches('[role="button"]')) { event.preventDefault(); event.target.click(); }
     });
     for (const [id, key] of [['close-to-tray-toggle', 'closeToTray'], ['hotkey-listen-toggle', 'hotkeyStartsListening']]) {
-        document.getElementById(id).onchange = event => { saveSetting(key, event.target.checked); };
+        document.getElementById(id).onchange = async event => {
+            const enabled = event.target.checked;
+            const result = await saveSetting(key, enabled);
+            if (result.success && key === 'closeToTray') updateCloseButton(enabled);
+        };
     }
     document.getElementById('save-assistant-hotkey').onclick = async () => {
         const button = document.getElementById('save-assistant-hotkey');
@@ -5375,7 +5302,7 @@ async function setupNotebookAndSystemControls() {
     };
     document.getElementById('copy-speech-diagnostics').onclick = async () => {
         const data = await ipcRenderer.invoke('speech-diagnostics');
-        require('electron').clipboard.writeText(JSON.stringify(data, null, 2));
+        window.cortana.copyDiagnostics(JSON.stringify(data, null, 2));
         document.getElementById('speech-diagnostics-status').textContent = 'Copied environment, speech stages and error codes. No API keys or recognized speech are included.';
     };
     document.getElementById('recognition-mode-select').onchange = event => {
@@ -5388,7 +5315,7 @@ async function setupNotebookAndSystemControls() {
     // Chromium reports output/camera changes too. Only a changed input identity
     // should reset capture; debounce bursts from virtual audio endpoints.
     let inputIdentity = null, deviceChangeTimer;
-    const inputs = async () => require('./lib/audio-device-policy').inputFingerprint(await navigator.mediaDevices.enumerateDevices());
+    const inputs = async () => CortanaAudioDevicePolicy.inputFingerprint(await navigator.mediaDevices.enumerateDevices());
     if (navigator.mediaDevices) {
         inputIdentity = await inputs().catch(() => null);
         navigator.mediaDevices.addEventListener('devicechange', () => {

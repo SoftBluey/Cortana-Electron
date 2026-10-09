@@ -1,6 +1,6 @@
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
-const files = ['main.js', 'renderer.js'];
+const files = ['main.js', 'preload.js', 'renderer.js'];
 for (const folder of ['lib', 'scripts', 'test']) {
   if (fs.existsSync(folder)) for (const name of fs.readdirSync(folder)) {
     if (/\.(?:js|cjs)$/.test(name)) files.push(`${folder}/${name}`);
