@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <title>Cortana</title>
@@ -20,7 +20,7 @@
             <button id="navigation-feedback" aria-label="Feedback"><span class="rail-icon">&#xE939;</span><span class="rail-label">Feedback</span></button>
           </div>
         </nav>
-        <div id="close-btn" role="button" tabindex="0" title="Close Application">
+        <div id="close-btn" role="button" tabindex="0" title="Dismiss Cortana" aria-label="Dismiss Cortana">
           <img id="close-btn-icon" alt="Close Icon" />
         </div>
         <div id="cortana-container" class="content-pane">
@@ -56,13 +56,13 @@
               </div>
               <div id="notebook-notes" class="notebook-page" hidden>
                 <h2>Your notes</h2>
-                <label for="notebook-notes-text">Saved on this computer</label>
+                <label for="notebook-notes-text">Your notes stay on this computer</label>
                 <textarea id="notebook-notes-text" maxlength="20000" rows="9" placeholder="Something worth remembering..."></textarea>
               </div>
               <div id="notebook-reminders" class="notebook-page" hidden>
                 <h2>Upcoming reminders</h2>
                 <button id="notebook-add-reminder" class="settings-button">Add reminder</button>
-                <div id="notebook-reminder-list"></div>
+                <div id="notebook-reminder-list"></div><p id="notebook-reminder-error" role="status" class="setting-warning" hidden></p>
               </div>
               <p id="notebook-save-status" role="status" aria-live="polite"></p>
               </div>
@@ -95,7 +95,7 @@
               <label for="reminder-time-input" class="reminder-label-gray"
                 >On this date and time</label
               >
-              <input type="datetime-local" id="reminder-time-input" />
+              <input type="datetime-local" id="reminder-time-input" /><p id="reminder-save-error" role="status" class="setting-warning" hidden></p>
               <div class="reminder-actions">
                 <button id="reminder-save-btn">Save</button>
                 <button id="reminder-cancel-btn">Cancel</button>
@@ -106,33 +106,22 @@
             <div class="settings-header">
               <button id="settings-back-btn" aria-label="Back to Cortana">&#xE0A6;</button>
               <h1>Settings</h1>
-              <span id="settings-saved-toast" class="saved-toast">Saved</span>
+              <span id="settings-saved-toast" class="saved-toast" role="status">Saved</span>
             </div>
             <div class="settings-content">
+              <p id="settings-save-error" class="setting-warning" role="status" hidden></p>
               <div class="settings-main-content">
                 <div class="settings-section">
                   <h2>Personalisation</h2>
-                  <div id="online-speech-warning"
-                       aria-live="polite"
-                       style="display:none; align-items:flex-start; gap:8px; padding:10px 12px;
-                              background:rgba(232,168,56,0.12); border:1px solid rgba(232,168,56,0.4);
-                              border-radius:0; margin-bottom:12px;">
-                    <span style="font-size:15px; line-height:1.2;">⚠️</span>
-                    <div style="font-size:12px; line-height:1.5; color:var(--text-color, #fff); opacity:0.9;">
-                      <strong>Online Speech Recognition is off.</strong><br>
-                      Go to <strong>Settings &gt; Privacy &amp; security &gt; Speech</strong>
-                      and turn on Online speech recognition for better accuracy.
-                    </div>
-                  </div>
                   <div class="setting-item">
-                    <label for="tts-engine-select">Speech Engine</label>
+                    <label for="tts-engine-select">Spoken replies</label>
                     <select id="tts-engine-select">
-                      <option value="system">System (Local)</option>
-                      <option value="edge" selected>Edge Neural (Online)</option>
+                      <option value="system">Windows (offline)</option>
+                      <option value="edge" selected>Edge (online)</option>
                     </select>
                   </div>
                   <div class="setting-item" id="edge-voice-container" style="display:none">
-                    <label for="edge-voice-select">Neural Voice</label>
+                    <label for="edge-voice-select">Edge voice</label>
                     <select id="edge-voice-select"></select>
                   </div>
                   <div class="setting-item">
@@ -186,7 +175,7 @@
                         class="settings-button"
                         style="margin-top: 0"
                       >
-                        Get Cortana TTS installer (Eva)
+                        Download Eva voice installer
                       </button>
                     </div>
                   </div>
@@ -209,7 +198,7 @@
                     <label for="time-format-select">Time Format</label>
                     <select id="time-format-select">
                       <option value="12">12-hour (AM/PM)</option>
-                      <option value="24">24-hour (Military)</option>
+                      <option value="24">24-hour</option>
                     </select>
                   </div>
                   <div class="setting-item">
@@ -243,6 +232,20 @@
                 </div>
                 <div class="settings-section">
                   <h2>Voice</h2>
+                  <div id="online-speech-warning"
+                       aria-live="polite"
+                       style="display:none; align-items:flex-start; gap:8px; padding:10px 12px;
+                              background:rgba(232,168,56,0.12); border:1px solid rgba(232,168,56,0.4);
+                              border-radius:0; margin-bottom:12px;">
+                    <span style="font-size:15px; line-height:1.2;">⚠️</span>
+                    <div style="font-size:12px; line-height:1.5; color:var(--text-color, #fff); opacity:0.9;">
+                      <strong>Online Speech Recognition is off.</strong><br>
+                      Online dictation needs this Windows setting. Open <strong>Windows Settings &gt; Privacy &gt; Speech</strong>
+                      (Privacy &amp; security on Windows 11), or choose Built-in commands below for limited offline recognition.
+                    </div>
+                  </div>
+
+                  <p class="setting-hint">These settings control what Cortana hears. Spoken replies use the voice selected above. Online dictation accepts natural phrases and needs Windows online speech recognition. Built-in commands recognise a limited set of phrases offline; you can always type a command.</p>
                   <div class="setting-item">
                     <label for="recognition-mode-select">Speech recognition</label>
                     <select id="recognition-mode-select">
@@ -271,6 +274,8 @@
                 </div>
                 <div class="settings-section">
                   <h2>Search</h2>
+                  <div class="setting-item"><label for="weather-city-input">Weather city</label><input id="weather-city-input" class="settings-text-input" maxlength="120" placeholder="e.g., Chicago" aria-describedby="weather-city-hint" /></div>
+                  <p id="weather-city-hint" class="setting-hint">Used when you ask for the weather without naming a city. Leave it empty to choose a city each time.</p>
                   <div class="setting-item">
                     <label for="weather-units-select">Weather units</label>
                     <select id="weather-units-select">
@@ -279,7 +284,7 @@
                     </select>
                   </div>
                   <div class="setting-item">
-                    <label for="search-engine-select">Search Engine</label>
+                    <label for="search-engine-select">Browser search engine</label>
                     <select id="search-engine-select">
                       <option value="bing">Bing</option>
                       <option value="google">Google</option>
@@ -288,6 +293,7 @@
                       <option value="ecosia">Ecosia</option>
                     </select>
                   </div>
+                  <p class="setting-hint">Used for searches opened in your browser. Results inside Cortana come from DuckDuckGo.</p>
                   <div class="setting-item">
                     <label for="everything-toggle">Everything Search</label>
                     <label class="toggle-switch">
@@ -295,6 +301,7 @@
                       <span class="slider"></span>
                     </label>
                   </div>
+                  <p class="setting-hint">File searches can use Everything by voidtools. Enable its HTTP server in Tools &gt; Options &gt; HTTP Server and keep access limited to this computer. Set Cortana's port to match that server.</p>
                   <div id="everything-port-container" class="setting-sub-item" style="display:none">
                     <div class="setting-item">
                       <label for="everything-port-input">HTTP Port</label>
@@ -307,6 +314,7 @@
                 </div>
                 <div class="settings-section">
                   <h2>AI</h2>
+                  <p class="setting-hint">Optional answers from your chosen provider when a built-in command does not match. Online providers receive those questions; local providers need their server running. Built-in commands still work with this off.</p>
                   <div class="setting-item">
                     <label for="ai-toggle">Use AI Responses</label>
                     <label class="toggle-switch">
@@ -352,7 +360,7 @@
                       />
                     </div>
                     <div class="setting-item" id="ai-api-url-item" style="display:none">
-                      <label for="ai-api-url-input">API URL</label>
+                      <label for="ai-api-url-input">Server address</label>
                       <input
                         type="text"
                         id="ai-api-url-input"
@@ -362,11 +370,11 @@
                     </div>
                     <div id="ai-custom-fields" style="display:none">
                       <div class="setting-item setting-column" style="flex-direction: column; align-items: stretch;">
-                        <label for="ai-system-prompt-input">System Prompt</label>
+                        <label for="ai-system-prompt-input">Instructions for AI replies</label>
                         <textarea
                           id="ai-system-prompt-input"
                           class="settings-text-input"
-                          placeholder="You are a helpful assistant..."
+                          placeholder="How should Cortana answer?"
                           rows="3"
                         ></textarea>
                       </div>
@@ -384,7 +392,7 @@
                         class="settings-text-input"
                         readonly
                       />
-                      <button id="reminder-sound-browse-setting" class="metro-style-button">...</button>
+                      <button id="reminder-sound-browse-setting" aria-label="Choose reminder sound" class="metro-style-button">...</button>
                     </div>
                   </div>
                 </div>
@@ -393,10 +401,11 @@
                   <div id="update-available" style="display:none">
                     <p class="update-message"></p>
                     <button id="update-button" class="settings-button">
-                      Download Update
+                      Open update page
                     </button>
                   </div>
                   <p id="update-status">Version <span id="current-version"></span></p>
+                  <button id="check-updates-button" class="settings-button">Check for updates</button><p id="update-feedback" role="status" class="setting-hint"></p>
                   <div class="setting-item">
                     <label for="startup-toggle">Start with Windows</label>
                     <label class="toggle-switch">
@@ -404,9 +413,9 @@
                       <span class="slider"></span>
                     </label>
                   </div>
+                  <p class="setting-hint">Starts Cortana in the notification area when you sign in. You can change this here or in Windows Startup apps.</p>
                   <p id="startup-warning" class="setting-warning">
-                    Reminders may not work as expected until Cortana is launched
-                    manually.
+                    Open Cortana yourself to receive reminders when startup is off.
                   </p>
                   <div class="setting-item">
                     <label for="movable-toggle">Movable Window</label>
@@ -415,6 +424,7 @@
                       <span class="slider"></span>
                     </label>
                   </div>
+                  <p class="setting-hint">Movable Window restarts Cortana to switch between a movable window and the classic docked panel.</p>
                   <div class="setting-item">
                     <label for="close-to-tray-toggle">Keep running when dismissed</label>
                     <label class="toggle-switch"><input type="checkbox" id="close-to-tray-toggle" /><span class="slider"></span></label>
@@ -422,7 +432,7 @@
                   <p class="setting-warning" style="display:block">When this is off, dismissing Cortana quits the app. Reminders, timers and the assistant shortcut stop working until you open it again.</p>
                   <div class="setting-item setting-column assistant-shortcut">
                     <label for="assistant-hotkey">Assistant keyboard shortcut</label>
-                    <input id="assistant-hotkey" class="settings-text-input" placeholder="CommandOrControl+Shift+C" maxlength="128" />
+                    <input id="assistant-hotkey" class="settings-text-input" placeholder="Ctrl+Shift+C" maxlength="128" />
                     <button id="save-assistant-hotkey" class="settings-button">Apply shortcut</button>
                     <span id="assistant-hotkey-status" role="status"></span>
                   </div>
@@ -448,7 +458,7 @@
                 <div class="settings-section">
                   <h2>Advanced</h2>
                   <button id="reset-voice-btn" class="settings-button">
-                    Reset Voice Settings
+                    Reset spoken replies
                   </button>
                   <button id="reset-reminder-sound-btn" class="settings-button">
                     Reset Reminder Sound
@@ -457,7 +467,7 @@
                     Reset Theme
                   </button>
                   <button id="reset-all-btn" class="settings-button danger">
-                    Reset All Settings & Reminders
+                    Reset settings, reminders and custom actions
                   </button>
                 </div>
                 <div class="settings-footer">
@@ -509,7 +519,7 @@
         <div class="search-input-wrapper">
           <img id="search-icon" alt="Cortana Icon" />
           <textarea
-            id="search-bar"
+            id="search-bar" aria-label="Ask Cortana or search"
             rows="1"
             placeholder="Type here to search"
             autocomplete="off"

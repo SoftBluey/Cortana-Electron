@@ -28,10 +28,14 @@ const cityTimezones = require("city-timezones");
 const { EdgeTTS } = require("node-edge-tts");
 const os = require("os");
 const { SpeechController, errorDetails } = require('./lib/speech-controller');
-const { createWriter, validNotebook, migrateInterfaceSettings } = require('./lib/preferences');
+const { createWriter, createSettingsSaver, createMutationQueue, validNotebook, migrateInterfaceSettings } = require('./lib/preferences');
+const { releaseInfo } = require('./lib/release');
+const { parseShortcut } = require('./lib/shortcuts');
 const { normalizeEndpoint, isLoopback } = require('./lib/ai-endpoint');
 const { createStartup } = require('./lib/startup');
+const APP_ID = 'com.blueysoft.cortana-electron';
 const atomicWriteFile = createWriter();
+const mutateReminders = createMutationQueue();
 let speech = null;
 let appScanInterval = null;
 let registeredHotkey = '';
@@ -41,10 +45,11 @@ let diagnosticsFile;
 let diagnosticWrite = Promise.resolve();
 const diagnosticEvents = [];
 let settingsWritable = true;
+let notebookWritable = true;
 let remindersWritable = true;
 // Explicit diagnostic mode creates its own profile and skips Windows startup registration.
 const diagnosticSmoke = process.argv.includes('--diagnostic-smoke');
-const startup = createStartup(app, { diagnostic: diagnosticSmoke });
+const startup = createStartup(app, { name: APP_ID, diagnostic: diagnosticSmoke });
 if (diagnosticSmoke) app.setPath('userData', fssync.mkdtempSync(path.join(os.tmpdir(), 'cortana-smoke-')));
 
 function logSpeech(stage, details = {}) {
@@ -87,33 +92,19 @@ function registerAssistantHotkey(accelerator) {
     if (registeredHotkey) globalShortcut.unregister(registeredHotkey);
     registeredHotkey = accelerator;
     return { success: true, accelerator };
-  } catch (_) { return { success: false, error: 'Invalid keyboard shortcut. Try CommandOrControl+Shift+C.' }; }
+  } catch (_) { return { success: false, error: 'That shortcut is not valid. Try Ctrl+Shift+C.' }; }
 }
 
 let updateAvailable = false;
+let verifiedReleaseUrl = null;
+let updateCheckPromise = null;
 let updateCheckInterval = null;
 const GITHUB_RELEASES_API_URL =
   "https://api.github.com/repos/SoftBluey/Cortana-Electron/releases/latest";
-const GITHUB_RELEASES_PAGE_URL =
-  "https://github.com/SoftBluey/Cortana-Electron/releases";
 const UPDATE_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000;
 
-const APP_ID = "com.blueysoft.cortana-electron";
 // Electron script entry points otherwise report Electron's own version.
 const APP_VERSION = require('./package.json').version;
-
-// Compares two dotted version strings, e.g. "7.2.0" vs "7.10.0".
-function compareVersions(a, b) {
-  const partsA = String(a).split(".").map((n) => parseInt(n, 10) || 0);
-  const partsB = String(b).split(".").map((n) => parseInt(n, 10) || 0);
-  const len = Math.max(partsA.length, partsB.length);
-  for (let i = 0; i < len; i++) {
-    const numA = partsA[i] || 0;
-    const numB = partsB[i] || 0;
-    if (numA !== numB) return numA - numB;
-  }
-  return 0;
-}
 
 process.stdout.on('error', (err) => {
   if (err.code === 'EPIPE') { /* ignore broken pipe from WASM debug logs */ }
@@ -372,7 +363,8 @@ function clearReminderTimeout(reminder) {
 }
 
 function fireReminder(reminder) {
-  if (!reminders.some((item) => item.id === reminder.id)) {
+  return mutateReminders(async () => {
+  if (!reminders.includes(reminder)) {
     return;
   }
 
@@ -399,7 +391,8 @@ function fireReminder(reminder) {
   }
 
   reminders = reminders.filter((item) => item.id !== reminder.id);
-  saveReminders().catch(error => console.error('Failed to persist fired reminder:', error));
+  await saveReminders().catch(error => console.error('Failed to persist fired reminder:', error));
+  });
 }
 
 function scheduleReminder(reminder) {
@@ -433,10 +426,10 @@ function scheduleReminder(reminder) {
   return true;
 }
 
-async function saveReminders() {
+async function saveReminders(snapshot = reminders) {
   if (!remindersWritable) throw new Error('The existing reminders file could not be read. It has been retained; check its permissions or contents before adding reminders.');
   try {
-    const remindersToSave = reminders.map(({ id, text, time, sound }) => ({
+    const remindersToSave = snapshot.map(({ id, text, time, sound }) => ({
       id,
       text,
       time,
@@ -460,8 +453,6 @@ async function loadReminders() {
     if (!Array.isArray(parsed)) {
       throw new Error('Reminder file must contain an array');
     }
-
-    const now = Date.now();
 
     reminders = parsed
       .filter((item) => {
@@ -489,7 +480,6 @@ async function loadReminders() {
       scheduleReminder(reminder);
     }
 
-    await saveReminders();
   } catch (error) {
     if (error.code !== 'ENOENT') {
       console.error('Failed to load reminders:', error);
@@ -671,16 +661,20 @@ function restoreDefaults() {
   return settings;
 }
 
-async function saveSettings() {
-  if (!settingsWritable) return;
-  try {
-    await atomicWriteFile(SETTINGS_FILE, JSON.stringify(settings, null, 2));
-  } catch (error) {
-    console.error("Failed to save settings:", error);
-  }
+const saveSettings = createSettingsSaver({
+  read: () => settings,
+  commit: value => { settings = value; },
+  write: value => atomicWriteFile(SETTINGS_FILE, JSON.stringify(value, null, 2)),
+  writable: () => settingsWritable,
+  onError: error => console.error('Failed to save settings:', error),
+});
+
+function checkForUpdates() {
+  if (!updateCheckPromise) updateCheckPromise = fetchLatestRelease().finally(() => { updateCheckPromise = null; });
+  return updateCheckPromise;
 }
 
-async function checkForUpdates() {
+async function fetchLatestRelease() {
   try {
     const currentVersion = APP_VERSION;
 
@@ -701,12 +695,19 @@ async function checkForUpdates() {
           },
           (res) => {
             if (res.statusCode !== 200) {
+              res.resume();
               reject(new Error(`Request failed with status ${res.statusCode}`));
               return;
             }
 
             let data = "";
-            res.on("data", (chunk) => (data += chunk));
+            res.setEncoding('utf8');
+            res.on('error', reject);
+            res.on('aborted', () => reject(new Error('The update connection was interrupted.')));
+            res.on("data", (chunk) => {
+              data += chunk;
+              if (data.length > 1024 * 1024) req.destroy(new Error('The update response was too large.'));
+            });
             res.on("end", () => resolve(data));
           }
         )
@@ -717,29 +718,23 @@ async function checkForUpdates() {
     });
 
     const latestRelease = JSON.parse(response);
-    // Release tags in this project are always prefixed with "v" (e.g. "v7.2.1").
-    const remoteVersion = String(latestRelease.tag_name || "").replace(/^v/i, "");
-    const releaseUrl = latestRelease.html_url || GITHUB_RELEASES_PAGE_URL;
-
-    if (!remoteVersion) {
-      throw new Error("Latest release did not include a version tag");
-    }
-
-    updateAvailable = compareVersions(currentVersion, remoteVersion) < 0;
+    const result = releaseInfo(latestRelease, currentVersion);
+    updateAvailable = result.available;
+    verifiedReleaseUrl = result.available ? result.releaseUrl : null;
 
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("update-status", {
-        available: updateAvailable,
-        currentVersion,
-        remoteVersion,
-        releaseUrl,
-      });
+      mainWindow.webContents.send("update-status", result);
     }
 
-    return { available: updateAvailable, currentVersion, remoteVersion, releaseUrl };
+    return result;
   } catch (error) {
     console.error("Failed to check for updates:", error);
-    return { available: false, error: error.message };
+    updateAvailable = false;
+    verifiedReleaseUrl = null;
+    const result = { available: false, currentVersion: APP_VERSION,
+      error: 'Could not check for updates. Check your internet connection and try again.' };
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', result);
+    return result;
   }
 }
 
@@ -776,8 +771,8 @@ if (gotTheLock) {
   try {
     const saved = JSON.parse(await fs.readFile(NOTEBOOK_FILE, 'utf8'));
     if (validNotebook(saved)) notebook = saved;
-    else console.error('Invalid notebook data; original file retained.');
-  } catch (error) { if (error.code !== 'ENOENT') console.error('Notebook could not be loaded; original file retained:', error.message); }
+    else { notebookWritable = false; console.error('Invalid notebook data; original file retained.'); }
+  } catch (error) { if (error.code !== 'ENOENT') { notebookWritable = false; console.error('Notebook could not be loaded; original file retained:', error.message); } }
   
   assetsPath = app.isPackaged
     ? path.join(process.resourcesPath, "assets")
@@ -801,8 +796,6 @@ if (gotTheLock) {
         scheduleReminder(reminder);
       }
     }
-
-    await saveReminders().catch(error => console.error('Failed to persist reminders after resume:', error));
 
     cancelManualSpeech();
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-force-stop');
@@ -885,7 +878,7 @@ if (gotTheLock) {
       event.preventDefault();
       speech.shutdown().catch(error => logSpeech('shutdown-failed', errorDetails(error)))
         .finally(async () => {
-          try { await saveSettings(); await saveReminders(); await diagnosticWrite; }
+          try { await saveSettings(); await mutateReminders(() => saveReminders()); await diagnosticWrite; }
           catch (error) { console.error('Shutdown persistence failed:', error.message); }
           finally { app.quit(); }
         });
@@ -1156,7 +1149,7 @@ function registerIpcHandlers() {
     const apiKey = settings.openaiApiKey;
     let apiUrl = settings.aiApiUrl || "https://api.openai.com/v1/chat/completions";
     const model = settings.aiModel || "gpt-4o-mini";
-    const systemPrompt = settings.aiSystemPrompt || "You are a helpful assistant. Be concise and conversational.";
+    const systemPrompt = settings.aiSystemPrompt || DEFAULT_SETTINGS.aiSystemPrompt;
 
     if (typeof model !== 'string' || !model.trim()) {
       return { success: false, error: 'Invalid model.' };
@@ -1268,14 +1261,9 @@ function registerIpcHandlers() {
                 typeof res.statusCode === 'number' &&
                 (res.statusCode < 200 || res.statusCode >= 300)
               ) {
-                const providerMessage =
-                  parsed &&
-                  parsed.error &&
-                  typeof parsed.error.message === 'string'
-                    ? parsed.error.message
-                    : `AI provider returned HTTP ${res.statusCode}.`;
-
-                finish(reject, new Error(providerMessage));
+                const failure = new Error('AI provider request failed.');
+                failure.status = res.statusCode;
+                finish(reject, failure);
                 return;
               }
 
@@ -1309,29 +1297,42 @@ function registerIpcHandlers() {
         return { success: true, text: data.choices[0].message.content.trim() };
       }
 
-      return { success: false, error: 'AI provider returned an unexpected response format.' };
+      return { success: false, error: 'Your AI provider did not return an answer. Check the model in Settings and try again.' };
     } catch (error) {
       const message = error.code === 'ECONNREFUSED' && isLocal
-        ? 'Local AI server is not running at the configured address. Start Ollama or LM Studio and check the port and model.' : error.message;
+        ? 'Your local AI server is not running at this address. Start it and check the server address and model in Settings.' :
+        [401, 403].includes(error.status) ? 'Your AI provider did not accept the request. Check your API key and model access in Settings.' :
+        error.status === 429 ? 'Your AI provider has reached its usage limit. Wait a little or check your account with the provider.' :
+        [400, 404].includes(error.status) ? 'Your AI provider could not use these settings. Check the model and server address in Settings.' :
+        'Could not get an answer from your AI provider. Check your connection and provider settings, then try again.';
       return { success: false, error: message };
     }
   });
 
   ipcMain.handle('set-assistant-hotkey', async (_event, accelerator) => {
+    if (typeof accelerator !== 'string') return { success: false, error: 'Enter a shortcut such as Ctrl+Shift+C.' };
+    accelerator = parseShortcut(accelerator);
     if (!validateSettingValue('assistantHotkey', accelerator)) return { success: false, error: 'Invalid keyboard shortcut.' };
+    const previous = registeredHotkey;
     const result = registerAssistantHotkey(accelerator);
-    if (result.success) { settings.assistantHotkey = accelerator; await saveSettings(); }
+    if (!result.success) return result;
+    const saved = await saveSettings({ assistantHotkey: accelerator });
+    if (!saved.success) {
+      const restored = registerAssistantHotkey(previous);
+      return { ...saved, error: restored.success ? saved.error : saved.error + ' The previous shortcut could not be restored; apply it again.' };
+    }
     return result;
   });
   ipcMain.handle('get-hotkey-status', () => ({ accelerator: registeredHotkey, configured: settings.assistantHotkey }));
   ipcMain.handle('get-notebook', () => notebook);
   ipcMain.handle('save-notebook', async (_event, value) => {
+    if (!notebookWritable) return { success: false, error: 'Your Notebook could not be read safely. The original file has been kept; check it before saving changes.' };
     if (!validNotebook(value)) return { success: false, error: 'Invalid notebook data or maximum size exceeded.' };
     try {
       await atomicWriteFile(NOTEBOOK_FILE, JSON.stringify(value, null, 2));
       notebook = value;
       return { success: true };
-    } catch (error) { return { success: false, error: 'Could not save your notebook: ' + error.message }; }
+    } catch (error) { return { success: false, error: 'Could not save your Notebook on this computer. Your changes are still here; check the data folder and try again.' }; }
   });
   ipcMain.handle('speech-diagnostics', async () => ({ environment: { arch: process.arch, os: os.release(),
     versions: process.versions, packaged: app.isPackaged, microphoneAccess: systemPreferences.getMediaAccessStatus('microphone') },
@@ -1351,84 +1352,37 @@ function registerIpcHandlers() {
 
   ipcMain.handle("get-settings", async () => {
     const startupStatus = startup.status();
-    return { ...settings, startupStatus, openAtLogin: startupStatus.supported ? startupStatus.enabled : settings.openAtLogin };
+    return { ...settings, startupStatus, openAtLogin: startupStatus.supported && !startupStatus.error ? startupStatus.enabled : settings.openAtLogin };
   });
 
   ipcMain.handle('set-startup', async (_event, enabled) => {
-    if (typeof enabled !== 'boolean') return { enabled: false, error: 'Invalid startup setting.' };
-    const result = startup.set(enabled);
-    if (result.supported && !result.error && result.enabled === enabled) {
-      settings.openAtLogin = enabled;
-      await saveSettings();
-    }
-    return result;
+    if (typeof enabled !== 'boolean') return { ...startup.status(), error: 'Invalid startup setting.' };
+    return startup.change(enabled, saveSettings);
   });
 
-  ipcMain.on("set-setting", async (event, { key, value }) => {
-    if (!Object.hasOwn(DEFAULT_SETTINGS, key) || !validateSettingValue(key, value) || ['assistantHotkey', 'customActions', 'interfaceRelease', 'openAtLogin'].includes(key)) return;
-
-    // Handle known enum keys using shared validation
-    if (key in VALID_ENUMS) {
-      if (!validateSettingValue(key, value)) {
-        console.warn(`[set-setting] Invalid value for ${key}:`, value);
-        return;
-      }
-    } else if (key === 'openaiApiKey') {
-      // Special: validate api key length and format
-      if (typeof value !== 'string' || value.length > 512) {
-        console.warn(`[set-setting] Invalid value for ${key}:`, value);
-        return;
-      }
-      // Check for embedded credentials in URL style
-      if (value.includes(':')) {
-        const parts = value.split(':');
-        if (parts[0].length <= 2) {
-          console.warn(`[set-setting] Invalid value for ${key}: likely malformed key`, value);
-          return;
-        }
-      }
-    } else if (key === 'pitch') {
-      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0.1 || value > 2.0) {
-        console.warn(`[set-setting] Invalid value for ${key}:`, value);
-        return;
-      }
-    } else if (key === 'rate') {
-      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0.1 || value > 2.0) {
-        console.warn(`[set-setting] Invalid value for ${key}:`, value);
-        return;
-      }
-    } else if (key === 'reminderSound') {
-      if (typeof value !== 'string') {
-        console.warn(`[set-setting] Invalid value for ${key}:`, value);
-        return;
-      }
-      const ext = value.split('.').pop().toLowerCase();
-      if (ext && !['wav', 'mp3', 'ogg', 'm4a', 'aac'].includes(ext)) {
-        console.warn(`[set-setting] Invalid value for ${key}: unsupported audio extension`, value);
-        return;
-      }
-    } else {
-      // For other keys, do basic type validation
-      const expectedType = typeof settings[key];
-      if (expectedType === 'undefined' || value === undefined) return;
-      if (typeof value !== expectedType) {
-        console.warn(`[set-setting] Invalid type for ${key}:`, value);
-        return;
-      }
-    }
-
-    settings[key] = value;
-    if (key === 'recognitionMode') {
+  function validSettingsPatch(patch) {
+    return patch && !Array.isArray(patch) && typeof patch === 'object' && Object.keys(patch).length > 0 &&
+      Object.entries(patch).every(([key, value]) => Object.hasOwn(DEFAULT_SETTINGS, key) &&
+        !['assistantHotkey', 'customActions', 'interfaceRelease', 'openAtLogin'].includes(key) &&
+        typeof value === typeof DEFAULT_SETTINGS[key] && validateSettingValue(key, value));
+  }
+  async function setSettings(patch) {
+    if (!validSettingsPatch(patch)) return { success: false, error: 'That setting could not be saved. Check the value and try again.' };
+    const result = await saveSettings(patch);
+    if (!result.success) return result;
+    if (Object.hasOwn(patch, 'recognitionMode')) {
       await speech.engineChanged().catch(error => logSpeech('engine-change-failed', errorDetails(error)));
       mainWindow?.webContents.send('speech-force-stop');
     }
-    if (key === "isMovable") {
-      await saveSettings();
+    if (Object.hasOwn(patch, 'heyCortana')) await speech.setWake(patch.heyCortana).catch(error => logSpeech('wake-toggle-failed', errorDetails(error)));
+    if (Object.hasOwn(patch, 'isMovable')) {
       app.relaunch();
       app.quit();
     }
-    await saveSettings();
-  });
+    return result;
+  }
+  ipcMain.handle('set-settings', (_event, patch) => setSettings(patch));
+  ipcMain.handle('set-setting', (_event, { key, value } = {}) => setSettings({ [key]: value }));
 
   const MAX_CUSTOM_ACTIONS = 50;
 const MAX_TRIGGER_LENGTH = 256;
@@ -1507,35 +1461,32 @@ ipcMain.handle("set-custom-actions", async (event, actions) => {
     if (!validateCustomActions(actions)) {
       return { success: false, error: 'Invalid custom actions format.' };
     }
-    settings.customActions = actions;
-    await saveSettings();
-    return { success: true };
+    return await saveSettings({ customActions: actions });
   });
 
-  ipcMain.on("reset-all-settings", async () => {
+  ipcMain.handle('reset-all-settings', () => mutateReminders(async () => {
+    const previousSettings = settings;
+    const previousReminders = reminders;
+    // Keep the same reset scope: settings, actions and reminders; never Notebook or installed voices.
+    const saved = await saveSettings({ ...DEFAULT_SETTINGS, customActions: [] }, true);
+    if (!saved.success) return saved;
     try {
-      reminders.forEach((reminder) => {
-        if (reminder.timeout) clearTimeout(reminder.timeout);
-      });
+      await saveReminders([]);
       reminders = [];
-      restoreDefaults();
-      await speech.setWake(false);
-      registerAssistantHotkey('');
-
-      await fs.unlink(SETTINGS_FILE).catch((err) => {
-        if (err.code !== "ENOENT") throw err;
-      });
-      await fs.unlink(REMINDERS_FILE).catch((err) => {
-        if (err.code !== "ENOENT") throw err;
-      });
-
-      await saveSettings();
-      app.relaunch();
-      app.quit();
     } catch (error) {
-      console.error("Failed to reset all settings:", error);
+      reminders = previousReminders;
+      const restored = await saveSettings(previousSettings, true);
+      return { success: false, error: restored.success
+        ? 'Could not reset reminders. Your settings and reminders have been kept. Check the data folder and try again.'
+        : 'The reset could not finish. Reminders have been kept, but some settings may have changed. Check the data folder before trying again.' };
     }
-  });
+    previousReminders.forEach(clearReminderTimeout);
+    await speech.setWake(false).catch(error => logSpeech('reset-wake-stop-failed', errorDetails(error)));
+    registerAssistantHotkey('');
+    app.relaunch();
+    app.quit();
+    return { success: true };
+  }));
 
   ipcMain.handle("find-application", async (event, query) => {
     const queryLower = query.toLowerCase();
@@ -1682,6 +1633,17 @@ ipcMain.handle("set-custom-actions", async (event, actions) => {
   });
 
   const MAX_PATH_LENGTH = 4096;
+  ipcMain.handle('open-action-url', async (_event, url) => {
+    const validated = validateExternalUrl(url);
+    if (!validated) return { success: false };
+    try { await shell.openExternal(validated); return { success: true }; }
+    catch (_) { return { success: false }; }
+  });
+  ipcMain.handle('open-action-path', async (_event, filename) => {
+    if (typeof filename !== 'string' || filename.length > MAX_PATH_LENGTH || isPathControlValue(filename)) return { success: false };
+    try { return { success: !(await shell.openPath(path.resolve(filename))) }; }
+    catch (_) { return { success: false }; }
+  });
 
 function isPathControlValue(fsPath) {
   return !fsPath || /[\0-\x1f\x7f]/.test(fsPath);
@@ -1710,6 +1672,15 @@ ipcMain.on("open-path", (event, fsPath) => {
 function hasControlChars(str) {
   return /[\0-\x1f\x7f]/.test(str);
 }
+
+ipcMain.handle('run-action-command', (_event, command) => {
+  if (typeof command !== 'string' || !command.trim() || command.length > MAX_COMMAND_LENGTH || hasControlChars(command)) {
+    return { success: false, error: 'Check the command in this action.' };
+  }
+  return new Promise(resolve => exec(command, { windowsHide: true }, error => resolve(error
+    ? { success: false, error: 'Windows could not complete this command. Check it in Settings.' }
+    : { success: true })));
+});
 
 ipcMain.on("run-command", (event, command) => {
     if (typeof command !== 'string' || !command.trim() || command.length > MAX_COMMAND_LENGTH || hasControlChars(command)) {
@@ -1876,7 +1847,7 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
     return result;
   });
 
-  ipcMain.handle('set-reminder', async (event, payload) => {
+  ipcMain.handle('set-reminder', (event, payload) => mutateReminders(async () => {
     try {
       const validation = validateReminderInput(payload || {});
       if (!validation.success) return validation;
@@ -1887,18 +1858,10 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
         timeout: null,
       };
 
-      reminders.push(newReminder);
-
-      try {
-        await saveReminders();
-        scheduleReminder(newReminder);
-      } catch (error) {
-        reminders = reminders.filter(
-          (item) => item.id !== newReminder.id
-        );
-        clearReminderTimeout(newReminder);
-        throw error;
-      }
+      const next = [...reminders, newReminder];
+      await saveReminders(next);
+      reminders = next;
+      scheduleReminder(newReminder);
 
       return {
         success: true,
@@ -1916,7 +1879,7 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
         error: 'The reminder could not be saved.',
       };
     }
-  });
+  }));
 
   ipcMain.handle('start-timer', (event, payload) => {
     const ms = payload && payload.ms;
@@ -2003,7 +1966,7 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
 
   ipcMain.handle(
     "update-reminder",
-    async (event, { id, reminder, reminderTime, sound }) => {
+    (event, { id, reminder, reminderTime, sound }) => mutateReminders(async () => {
       const reminderIndex = reminders.findIndex((r) => r.id === id);
       if (reminderIndex === -1) {
         return { success: false, error: 'Reminder not found.' };
@@ -2013,26 +1976,21 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
       if (!validation.success) return validation;
 
       const existingReminder = reminders[reminderIndex];
-      const originalReminder = { ...existingReminder };
-
-      clearReminderTimeout(existingReminder);
-
       const updatedReminder = {
         ...existingReminder,
         text: validation.value.text,
         time: validation.value.time,
         sound: validation.value.sound,
+        timeout: null,
       };
-
-      reminders[reminderIndex] = updatedReminder;
+      const next = reminders.map(item => item === existingReminder ? updatedReminder : item);
 
       try {
-        await saveReminders();
+        await saveReminders(next);
+        clearReminderTimeout(existingReminder);
+        reminders = next;
         scheduleReminder(updatedReminder);
       } catch (error) {
-        reminders[reminderIndex] = originalReminder;
-        clearReminderTimeout(updatedReminder);
-        scheduleReminder(originalReminder);
         console.error('Failed to update reminder:', error);
         return { success: false, error: 'The reminder could not be updated.' };
       }
@@ -2046,17 +2004,23 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
           sound: updatedReminder.sound,
         },
       };
-    }
+    })
   );
 
-  ipcMain.on("remove-reminder", async (event, id) => {
-    const reminderIndex = reminders.findIndex((r) => r.id === id);
-    if (reminderIndex !== -1) {
-      clearTimeout(reminders[reminderIndex].timeout);
-      reminders.splice(reminderIndex, 1);
-      await saveReminders().catch(error => console.error('Failed to persist reminder deletion:', error));
+  ipcMain.handle('remove-reminder', (_event, id) => mutateReminders(async () => {
+    const index = reminders.findIndex(reminder => reminder.id === id);
+    if (index < 0) return { success: false, error: 'That reminder is no longer in the list.' };
+    const removed = reminders[index];
+    const next = reminders.filter(item => item !== removed);
+    try {
+      await saveReminders(next);
+      reminders = next;
+      clearReminderTimeout(removed);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: 'Could not delete this reminder. It is still scheduled. Try again.' };
     }
-  });
+  }));
 
   ipcMain.handle("get-reminders", () => {
     return reminders.map(({ id, text, time, sound }) => ({ id, text, time, sound }));
@@ -2070,8 +2034,10 @@ ipcMain.handle("show-open-dialog", async (event, operation) => {
     return await checkForUpdates();
   });
 
-  ipcMain.on("open-github-releases", () => {
-    shell.openExternal(GITHUB_RELEASES_PAGE_URL);
+  ipcMain.handle('open-update-release', async () => {
+    if (!verifiedReleaseUrl) return { success: false, error: 'Check for updates again before opening the release.' };
+    try { await shell.openExternal(verifiedReleaseUrl); return { success: true }; }
+    catch (_) { return { success: false, error: 'Could not open your browser. Try again.' }; }
   });
 
   ipcMain.handle("eva-voice-status", () => {
@@ -2362,7 +2328,7 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
       return { success: true, title: page.title, extract, url: `https://en.wikipedia.org/wiki/${encodeURIComponent(pageTitle)}` };
     } catch (error) {
       console.error("Wikipedia lookup failed:", error);
-      return { success: false, error: error.message };
+      return { success: false, error: 'Could not load Wikipedia. Check your connection and try again.' };
     }
   });
 
@@ -2393,16 +2359,16 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
 
       const icsPath = path.join(os.tmpdir(), `cortana-event-${Date.now()}.ics`);
       await fs.writeFile(icsPath, ics);
-      await shell.openPath(icsPath);
+      const openError = await shell.openPath(icsPath);
       setTimeout(() => {
         fs.unlink(icsPath).catch((err) => {
           console.warn('[calendar] Failed to clean up ICS file:', err.message);
         });
       }, 5000);
-      return { success: true };
+      return openError ? { success: false, error: 'Could not open the calendar file. Choose a calendar app in Windows and try again.' } : { success: true };
     } catch (error) {
       console.error("Failed to create calendar event:", error);
-      return { success: false, error: error.message };
+      return { success: false, error: 'Could not prepare this calendar event. Try again.' };
     }
   });
 }

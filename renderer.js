@@ -2,6 +2,7 @@ const { ipcRenderer } = require('electron');
 const path = require('path');
 const https = require('https');
 const { isLoopback } = require('./lib/ai-endpoint');
+const { formatShortcut } = require('./lib/shortcuts');
 const { defaultVoice: findDefaultVoice, resolveVoice } = require('./lib/voice-policy');
 const { parseGIF, decompressFrames } = require('gifuct-js');
 
@@ -957,26 +958,32 @@ window.addEventListener('DOMContentLoaded', async () => {
     const updateButton = document.getElementById('update-button');
     const currentVersionSpan = document.getElementById('current-version');
 
-    updateButton?.addEventListener('click', () => {
-        ipcRenderer.send('open-github-releases');
+    let displayedVersion = '';
+    function renderUpdateStatus({ available, currentVersion, remoteVersion, error }) {
+        if (currentVersion) { displayedVersion = currentVersion; currentVersionSpan.textContent = currentVersion; }
+        // A version-only startup message must not erase a completed update check.
+        if (available === undefined && !error) return;
+        updateAvailableDiv.style.display = available ? 'block' : 'none';
+        updateButton.disabled = !available;
+        const feedback = document.getElementById('update-feedback');
+        feedback.textContent = error || (available ? 'Download and install the update from its release page.' :
+            remoteVersion === displayedVersion ? 'You have the latest release.' : 'No newer release is available.');
+        if (available) updateAvailableDiv.querySelector('.update-message').textContent = 'Version ' + remoteVersion + ' is available.';
+    }
+    updateButton?.addEventListener('click', async () => {
+        const result = await ipcRenderer.invoke('open-update-release').catch(() => ({ success: false }));
+        if (!result.success) document.getElementById('update-feedback').textContent = result.error || 'Could not open your browser. Try again.';
     });
+    const checkButton = document.getElementById('check-updates-button');
+    checkButton.onclick = async () => {
+        checkButton.disabled = true;
+        document.getElementById('update-feedback').textContent = 'Checking for updates...';
+        try { renderUpdateStatus(await ipcRenderer.invoke('check-for-updates')); }
+        catch (_) { renderUpdateStatus({ available: false, error: 'Could not check for updates. Try again.' }); }
+        finally { checkButton.disabled = false; }
+    };
+    ipcRenderer.on('update-status', (_event, status) => renderUpdateStatus(status));
 
-    ipcRenderer.on('update-status', (event, { available, currentVersion, remoteVersion }) => {
-
-        if (currentVersionSpan) {
-            currentVersionSpan.textContent = currentVersion;
-        }
-        if (updateAvailableDiv) {
-            updateAvailableDiv.style.display = available ? 'block' : 'none';
-            if (available) {
-                const updateMessage = updateAvailableDiv.querySelector('.update-message');
-                if (updateMessage) {
-                    updateMessage.textContent = `A new version (${remoteVersion}) is available!`;
-                }
-            }
-        }
-
-    });
     webLinkContainer = document.getElementById('web-link-container');
     webLink = document.getElementById('web-link');
     webIcon = document.getElementById('web-icon');
@@ -1354,7 +1361,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     themeColorPicker.addEventListener('input', onThemeColorChanged, false);
     useAccentToggle.addEventListener('change', async () => {
         useWindowsAccent = useAccentToggle.checked;
-        ipcRenderer.send('set-setting', { key: 'useWindowsAccent', value: useWindowsAccent });
+        saveSetting('useWindowsAccent', useWindowsAccent);
         if (useWindowsAccent) {
             themeColorPicker.disabled = true;
             await fetchAndApplyAccentColor();
@@ -1362,13 +1369,11 @@ window.addEventListener('DOMContentLoaded', async () => {
             themeColorPicker.disabled = false;
             applyThemeColor(themeColor);
         }
-        showSavedToast();
     });
     heyCortanaToggle.addEventListener('change', () => {
         heyCortanaEnabled = heyCortanaToggle.checked;
-        ipcRenderer.send('set-setting', { key: 'heyCortana', value: heyCortanaEnabled });
-        ipcRenderer.send('hey-cortana-toggle', heyCortanaEnabled);
-        showSavedToast();
+        saveSetting('heyCortana', heyCortanaEnabled);
+
     });
     movableToggle.addEventListener('change', onMovableToggleChanged);
     pitchSlider.addEventListener('input', onPitchChanged);
@@ -1378,8 +1383,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     timeFormatSelect.addEventListener('change', onTimeFormatChanged);
     weatherUnitsSelect?.addEventListener('change', () => {
         weatherUnits = weatherUnitsSelect.value;
-        ipcRenderer.send('set-setting', { key: 'weatherUnits', value: weatherUnits });
-        showSavedToast();
+        saveSetting('weatherUnits', weatherUnits);
     });
     resetVoiceBtn.addEventListener('click', onResetVoiceSettings);
     resetReminderSoundBtn.addEventListener('click', onResetReminderSound);
@@ -1390,7 +1394,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     aiToggle.addEventListener('change', onAIChanged);
     openaiApiKeyInput.addEventListener('input', onOpenAIKeyChanged);
     aiModelInput.addEventListener('input', onAIModelChanged);
-    aiApiUrlInput.addEventListener('input', onAIApiUrlChanged);
+    aiApiUrlInput.addEventListener('change', onAIApiUrlChanged);
     aiSystemPromptInput.addEventListener('input', onAISystemPromptChanged);
     aiPresetSelect.addEventListener('change', onPresetChanged);
 
@@ -1400,39 +1404,41 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     const everythingToggle = document.getElementById('everything-toggle');
     const everythingPortInput = document.getElementById('everything-port-input');
-    if (everythingToggle) {
-      everythingToggle.addEventListener('change', (e) => {
-        useEverythingSearch = e.target.checked;
+    let everythingCheckGeneration = 0;
+    const checkEverythingConnection = async () => {
+        const generation = ++everythingCheckGeneration;
+        const warning = document.getElementById('everything-warning');
+        warning.textContent = 'Checking Everything...';
+        let ok = false;
+        try { ok = await ipcRenderer.invoke('check-everything'); } catch (_) {}
+        if (generation !== everythingCheckGeneration || !useEverythingSearch) return;
+        warning.textContent = ok ? 'Connected to Everything. File searches are ready.' :
+            'Could not connect to Everything. Open Everything, enable its HTTP server and check that the port above matches.';
+        warning.style.color = ok ? '#a2a2a2' : '#e74c3c';
+    };
+    everythingToggle.addEventListener('change', async event => {
+        useEverythingSearch = event.target.checked;
         document.getElementById('everything-port-container').style.display = useEverythingSearch ? 'block' : 'none';
-        ipcRenderer.send('set-setting', { key: 'useEverythingSearch', value: useEverythingSearch });
-        showSavedToast();
-        if (useEverythingSearch) {
-          ipcRenderer.invoke('check-everything').then(ok => {
+        everythingCheckGeneration++;
+        const result = await saveSetting('useEverythingSearch', useEverythingSearch);
+        if (result.success && useEverythingSearch) await checkEverythingConnection();
+    });
+    everythingPortInput.addEventListener('change', async event => {
+        const value = Number(event.target.value);
+        if (!Number.isInteger(value) || value < 1 || value > 65535) {
             const warning = document.getElementById('everything-warning');
-            if (warning) {
-              warning.textContent = ok ? 'Everything HTTP server is reachable.' : 'Cannot reach Everything HTTP server. Check that it is enabled in Everything options.';
-              warning.style.color = ok ? 'green' : '#e74c3c';
-            }
-          });
+            warning.textContent = 'Enter a port from 1 to 65535. Your saved port has not changed.'; warning.style.color = '#e74c3c'; return;
         }
-      });
-    }
-    if (everythingPortInput) {
-      everythingPortInput.addEventListener('input', (e) => {
-        everythingPort = parseInt(e.target.value) || 80;
-        ipcRenderer.send('set-setting', { key: 'everythingPort', value: everythingPort });
-      });
-    }
+        everythingPort = value;
+        const result = await saveSetting('everythingPort', value);
+        if (result.success && useEverythingSearch) await checkEverythingConnection();
+    });
 
     // Reminder sound setting event listeners
     if (reminderSoundSettingInput) {
         reminderSoundSettingInput.addEventListener('change', (e) => {
             reminderSound = e.target.value;
-            ipcRenderer.send('set-setting', {
-                key: 'reminderSound',
-                value: e.target.value
-            });
-            showSavedToast();
+            saveSetting('reminderSound', e.target.value);
         });
     }
     
@@ -1448,11 +1454,7 @@ window.addEventListener('DOMContentLoaded', async () => {
                     if (reminderSoundSettingInput) {
                         reminderSoundSettingInput.value = fullPath;
                         reminderSound = fullPath;
-                        ipcRenderer.send('set-setting', { 
-                            key: 'reminderSound', 
-                            value: fullPath 
-                        });
-                        showSavedToast();
+                        saveSetting('reminderSound', fullPath);
                     }
                 }
             });
@@ -1464,11 +1466,7 @@ window.addEventListener('DOMContentLoaded', async () => {
             if (reminderSoundSettingInput) {
                 reminderSoundSettingInput.value = "notify.wav";
                 reminderSound = "notify.wav";
-                ipcRenderer.send('set-setting', { 
-                    key: 'reminderSound', 
-                    value: "notify.wav" 
-                });
-                showSavedToast();
+                saveSetting('reminderSound', "notify.wav");
             }
         });
     }
@@ -1521,11 +1519,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
 
     ipcRenderer.on('command-failed', (event, { command }) => {
-        let errorText = "Sorry, something went wrong. Try again in a little bit.";
+        let errorText = "I couldn't complete that command. Try again.";
         if (command === 'open-application') {
-            errorText = "Sorry, something went wrong. Try again in a little bit.";
+            errorText = "I couldn't open that app. Check that it is still installed and try again.";
         } else if (command === 'run-command') {
-            errorText = "Sorry, something went wrong. Try again in a little bit.";
+            errorText = "I couldn't run that command. Check the command and any file paths, then try again.";
         }
         displayAndSpeak(errorText, onActionFinished, {}, true);
     });
@@ -1738,15 +1736,7 @@ async function generateCategorizedResults(query) {
                 resultsDisplay.appendChild(p);
                 requestSound.currentTime = 0;
                 requestSound.play();
-                ipcRenderer.invoke('ask-openai', query).then(result => {
-                    if (result.success) {
-                        displayAndSpeak(result.text, onActionFinished, {}, false);
-                    } else {
-                        displayAndSpeak(result.error || "Sorry, I couldn't get an answer from AI.", onActionFinished, {}, true);
-                    }
-                }).catch(() => {
-                    displayAndSpeak("Sorry, I couldn't get an answer from AI.", onActionFinished, {}, true);
-                });
+                requestAIAnswer(query);
             }
         });
     }
@@ -1950,8 +1940,10 @@ function hideSearchPanel() {
 }
 
 function onSearchKeyDown(event) {
+    if (event.isComposing) return;
     if (allPanelItems.length === 0) {
         if (event.key === 'Enter') {
+            event.preventDefault();
             onSearch();
         }
         return;
@@ -2058,6 +2050,7 @@ async function refreshSpeechDiagnostics() {
 }
 
 async function showSettingsUI() {
+    ++assistantRequestGeneration; searchResultsActive = false;
     const alreadyOpen = settingsContainer.classList.contains('visible');
     closeNotebook({ immediate: true, switching: true });
     _stopSpeechFromOutside?.();
@@ -2080,7 +2073,13 @@ async function showSettingsUI() {
     document.getElementById('settings-back-btn').focus({ preventScroll: true });
     // Controls already reflect startup settings and their change handlers.
     // Rebuilding them on navigation changed layout during the entrance.
+    const startupRevision = startupChangeRevision;
     await refreshSpeechDiagnostics();
+    if (!startupToggle.disabled && startupRevision === startupChangeRevision) {
+        try { const state = await ipcRenderer.invoke('get-settings');
+            if (!startupToggle.disabled && startupRevision === startupChangeRevision) { startupToggle.checked = state.openAtLogin; startupWarning.textContent = state.startupStatus?.error || 'Open Cortana yourself to receive reminders when startup is off.'; startupWarning.style.display = state.openAtLogin && !state.startupStatus?.error ? 'none' : 'block'; }
+        } catch (_) {}
+    }
 }
 
 function closeSettings(silent = false, { switching = false } = {}) {
@@ -2099,6 +2098,7 @@ function closeSettings(silent = false, { switching = false } = {}) {
     animationContainer.style.display = 'block';
     if (!silent) {
         setStateIdle();
+        settingsBtn.focus({ preventScroll: true });
     }
 }
 
@@ -2150,16 +2150,15 @@ async function loadAndApplySettings() {
     document.getElementById('listening-sounds-toggle').checked = listeningSounds;
     document.getElementById('close-to-tray-toggle').checked = settings.closeToTray !== false;
     document.getElementById('hotkey-listen-toggle').checked = settings.hotkeyStartsListening === true;
-    document.getElementById('assistant-hotkey').value = settings.assistantHotkey || '';
+    document.getElementById('assistant-hotkey').value = formatShortcut(settings.assistantHotkey);
     const hotkey = await ipcRenderer.invoke('get-hotkey-status');
-    document.getElementById('assistant-hotkey-status').textContent = hotkey.accelerator ? `Active: ${hotkey.accelerator}` : hotkey.configured ? 'Configured shortcut could not be registered; choose another.' : 'Shortcut disabled';
+    document.getElementById('assistant-hotkey-status').textContent = hotkey.accelerator ? `Active: ${formatShortcut(hotkey.accelerator)}` : hotkey.configured ? 'Configured shortcut could not be registered; choose another.' : 'Shortcut disabled';
     preferredVoiceName = settings.preferredVoice;
 
     startupToggle.checked = settings.openAtLogin;
     startupToggle.disabled = settings.startupStatus?.supported === false;
-    startupWarning.textContent = settings.startupStatus?.error
-        ? 'Windows could not update startup. Try again or manage Cortana in Windows Startup Apps.'
-        : settings.startupStatus?.message || 'Reminders may not work as expected until Cortana is launched manually.';
+    startupWarning.textContent = settings.startupStatus?.error || settings.startupStatus?.message ||
+        'Open Cortana yourself to receive reminders when startup is off.';
     startupWarning.style.display = !settings.openAtLogin || startupToggle.disabled || settings.startupStatus?.error ? 'block' : 'none';
 
     currentSearchEngine = settings.searchEngine;
@@ -2298,7 +2297,7 @@ function renderCustomActions() {
     
             const summarySpan = document.createElement('span');
             summarySpan.className = 'custom-action-summary';
-            summarySpan.textContent = item.actions.map(a => a.type.replace('_', ' ')).join(' → ');
+            summarySpan.textContent = item.actions.map(a => actionNames[a.type] || 'Action').join(' → ');
     
             const actionsContainer = document.createElement('div');
             actionsContainer.className = 'custom-action-item-actions';
@@ -2311,10 +2310,13 @@ function renderCustomActions() {
             const deleteBtn = document.createElement('button');
             deleteBtn.textContent = 'Delete';
             deleteBtn.className = 'reminder-action-btn delete';
-            deleteBtn.onclick = () => {
-                customActions.splice(index, 1);
-                saveCustomActions();
-                renderCustomActions();
+            deleteBtn.setAttribute('aria-label', 'Delete action: ' + item.trigger);
+            editBtn.setAttribute('aria-label', 'Edit action: ' + item.trigger);
+            deleteBtn.onclick = async () => {
+                deleteBtn.disabled = true;
+                const result = await saveCustomActions(customActions.filter(action => action !== item));
+                if (result.success) { renderCustomActions(); addCustomActionBtn.focus(); showSavedToast(); }
+                else { deleteBtn.disabled = false; showSettingsError(result.error); }
             };
     
             textContainer.appendChild(triggerSpan);
@@ -2347,45 +2349,100 @@ function showCustomActionForm(options = {}) {
 }
 
 function hideCustomActionForm() {
+    if (customActionFormContainer.inert) return;
     customActionFormContainer.classList.remove('visible');
     document.querySelector('.settings-main-content').style.display = 'block';
     editingActionIndex = null;
+    addCustomActionBtn.focus({ preventScroll: true });
 }
 
-function onSaveCustomAction() {
+async function onSaveCustomAction() {
     const trigger = customActionTriggerInput.value.trim();
     const actions = getCurrentActionsFromForm();
-
-    if (!trigger || actions.length === 0) return;
-
+    if (!trigger || actions.length === 0 || customActionSaveBtn.disabled) return;
+    const next = customActions.slice();
     const newAction = { trigger, actions };
-    if (editingActionIndex !== null) {
-        customActions[editingActionIndex] = newAction;
-    } else {
-        customActions.push(newAction);
+    if (editingActionIndex !== null) next[editingActionIndex] = newAction;
+    else next.push(newAction);
+    // Keep the editable draft until persistence succeeds; prevent duplicate submissions.
+    customActionSaveBtn.disabled = true;
+    settingsBackBtn.disabled = true;
+    customActionSaveBtn.textContent = 'Saving...';
+    customActionFormContainer.inert = true;
+    try {
+        const result = await saveCustomActions(next);
+        if (result.success) { customActionFormContainer.inert = false; renderCustomActions(); hideCustomActionForm(); showSavedToast(); }
+        else {
+            actionSequenceWarning.textContent = result.error;
+            actionSequenceWarning.style.display = 'block';
+        }
+    } finally {
+        customActionFormContainer.inert = false;
+        settingsBackBtn.disabled = false;
+        customActionSaveBtn.disabled = false;
+        customActionSaveBtn.textContent = 'Save';
     }
-    saveCustomActions();
-    renderCustomActions();
-    hideCustomActionForm();
-    showSavedToast();
 }
 
-function saveCustomActions() {
-    ipcRenderer.invoke('set-custom-actions', customActions);
+let savingCustomActions = false;
+async function saveCustomActions(next = customActions) {
+    if (savingCustomActions) return { success: false, error: 'Wait for the current action to finish saving, then try again.' };
+    savingCustomActions = true; customActionsList.inert = true; addCustomActionBtn.disabled = true;
+    try {
+        const result = await ipcRenderer.invoke('set-custom-actions', next).catch(() => ({
+            success: false, error: 'Could not save this action. Your draft is still here; try again.'
+        }));
+        if (result.success) { customActions = next; settingSaveErrors.delete('customActions'); }
+        else settingSaveErrors.set('customActions', result.error);
+        if (result.success && !settingSaveErrors.size) document.getElementById('settings-save-error').hidden = true;
+        return result;
+    } finally { savingCustomActions = false; customActionsList.inert = false; addCustomActionBtn.disabled = false; }
 }
 
 let savedToastTimer = null;
+const settingSaveVersions = new Map();
+const settingSaveErrors = new Map();
+let pendingSettingSaves = 0;
 
-function showSavedToast() {
+function showSavedToast(text = 'Saved', persistent = false) {
+    if (text === 'Saved' && settingSaveErrors.size) { text = 'Not saved'; persistent = true; }
     const toast = document.getElementById('settings-saved-toast');
     if (!toast) return;
+    toast.textContent = text;
     toast.classList.add('visible');
-    if (savedToastTimer) clearTimeout(savedToastTimer);
-    savedToastTimer = setTimeout(() => {
-        toast.classList.remove('visible');
-        savedToastTimer = null;
-    }, 1200);
+    clearTimeout(savedToastTimer);
+    if (!persistent) savedToastTimer = setTimeout(() => toast.classList.remove('visible'), 1600);
 }
+
+function showSettingsError(message) {
+    const feedback = document.getElementById('settings-save-error');
+    feedback.textContent = message;
+    feedback.hidden = false;
+    showSavedToast('Not saved', true);
+}
+
+async function saveSettingsPatch(patch) {
+    const versions = Object.keys(patch).map(key => {
+        const version = (settingSaveVersions.get(key) || 0) + 1;
+        settingSaveVersions.set(key, version);
+        return [key, version];
+    });
+    pendingSettingSaves++;
+    showSavedToast('Saving...', true);
+    const result = await ipcRenderer.invoke('set-settings', patch).catch(() => ({ success: false,
+        error: 'Could not save your change. Try again.' }));
+    for (const [key, version] of versions) if (settingSaveVersions.get(key) === version) {
+        if (result.success) settingSaveErrors.delete(key);
+        else settingSaveErrors.set(key, result.error);
+    }
+    pendingSettingSaves--;
+    const error = settingSaveErrors.values().next().value;
+    if (error) showSettingsError(error);
+    else if (!pendingSettingSaves) { document.getElementById('settings-save-error').hidden = true; showSavedToast(); }
+    return result;
+}
+
+function saveSetting(key, value) { return saveSettingsPatch({ [key]: value }); }
 
 function applyThemeColor(color) {
     themeColor = color;
@@ -2419,61 +2476,51 @@ function onThemeColorChanged(event) {
     themeColor = event.target.value;
     useAccentToggle.checked = false;
     useWindowsAccent = false;
-    ipcRenderer.send('set-setting', { key: 'useWindowsAccent', value: false });
     applyThemeColor(themeColor);
-    ipcRenderer.send('set-setting', { key: 'themeColor', value: themeColor });
-    showSavedToast();
+    saveSettingsPatch({ useWindowsAccent: false, themeColor });
 }
 
 function onPitchChanged(event) {
     pitch = parseFloat(event.target.value);
-    ipcRenderer.send('set-setting', { key: 'pitch', value: pitch });
-    showSavedToast();
+    saveSetting('pitch', pitch);
 }
 
 function onRateChanged(event) {
     rate = parseFloat(event.target.value);
-    ipcRenderer.send('set-setting', { key: 'rate', value: rate });
-    showSavedToast();
+    saveSetting('rate', rate);
 }
 
 function onResetVoiceSettings() {
     ttsEngine = 'system';
     ttsEngineSelect.value = 'system';
-    ipcRenderer.send('set-setting', { key: 'ttsEngine', value: 'system' });
+
 
     edgeVoice = 'en-US-JennyNeural';
     edgeVoiceSelect.value = edgeVoice;
-    ipcRenderer.send('set-setting', { key: 'edgeVoice', value: edgeVoice });
+
     updateTtsEngineUI();
 
     const defaultVoice = findDefaultVoice(availableVoices);
-    
+
     if (defaultVoice) {
         preferredVoiceName = defaultVoice.name;
         voiceSelect.value = preferredVoiceName;
         currentVoice = defaultVoice;
-        ipcRenderer.send('set-setting', { key: 'preferredVoice', value: preferredVoiceName });
+
     }
 
     pitch = 1;
     rate = 1;
     pitchSlider.value = pitch;
     rateSlider.value = rate;
-    ipcRenderer.send('set-setting', { key: 'pitch', value: pitch });
-    ipcRenderer.send('set-setting', { key: 'rate', value: rate });
-    showSavedToast();
+    saveSettingsPatch({ ttsEngine, edgeVoice, preferredVoice: preferredVoiceName, pitch, rate });
 }
 
 function onResetReminderSound() {
     if (reminderSoundSettingInput) {
         reminderSoundSettingInput.value = "notify.wav";
         reminderSound = "notify.wav";
-        ipcRenderer.send('set-setting', { 
-            key: 'reminderSound', 
-            value: "notify.wav" 
-        });
-        showSavedToast();
+        saveSetting('reminderSound', "notify.wav");
     }
 }
 
@@ -2481,30 +2528,26 @@ function onResetThemeColors() {
     useAccentToggle.checked = false;
     useWindowsAccent = false;
     themeColorPicker.disabled = false;
-    ipcRenderer.send('set-setting', { key: 'useWindowsAccent', value: false });
 
     const defaultColor = '#0078d7';
     suppressThemeInput = true;
     themeColorPicker.value = defaultColor;
     suppressThemeInput = false;
     applyThemeColor(defaultColor);
-    ipcRenderer.send('set-setting', { key: 'themeColor', value: defaultColor });
-
-    showSavedToast();
+    saveSettingsPatch({ useWindowsAccent: false, themeColor: defaultColor });
 }
 
-function onResetAllSettings() {
+async function onResetAllSettings() {
     const confirmation = confirm(
-        "Are you sure you want to reset EVERYTHING?\n\n" +
-        "This will erase all your custom settings, reminders, and custom actions. " +
-        "The application will restart. This action cannot be undone."
+        'Reset settings, reminders and custom actions?\n\n' +
+        'This restores settings to their defaults (including Start with Windows), removes all reminders and custom actions, and restarts Cortana. Running timers will stop.\n\n' +
+        'Your Notebook data and installed Windows voices will be kept. This cannot be undone.'
     );
-
-    if (confirmation) {
-        ipcRenderer.send('reset-all-settings');
-    }
+    if (!confirmation) return;
+    resetAllBtn.disabled = true;
+    const result = await ipcRenderer.invoke('reset-all-settings').catch(() => ({ success: false, error: 'Could not complete the reset. Try again.' }));
+    if (!result.success) { showSettingsError(result.error); resetAllBtn.disabled = false; }
 }
-
 
 async function refreshEvaVoiceStatus() {
     if (!evaVoiceContainer || !evaVoiceStatus) return;
@@ -2519,7 +2562,7 @@ async function refreshEvaVoiceStatus() {
     if (status.installed) {
         evaVoiceStatus.textContent = 'Installed (Microsoft Eva Mobile). A restart may be needed before it appears in the voice list.';
     } else {
-        evaVoiceStatus.textContent = 'Not installed. Installs Cortana\u2019s original Eva voice for local (offline) speech.';
+        evaVoiceStatus.textContent = 'Not installed. The download provides Eva for spoken replies, not speech recognition.';
     }
     installEvaVoiceBtn.hidden = status.installed;
 }
@@ -2527,29 +2570,31 @@ async function refreshEvaVoiceStatus() {
 function onInstallEvaVoice() {
     if (!installEvaVoiceBtn || !evaVoiceStatus) return;
     ipcRenderer.send('install-eva-voice');
-    evaVoiceStatus.textContent = 'Opening Eva TTS download page...';
+    evaVoiceStatus.textContent = 'Opening the Eva voice download page...';
     evaVoiceStatus.style.color = '#a2a2a2';
     evaVoiceStatus.style.display = 'block';
-    setTimeout(() => { evaVoiceStatus.textContent = ''; }, 3000);
+    setTimeout(refreshEvaVoiceStatus, 3000);
 }
 
 function onVoiceChanged() {
     const selectedVoiceName = voiceSelect.value;
     preferredVoiceName = selectedVoiceName;
     currentVoice = availableVoices.find(v => v.name === selectedVoiceName) || null;
-    ipcRenderer.send('set-setting', { key: 'preferredVoice', value: selectedVoiceName });
-    showSavedToast();
+    saveSetting('preferredVoice', selectedVoiceName);
 }
 
+let startupChangeRevision = 0;
 async function onStartupToggleChanged() {
+    ++startupChangeRevision;
     const isEnabled = startupToggle.checked;
     startupToggle.disabled = true;
     try {
         const result = await ipcRenderer.invoke('set-startup', isEnabled);
-        startupToggle.checked = result.enabled;
-        startupWarning.textContent = result.error || result.message || 'Reminders may not work as expected until Cortana is launched manually.';
+        startupToggle.checked = typeof result.enabled === 'boolean' ? result.enabled : !isEnabled;
+        startupWarning.textContent = result.error || result.message || 'Open Cortana yourself to receive reminders when startup is off.';
         startupWarning.style.display = result.enabled && !result.error ? 'none' : 'block';
-        if (result.supported && !result.error && result.enabled === isEnabled) showSavedToast();
+        if (result.supported && !result.error && result.enabled === isEnabled)
+            showSavedToast();
         startupToggle.disabled = result.supported === false;
     } catch (_) {
         startupToggle.checked = !isEnabled;
@@ -2561,14 +2606,12 @@ async function onStartupToggleChanged() {
 
 function onMovableToggleChanged() {
     const isEnabled = movableToggle.checked;
-    ipcRenderer.send('set-setting', { key: 'isMovable', value: isEnabled });
-    showSavedToast();
+    saveSetting('isMovable', isEnabled);
 }
 
 function onSearchEngineChanged() {
     currentSearchEngine = searchEngineSelect.value;
-    ipcRenderer.send('set-setting', { key: 'searchEngine', value: currentSearchEngine });
-    showSavedToast();
+    saveSetting('searchEngine', currentSearchEngine);
 }
 
 function updateTtsEngineUI() {
@@ -2594,24 +2637,21 @@ async function loadEdgeVoices() {
 
 async function onTtsEngineChanged() {
     ttsEngine = ttsEngineSelect.value;
-    ipcRenderer.send('set-setting', { key: 'ttsEngine', value: ttsEngine });
+    saveSetting('ttsEngine', ttsEngine);
     updateTtsEngineUI();
     if (ttsEngine === 'edge') {
         await loadEdgeVoices();
     }
-    showSavedToast();
 }
 
 function onEdgeVoiceChanged() {
     edgeVoice = edgeVoiceSelect.value;
-    ipcRenderer.send('set-setting', { key: 'edgeVoice', value: edgeVoice });
-    showSavedToast();
+    saveSetting('edgeVoice', edgeVoice);
 }
 
 function onTimeFormatChanged() {
     timeFormat = timeFormatSelect.value;
-    ipcRenderer.send('set-setting', { key: 'timeFormat', value: timeFormat });
-    showSavedToast();
+    saveSetting('timeFormat', timeFormat);
 }
 
 function formatTimeOptions() {
@@ -2628,9 +2668,8 @@ function formatReminderListOptions() {
 
 function onAIChanged() {
     aiEnabled = aiToggle.checked;
-    ipcRenderer.send('set-setting', { key: 'aiEnabled', value: aiEnabled });
+    saveSetting('aiEnabled', aiEnabled);
     updateAIUI();
-    showSavedToast();
 }
 
 const AI_PRESETS = {
@@ -2649,11 +2688,11 @@ const AI_PRESETS = {
 
 function onPresetChanged() {
     const val = aiPresetSelect.value;
-    ipcRenderer.send('set-setting', { key: 'aiProvider', value: val });
+    const patch = { aiProvider: val };
 
     if (val === 'custom') {
+        saveSettingsPatch(patch);
         updateAIProviderUI(val);
-        showSavedToast();
         return;
     }
 
@@ -2662,13 +2701,13 @@ function onPresetChanged() {
         aiApiUrlInput.value = preset.url;
         aiApiUrl = preset.url;
         aiModelInput.value = preset.model || aiModelInput.value;
-        ipcRenderer.send('set-setting', { key: 'aiApiUrl', value: preset.url });
+        patch.aiApiUrl = preset.url;
         if (aiModelInput.value) {
-            ipcRenderer.send('set-setting', { key: 'aiModel', value: aiModelInput.value });
+            patch.aiModel = aiModelInput.value;
         }
     }
+    saveSettingsPatch(patch);
     updateAIProviderUI(val);
-    showSavedToast();
 }
 
 function updateAIProviderUI(provider) {
@@ -2676,8 +2715,8 @@ function updateAIProviderUI(provider) {
     const isCustom = provider === 'custom';
     const showLocalOrCustom = isCustom || preset?.local;
 
-    aiCustomFields.style.display = isCustom ? 'block' : 'none';
-    aiModelItem.style.display = showLocalOrCustom ? '' : 'none';
+    aiCustomFields.style.display = provider ? 'block' : 'none';
+    aiModelItem.style.display = provider ? '' : 'none';
     aiApiUrlItem.style.display = showLocalOrCustom ? '' : 'none';
 
     openaiApiKeyInput.placeholder =
@@ -2686,24 +2725,20 @@ function updateAIProviderUI(provider) {
 }
 
 function onOpenAIKeyChanged() {
-    ipcRenderer.send('set-setting', { key: 'openaiApiKey', value: openaiApiKeyInput.value });
-    showSavedToast();
+    saveSetting('openaiApiKey', openaiApiKeyInput.value);
 }
 
 function onAIModelChanged() {
-    ipcRenderer.send('set-setting', { key: 'aiModel', value: aiModelInput.value });
-    showSavedToast();
+    saveSetting('aiModel', aiModelInput.value);
 }
 
 function onAIApiUrlChanged() {
     aiApiUrl = aiApiUrlInput.value;
-    ipcRenderer.send('set-setting', { key: 'aiApiUrl', value: aiApiUrlInput.value });
-    showSavedToast();
+    saveSetting('aiApiUrl', aiApiUrlInput.value);
 }
 
 function onAISystemPromptChanged() {
-    ipcRenderer.send('set-setting', { key: 'aiSystemPrompt', value: aiSystemPromptInput.value });
-    showSavedToast();
+    saveSetting('aiSystemPrompt', aiSystemPromptInput.value);
 }
 
 function updateAIUI() {
@@ -2712,21 +2747,18 @@ function updateAIUI() {
 
 function onIdleGreetingModeChanged(event) {
     idleGreetingMode = event.target.value;
-    ipcRenderer.send('set-setting', { key: 'idleGreetingMode', value: idleGreetingMode });
+    saveSetting('idleGreetingMode', idleGreetingMode);
     updateGreetingUI();
-    showSavedToast();
 }
 
 function onSpecificIdleGreetingChanged(event) {
     specificIdleGreeting = event.target.value;
-    ipcRenderer.send('set-setting', { key: 'specificIdleGreeting', value: specificIdleGreeting });
-    showSavedToast();
+    saveSetting('specificIdleGreeting', specificIdleGreeting);
 }
 
 function onCustomIdleGreetingChanged(event) {
     customIdleGreeting = event.target.value;
-    ipcRenderer.send('set-setting', { key: 'customIdleGreeting', value: customIdleGreeting });
-    showSavedToast();
+    saveSetting('customIdleGreeting', customIdleGreeting);
 }
 
 function displayAndSpeak(text, callback, options = {}, isError = false) {
@@ -2803,7 +2835,7 @@ function setupTTS() {
         const regularZira = availableVoices.find(v => /zira/i.test(v.name) && !/desktop/i.test(v.name));
         if (!preferredVoiceIsAvailable && regularZira && /^Microsoft Zira(?: Desktop)?$/i.test(preferredVoiceName)) {
             preferredVoiceName = regularZira.name;
-            ipcRenderer.send('set-setting', { key: 'preferredVoice', value: preferredVoiceName });
+            saveSetting('preferredVoice', preferredVoiceName);
         }
 
         if (availableVoices.some(v => v.name === preferredVoiceName)) {
@@ -2924,6 +2956,7 @@ function onActionFinished() {
 }
 
 function setStateIdle() {
+    ++assistantRequestGeneration;
     searchIcon.src = cortanaIcon;
     if (settingsContainer.classList.contains('visible')) return;
     if (animationContainer.className === 'idle' && document.activeElement === searchBar &&
@@ -3031,7 +3064,9 @@ async function performWebSearch(query) {
     clearSearchBar();
     searchBar.placeholder = 'Type here to search';
 
-    const result = await ipcRenderer.invoke('search-web', query);
+    let result;
+    try { result = await ipcRenderer.invoke('search-web', query); }
+    catch (_) { result = { success: false }; }
     if (!searchResultsActive) return;
 
     resultsDisplay.innerHTML = '';
@@ -3076,8 +3111,9 @@ async function performWebSearch(query) {
     } else {
         const p = document.createElement('p');
         p.className = 'fade-in-item';
-        p.textContent = 'No results found. Try a different spelling or search term.';
+        p.textContent = result.success ? 'No results found. Try a different spelling or search term.' : "I couldn't load web results. Check your connection, try again, or open the search in your browser.";
         resultsDisplay.appendChild(p);
+        showWebLink();
         anim.goToState(AnimationState.SPEAKING_BEGIN);
         setTimeout(() => {
             isBusy = false;
@@ -3464,9 +3500,11 @@ function updateSaveButtonState() {
 }
 
 function showReminderUI(options = {}) {
+    ++reminderFormRevision;
     const { initialText = '', initialTime = '', initialSound = '', id = null } = options;
     editingReminderId = id;
     editingReminderSound = initialSound;
+    document.getElementById('reminder-save-error').hidden = true;
 
     animationContainer.style.display = 'block';
     contentWrapper.style.display = 'none';
@@ -3698,78 +3736,56 @@ function formatDateTimeForInput(date) {
     return `${year}-${month}-${day}T${hours}:${minutes}`;
 }
 
+let savingReminder = false;
+let reminderFormRevision = 0;
+async function deleteReminder(id, button, status) {
+    button.disabled = true; status.hidden = true;
+    try {
+        const result = await ipcRenderer.invoke('remove-reminder', id);
+        if (!result.success) { status.textContent = result.error; status.hidden = false; }
+        return result.success;
+    } catch (_) { status.textContent = 'Could not delete this reminder. It is still scheduled; try again.'; status.hidden = false; return false; }
+    finally { button.disabled = false; }
+}
 async function onSaveReminder() {
+    if (savingReminder) return;
+    const formRevision = reminderFormRevision;
     const reminder = reminderTextInput.value.trim();
-    const timeValue = reminderTimeInput.value;
-
-    let soundValue;
-    if (editingReminderId && editingReminderSound) {
-        soundValue = editingReminderSound;
-    } else {
-        soundValue = reminderSoundSettingInput.value || "notify.wav";
+    const reminderDate = new Date(reminderTimeInput.value);
+    const status = document.getElementById('reminder-save-error');
+    const showError = message => { status.textContent = message; status.hidden = false; };
+    if (!reminder || !Number.isFinite(reminderDate.getTime())) {
+        showError('Enter a reminder and a valid date and time.'); return;
     }
-
-    const closeReminderForm = () => {
-        editingReminderId = null;
-        editingReminderSound = null;
-        reminderContainer.classList.remove('visible');
-        animationContainer.style.display = 'block';
-        contentWrapper.style.display = 'block';
-        searchBar.disabled = false;
-        searchBar.placeholder = 'Type here to search';
-        clearSearchBar();
-    };
-
-    if (!reminder || !timeValue) {
-        closeReminderForm();
-        setStateActive();
-        displayAndSpeak("Please enter both a reminder and a valid time.", onActionFinished, {}, true);
-        return;
+    if (reminderDate.getTime() <= Date.now()) {
+        showError('Choose a time in the future.'); reminderTimeInput.focus(); return;
     }
-
-    const reminderDate = new Date(timeValue);
-    const reminderPayload = {
-        reminder,
-        reminderTime: reminderDate.toISOString(),
-        sound: soundValue
-    };
-
     const wasEditing = !!editingReminderId;
-
-    anim.goToState(AnimationState.THINKING);
+    const reminderPayload = { reminder, reminderTime: reminderDate.toISOString(),
+        sound: editingReminderSound || reminderSoundSettingInput.value || 'notify.wav' };
+    savingReminder = true; reminderSaveBtn.disabled = true; reminderSaveBtn.textContent = 'Saving...';
+    reminderCancelBtn.disabled = true; reminderTextInput.disabled = true; reminderTimeInput.disabled = true; status.hidden = true;
     let result;
     try {
-        if (editingReminderId) {
-            result = await ipcRenderer.invoke('update-reminder', { id: editingReminderId, ...reminderPayload });
-        } else {
-            result = await ipcRenderer.invoke('set-reminder', reminderPayload);
-        }
-    } catch (error) {
-        console.error('Failed to save reminder:', error);
-        result = { success: false, error: null };
+        result = await ipcRenderer.invoke(wasEditing ? 'update-reminder' : 'set-reminder',
+            wasEditing ? { id: editingReminderId, ...reminderPayload } : reminderPayload);
+    } catch (_) { result = { success: false, error: 'Could not save this reminder. Your draft is still here; try again.' }; }
+    finally {
+        savingReminder = false; reminderSaveBtn.textContent = 'Save';
+        reminderCancelBtn.disabled = false; reminderTextInput.disabled = false; reminderTimeInput.disabled = false;
+        updateSaveButtonState();
     }
-
-    if (!result.success) {
-        closeReminderForm();
-        setStateActive();
-        displayAndSpeak(result.error || 'The reminder could not be saved.', onActionFinished, {}, true);
-        return;
-    }
-
-    closeReminderForm();
-    setStateActive();
-
-    let text;
-    if (wasEditing) {
-        text = "Done. I've updated your reminder.";
-    } else {
-        const friendlyTime = reminderDate.toLocaleString([], formatDateTimeOptions());
-        text = `OK. I'll remind you to "${reminder}" on ${friendlyTime}.`;
-    }
-
+    if (formRevision !== reminderFormRevision) return;
+    if (!result.success) { showError(result.error || 'Could not save this reminder. Your draft is still here; try again.'); return; }
+    // Navigation during the write must not reopen a form or interrupt another page.
+    if (!reminderContainer.classList.contains('visible')) return;
+    editingReminderId = null; editingReminderSound = null;
+    reminderContainer.classList.remove('visible'); animationContainer.style.display = 'block'; contentWrapper.style.display = 'block';
+    searchBar.disabled = false; searchBar.placeholder = 'Type here to search'; clearSearchBar(); setStateActive();
+    const text = wasEditing ? "Done. I've updated your reminder." :
+        `OK. I'll remind you to "${reminder}" on ${reminderDate.toLocaleString([], formatDateTimeOptions())}.`;
     displayAndSpeak(text, onActionFinished, {}, false);
 }
-
 
 async function handleOpenApplication(appName, silent = false) {
     // Handle special Windows commands
@@ -3919,11 +3935,9 @@ async function showReminders() {
             const deleteBtn = document.createElement('button');
             deleteBtn.textContent = 'Delete';
             deleteBtn.className = 'reminder-action-btn delete';
-            deleteBtn.onclick = () => {
-                ipcRenderer.send('remove-reminder', reminder.id);
-                item.style.animation = 'fadeOut 0.3s forwards';
-                setTimeout(() => showReminders(), 300);
-            };
+            deleteBtn.setAttribute('aria-label', 'Delete ' + reminder.text);
+            const deletionStatus = document.createElement('p'); deletionStatus.setAttribute('role','status'); deletionStatus.hidden = true; item.appendChild(deletionStatus);
+            deleteBtn.onclick = async () => { if (await deleteReminder(reminder.id, deleteBtn, deletionStatus)) await showReminders(); };
 
             actions.appendChild(editBtn);
             actions.appendChild(deleteBtn);
@@ -4176,7 +4190,7 @@ const commands = [
     {
         regex: /what can you do|what are your skills|help|what can i ask you\??/i,
         handler: () => {
-            const response = "I can help with your day. I can tell you the time, date, and weather; do math and unit conversions; set reminders, timers, and alarms; control volume; open apps; create calendar events; look things up; tell jokes; and search the web.";
+            const response = "I can help with your day. I can tell you the time, date, and weather; do math and unit conversions; set reminders, timers, and alarms; control volume; open apps; prepare calendar events; look things up; tell jokes; and search the web.";
             displayAndSpeak(response, onActionFinished, {}, false);
         }
     },
@@ -4428,9 +4442,9 @@ const commands = [
             ipcRenderer.invoke('create-calendar-event', { title, dateTime: parsedDate.toISOString() }).then(result => {
                 if (result.success) {
                     const friendlyTime = parsedDate.toLocaleString([], formatDateTimeOptions());
-                    displayAndSpeak(`Added "${title}" to your calendar for ${friendlyTime}.`, onActionFinished, {}, false);
+                    displayAndSpeak(`I've opened "${title}" for ${friendlyTime} in your calendar app. Save it there to add it to your calendar.`, onActionFinished, {}, false);
                 } else {
-                    displayAndSpeak("Sorry, I couldn't create that calendar event.", onActionFinished, {}, true);
+                    displayAndSpeak(result.error || "I couldn't prepare that calendar event. Try again.", onActionFinished, {}, true);
                 }
             });
         }
@@ -4708,7 +4722,9 @@ function formatUnitLabel(rawResult, unit) {
     return pluralMap[unit] || `${unit}s`;
 }
 
+let assistantRequestGeneration = 0;
 function processQuery(query) {
+    ++assistantRequestGeneration;
     webLinkContainer.style.display = 'none';
     webLinkContainer.style.opacity = '0';
     resultsDisplay.innerHTML = '';
@@ -4750,19 +4766,22 @@ function processQuery(query) {
         p.className = 'fade-in-item';
         p.textContent = 'Thinking...';
         resultsDisplay.appendChild(p);
-        ipcRenderer.invoke('ask-openai', query).then(result => {
-            if (result.success) {
-                displayAndSpeak(result.text, onActionFinished, {}, false);
-            } else {
-                displayAndSpeak(result.error || "Sorry, I couldn't get an answer from AI.", onActionFinished, {}, true);
-            }
-        }).catch(() => {
-            displayAndSpeak("Sorry, I couldn't get an answer from AI.", onActionFinished, {}, true);
-        });
+        requestAIAnswer(query);
         return;
     }
 
     performWebSearch(query);
+}
+
+function requestAIAnswer(query) {
+    const generation = ++assistantRequestGeneration;
+    return ipcRenderer.invoke('ask-openai', query).then(result => {
+        if (generation !== assistantRequestGeneration) return;
+        displayAndSpeak(result.success ? result.text : result.error || "I couldn't get an answer from your AI provider. Try again.", onActionFinished, {}, !result.success);
+    }).catch(() => {
+        if (generation !== assistantRequestGeneration) return;
+        displayAndSpeak("I couldn't get an answer from your AI provider. Try again.", onActionFinished, {}, true);
+    });
 }
 
 function onSearch() {
@@ -4786,7 +4805,9 @@ function onSearch() {
 }
 
 async function executeActionSequence(actions) {
+    const generation = assistantRequestGeneration;
     for (const action of actions) {
+        if (generation !== assistantRequestGeneration) return;
         // Validate action has required fields
         if (!action || !action.type || !action.value) {
             console.warn('Skipping invalid action:', action);
@@ -4800,12 +4821,10 @@ async function executeActionSequence(actions) {
                     });
                     break;
                 case 'open_app':
-                    ipcRenderer.send('open-path', action.value);
-                    await new Promise(resolve => setTimeout(resolve, 500));
+                    if (!(await ipcRenderer.invoke('open-action-path', action.value)).success) throw new Error('Could not open action path');
                     break;
                 case 'open_url':
-                    ipcRenderer.send('open-external-link', action.value);
-                    await new Promise(resolve => setTimeout(resolve, 500));
+                    if (!(await ipcRenderer.invoke('open-action-url', action.value)).success) throw new Error('Could not open action website');
                     break;
                 case 'play_sound':
                     await new Promise((resolve, reject) => {
@@ -4826,18 +4845,21 @@ async function executeActionSequence(actions) {
                     });
                     break;
                 case 'run_command':
-                    ipcRenderer.send('run-command', action.value);
-                    await new Promise(resolve => setTimeout(resolve, 500));
+                    if (!(await ipcRenderer.invoke('run-action-command', action.value)).success) throw new Error('Could not run action command');
                     break;
             }
         } catch (error) {
+            if (generation !== assistantRequestGeneration) return;
             console.error(`Error executing action ${action.type}:`, error);
-            displayAndSpeak(`Sorry, I had a problem with the action: ${action.type}.`, onActionFinished, {}, true);
+            displayAndSpeak("I couldn't finish step " + (actions.indexOf(action) + 1) + ': ' + (actionNames[action.type] || 'the action') + '. Check this action in Settings.', onActionFinished, {}, true);
             return;
         }
     }
+    if (generation !== assistantRequestGeneration) return;
     onActionFinished();
 }
+
+const actionNames = { speak: 'Say something', open_app: 'Open an app or file', open_url: 'Open a website', play_sound: 'Play a sound', run_command: 'Run a command' };
 
 function renderActionSequenceUI(actions) {
     actionSequenceList.innerHTML = '';
@@ -4868,7 +4890,8 @@ function createActionItemUI(action, index, isLastItem) {
     
     if (index > 0) {
         const upBtn = document.createElement('button');
-        upBtn.innerHTML = '&#xE70E;'; 
+        upBtn.innerHTML = '&#xE70E;';
+        upBtn.setAttribute('aria-label', 'Move step ' + (index + 1) + ' up');
         upBtn.onclick = () => moveAction(index, -1);
         controls.appendChild(upBtn);
     }
@@ -4876,12 +4899,14 @@ function createActionItemUI(action, index, isLastItem) {
     if (!isLastItem) {
         const downBtn = document.createElement('button');
         downBtn.innerHTML = '&#xE70D;';
+        downBtn.setAttribute('aria-label', 'Move step ' + (index + 1) + ' down');
         downBtn.onclick = () => moveAction(index, 1);
         controls.appendChild(downBtn);
     }
 
     const deleteBtn = document.createElement('button');
     deleteBtn.innerHTML = '&#xE74D;';
+    deleteBtn.setAttribute('aria-label', 'Delete step ' + (index + 1));
     deleteBtn.className = 'delete';
     deleteBtn.onclick = () => removeAction(index);
     controls.appendChild(deleteBtn);
@@ -4895,11 +4920,7 @@ function createActionItemUI(action, index, isLastItem) {
     const typeSelect = document.createElement('select');
     typeSelect.className = 'action-item-type-select';
     const types = {
-        'speak': 'Speak Text',
-        'open_app': 'Open App',
-        'open_url': 'Open URL',
-        'play_sound': 'Play Sound',
-        'run_command': 'Run Command'
+        ...actionNames
     };
 
     if (index > 0) {
@@ -4922,7 +4943,9 @@ function createActionItemUI(action, index, isLastItem) {
     valueInput.type = 'text';
     valueInput.className = 'action-item-value-input';
     valueInput.value = action.value || '';
-    valueInput.placeholder = 'Enter value...';
+    valueInput.placeholder = ({ speak: 'What should Cortana say?', open_app: 'Choose an app or file...', open_url: 'https://example.com', play_sound: 'Choose a sound file...', run_command: 'Command to run' })[action.type];
+    valueInput.setAttribute('aria-label', 'Step ' + (index + 1) + ': ' + actionNames[action.type]);
+    typeSelect.setAttribute('aria-label', 'Action for step ' + (index + 1));
     valueInput.oninput = validateAndApplyActionFormState;
 
     body.appendChild(typeSelect);
@@ -4931,6 +4954,7 @@ function createActionItemUI(action, index, isLastItem) {
     if (action.type === 'open_app' || action.type === 'play_sound') {
         const browseBtn = document.createElement('button');
         browseBtn.textContent = '...';
+        browseBtn.setAttribute('aria-label', 'Browse for ' + (action.type === 'play_sound' ? 'a sound' : 'an app or file') + ' for step ' + (index + 1));
         browseBtn.className = 'action-item-browse-btn';
         browseBtn.onclick = async () => {
             let filters = [];
@@ -5078,12 +5102,13 @@ function validateAndApplyActionFormState() {
     const speakActionIndex = actions.findIndex(a => a.type === 'speak');
     if (speakActionIndex > 0) {
         isValid = false;
-        warningMessage = 'The "Speak Text" action can only be the first step.';
+        warningMessage = '"Say something" can only be the first step.';
     }
 
+    if (!actions.length) { isValid = false; warningMessage = 'Add a step for Cortana to carry out.'; }
     if (actions.some(a => !a.value.trim())) {
         isValid = false;
-        if (!warningMessage) warningMessage = 'All action steps must have a value.';
+        if (!warningMessage) warningMessage = 'Fill in each step before saving.';
     }
 
     if (!triggerText) {
@@ -5189,9 +5214,15 @@ async function persistNotebook() {
     status.textContent = 'Saving...';
     try {
         const result = await ipcRenderer.invoke('save-notebook', notebookData);
-        if (generation === notebookSaveGeneration) status.textContent = result.success ? 'Saved on this computer' : result.error;
+        if (generation === notebookSaveGeneration) {
+            status.textContent = result.success ? 'Saved on this computer' : result.error;
+            if (result.success) {
+                settingSaveErrors.delete('weatherCity');
+                if (!settingSaveErrors.size) document.getElementById('settings-save-error').hidden = true;
+            }
+        }
         return result.success;
-    } catch (_) { status.textContent = 'Could not save. Your changes are still here; try again.'; return false; }
+    } catch (_) { if (generation === notebookSaveGeneration) status.textContent = 'Could not save. Your changes are still here; try again.'; return false; }
 }
 function renderTodos() {
     const list = document.getElementById('todo-list');
@@ -5219,16 +5250,21 @@ async function renderNotebookReminders() {
         if (!reminders.length) { const text = document.createElement('p'); text.textContent = 'No upcoming reminders.'; list.appendChild(text); }
         for (const reminder of reminders) {
             const row = document.createElement('div'); row.className = 'notebook-reminder';
-            const text = document.createElement('span'); text.textContent = `${reminder.text} — ${new Date(reminder.time).toLocaleString()}`;
+            const text = document.createElement('span'); text.textContent = `${reminder.text} — ${new Date(reminder.time).toLocaleString([], formatDateTimeOptions())}`;
             const edit = document.createElement('button'); edit.className = 'notebook-delete'; edit.textContent = 'Edit';
             edit.onclick = () => { closeNotebook(); showReminderUI({ id: reminder.id, initialText: reminder.text, initialTime: formatDateTimeForInput(new Date(reminder.time)), initialSound: reminder.sound }); };
             const remove = document.createElement('button'); remove.className = 'notebook-delete'; remove.textContent = 'Delete';
-            remove.onclick = async () => { ipcRenderer.send('remove-reminder', reminder.id); await renderNotebookReminders(); };
+            remove.setAttribute('aria-label', 'Delete ' + reminder.text);
+            remove.onclick = async () => {
+                const status = document.getElementById('notebook-reminder-error');
+                if (await deleteReminder(reminder.id, remove, status)) { await renderNotebookReminders(); document.getElementById('notebook-add-reminder').focus(); }
+            };
             row.append(text, edit, remove); list.appendChild(row);
         }
     } catch (_) { list.textContent = 'Reminders could not be loaded. Try opening this page again.'; }
 }
 function openNotebook(page = 'overview') {
+    ++assistantRequestGeneration; searchResultsActive = false;
     _stopSpeechFromOutside?.();
     cancelSpeechOutput();
     hideSearchPanel();
@@ -5275,6 +5311,7 @@ async function setupNotebookAndSystemControls() {
     document.getElementById('navigation-toggle').onclick = () => {
         const expanded = document.getElementById('cortana-navigation').classList.toggle('expanded');
         document.getElementById('navigation-toggle').setAttribute('aria-expanded', String(expanded));
+        document.getElementById('navigation-toggle').setAttribute('aria-label', expanded ? 'Collapse navigation' : 'Expand navigation');
     };
     document.getElementById('navigation-home').onclick = () => { closeNotebook(); closeSettings(); setNavigationPage('home'); };
     document.getElementById('navigation-about').onclick = () => openNotebook('about');
@@ -5296,10 +5333,22 @@ async function setupNotebookAndSystemControls() {
         const input = document.getElementById(id); input.value = notebookData.profile[key];
         input.oninput = () => { notebookData.profile[key] = input.value; persistNotebook(); };
     }
+    const weatherCityInput = document.getElementById('weather-city-input');
+    weatherCityInput.value = notebookData.profile.weatherCity;
+    weatherCityInput.onchange = async () => {
+        notebookData.profile.weatherCity = weatherCityInput.value.trim();
+        showSavedToast('Saving...');
+        if (await persistNotebook()) {
+            settingSaveErrors.delete('weatherCity');
+            if (!settingSaveErrors.size) document.getElementById('settings-save-error').hidden = true;
+            showSavedToast();
+        } else { const message = 'Could not save your weather city. Your entry is still here; try again.'; settingSaveErrors.set('weatherCity', message); showSettingsError(message); }
+    };
     document.getElementById('notebook-add-reminder').onclick = () => { closeNotebook(); showReminderUI(); };
     document.addEventListener('keydown', event => {
         const sidebar = document.getElementById('notebook-sidebar');
         if (event.key === 'Escape' && document.getElementById('cortana-navigation').classList.contains('expanded')) { event.preventDefault(); collapseNavigation(); return; }
+        if (settingsContainer.classList.contains('visible') && event.key === 'Escape') { event.preventDefault(); customActionFormContainer.classList.contains('visible') ? hideCustomActionForm() : closeSettings(); return; }
         if (sidebar.classList.contains('visible') && event.key === 'Escape') { event.preventDefault(); notebookPage === 'overview' ? closeNotebook() : selectNotebookPage(); }
         if (sidebar.classList.contains('visible') && event.key === 'Tab') {
             const controls = [...document.querySelectorAll('#cortana-navigation button, #notebook-sidebar button, #notebook-sidebar input, #notebook-sidebar textarea, #notebook-sidebar select')].filter(el => !el.disabled && el.getClientRects().length);
@@ -5310,12 +5359,19 @@ async function setupNotebookAndSystemControls() {
         if (['Enter', ' '].includes(event.key) && event.target.matches('[role="button"]')) { event.preventDefault(); event.target.click(); }
     });
     for (const [id, key] of [['close-to-tray-toggle', 'closeToTray'], ['hotkey-listen-toggle', 'hotkeyStartsListening']]) {
-        document.getElementById(id).onchange = event => { ipcRenderer.send('set-setting', { key, value: event.target.checked }); showSavedToast(); };
+        document.getElementById(id).onchange = event => { saveSetting(key, event.target.checked); };
     }
     document.getElementById('save-assistant-hotkey').onclick = async () => {
-        const value = document.getElementById('assistant-hotkey').value.trim();
-        const result = await ipcRenderer.invoke('set-assistant-hotkey', value);
-        document.getElementById('assistant-hotkey-status').textContent = result.success ? (value ? `Active: ${value}` : 'Shortcut disabled') : result.error;
+        const button = document.getElementById('save-assistant-hotkey');
+        const field = document.getElementById('assistant-hotkey');
+        const value = field.value.trim(); button.disabled = true;
+        try {
+            const result = await ipcRenderer.invoke('set-assistant-hotkey', value);
+            document.getElementById('assistant-hotkey-status').textContent = result.success
+                ? (result.accelerator ? 'Active: ' + formatShortcut(result.accelerator) : 'Shortcut disabled') : result.error;
+            if (result.success) { field.value = formatShortcut(result.accelerator); showSavedToast(); }
+        } catch (_) { document.getElementById('assistant-hotkey-status').textContent = 'Could not apply this shortcut. Try again.'; }
+        finally { button.disabled = false; }
     };
     document.getElementById('copy-speech-diagnostics').onclick = async () => {
         const data = await ipcRenderer.invoke('speech-diagnostics');
@@ -5323,13 +5379,11 @@ async function setupNotebookAndSystemControls() {
         document.getElementById('speech-diagnostics-status').textContent = 'Copied environment, speech stages and error codes. No API keys or recognized speech are included.';
     };
     document.getElementById('recognition-mode-select').onchange = event => {
-        ipcRenderer.send('set-setting', { key: 'recognitionMode', value: event.target.value });
-        showSavedToast();
+        saveSetting('recognitionMode', event.target.value);
     };
     document.getElementById('listening-sounds-toggle').onchange = event => {
         listeningSounds = event.target.checked;
-        ipcRenderer.send('set-setting', { key: 'listeningSounds', value: listeningSounds });
-        showSavedToast();
+        saveSetting('listeningSounds', listeningSounds);
     };
     // Chromium reports output/camera changes too. Only a changed input identity
     // should reset capture; debounce bursts from virtual audio endpoints.

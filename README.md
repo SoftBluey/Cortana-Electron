@@ -11,21 +11,29 @@ As a kid, my Nana got me into tech. What was one thing she let me do? Talk to Co
 ...
 So, I decided to try and work on bringing Cortana back, the way I remember.
 
+### Install Cortana
+
+Download the **Setup `.exe` installer** from the [latest release](https://github.com/SoftBluey/Cortana-Electron/releases/latest), run it, and open **Cortana Electron** from the Start Menu. You can also pin it to the taskbar.
+
+Enable **Start with Windows** in Settings to launch quietly in the tray. Turning it off in Windows Startup apps keeps it off when Cortana next opens.
+
+This checkout includes unreleased startup and interface fixes. The published installer is still 8.0.0; the fix for re-enabling startup after disabling it in Task Manager will be included in a future release.
+
 ### Features
 
 *   **Voice Search:** Use the microphone for voice commands, with an offline mode for built-in commands. Recognition may fail on affected Windows systems; see the known limitations below. Typed commands remain available.
 *   **"Hey Cortana" Wake Word:** Optional, off by default. Opens a slim UI ready for your voice command, even when the app is hidden. Subject to the same recognition limitations as voice search.
 *   **Edge Neural Text-to-Speech:** High-quality Microsoft Edge Neural voices for natural-sounding responses. System TTS (like Windows Zira) is also available as a fallback.
-*   **Embedded Web Search:** Search results are fetched and displayed right inside the app in a clean dark-themed list. No need to leave the conversation.
-*   **ChatGPT / AI Integration:** Connect to any OpenAI-compatible API for intelligent responses. Set your own API key, model, and system prompt.
+*   **Embedded Web Search:** DuckDuckGo results appear inside Cortana. The browser search engine in Settings controls searches opened in your browser.
+*   **Optional AI replies:** Connect to an OpenAI-compatible provider with your own API key and model, or run a local server such as Ollama or LM Studio. Online providers receive questions that do not match a built-in command.
 *   **Notebook:** Keep local notes, tasks and reminders, and tell Cortana what to call you!
 *   **Assistant Shortcut:** Configure a global keyboard shortcut in Settings, optionally starting voice recognition. Compatible hardware buttons can be mapped to it through device software.
-*   **Background Preference:** Keep Cortana in the tray for reminders, or choose to quit when dismissed.
+*   **Background Preference:** Keep Cortana in the notification area for reminders and timers, or choose to quit when dismissed. They need Cortana running.
 *   **Built-in Skills:**
-    *   **Weather Forecast:** Ask "weather in (City name!)" to get current conditions.
+    *   **Weather Forecast:** Ask "weather in Chicago" to get current conditions. In this checkout, Settings also lets you choose a default weather city. Weather needs an internet connection.
     *   **Calculator:** Type any simple math equation to get a quick answer.
     *   **Time Lookup:** Ask for the time locally ("What time is it?") or in any major city ("Time in Tokyo"). Supports 12-hour and 24-hour formats.
-    *   **Jokes:** 54 dad jokes and counting.
+    *   **Jokes:** Ask Cortana to tell you a joke.
     *   **Reminders:** Cortana can remind you to do things.
     *   **More:** Cortana can launch applications, tell you the day, and give you a drumroll!
 
@@ -40,19 +48,13 @@ So, I decided to try and work on bringing Cortana back, the way I remember.
 
 ---
 
-### Install Cortana
-
-Download the **Setup `.exe` installer** from the [latest release](https://github.com/SoftBluey/Cortana-Electron/releases/latest), run it, and open **Cortana Electron** from the Start Menu. You can also pin it to the taskbar.
-
-Enable **Start with Windows** in Settings to launch quietly in the tray. Disabling Cortana in Windows Startup Apps is respected on later launches.
-
 ### Build it yourself
 
 #### Prerequisites
 
 Use Windows and [Node.js](https://nodejs.org/) 22.12 or newer. The tested environment is Windows 11 x64; Windows 10 and ARM64 still need testing.
 
-Edge TTS (the default voice engine) works out of the box with an internet connection. If you prefer offline speech, switch to System TTS in settings and make sure you have at least one speech language installed in Windows.
+Edge TTS (the default voice engine) works out of the box with an internet connection. If you prefer offline speech, choose Windows (offline) under Settings > Spoken replies and make sure you have at least one speech language installed in Windows.
 
 When Edge speech is unavailable, Cortana temporarily falls back to an installed local voice without changing your saved engine or voice preference. Regular Microsoft Zira is the local default; Zira Desktop is only a fallback if regular Zira is unavailable. An unavailable Eva preference is retained so it can be restored when Windows exposes that voice again. Updates do not install, remove or overwrite voice assets.
 

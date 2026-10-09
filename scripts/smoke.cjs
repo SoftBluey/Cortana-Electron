@@ -42,7 +42,7 @@ app.whenReady().then(async () => {
     }
     if (process.argv.includes('--quit')) {
       await win.webContents.executeJavaScript(`(async () => {
-        ipcRenderer.send('set-setting', { key: 'closeToTray', value: false });
+        await ipcRenderer.invoke('set-setting', { key: 'closeToTray', value: false });
         if ((await ipcRenderer.invoke('get-settings')).closeToTray !== false) throw new Error('Quit preference did not apply');
         ipcRenderer.send('close-app');
       })()`);
@@ -56,15 +56,180 @@ app.whenReady().then(async () => {
       const state = await win.webContents.executeJavaScript(`(async () => ({ notebook: await ipcRenderer.invoke('get-notebook'), settings: await ipcRenderer.invoke('get-settings') }))()`);
       if (state.notebook.notes !== 'Saved notebook note' || state.settings.preferredVoice !== 'Missing Eva Smoke Voice') throw new Error('Restart persistence failed');
       checks.push('Notebook and missing Eva preference survive process restart');
+      await win.webContents.executeJavaScript(`(async () => { await showSettingsUI(); document.getElementById('startup-toggle').closest('.settings-section').scrollIntoView({block:'start'}); })()`);
+      await delay(250); fs.writeFileSync(path.join(output, label + '-system.png'), (await win.webContents.capturePage()).toPNG());
+      await win.webContents.executeJavaScript(`closeSettings();`);
     }
     if (workflows) {
       const run = async (name, code) => {
-        if (recorder) { recorder.caption(`${String(checks.length+1).padStart(2,'0')} / 21 · ${name}\nRunning`); await delay(500); }
+        fs.writeFileSync(path.join(output, label + '-progress.json'), JSON.stringify({ running: name, passed: checks }));
+        if (recorder) { recorder.caption(`${String(checks.length+1).padStart(2,'0')} · ${name}\nRunning`); await delay(500); }
         const result = await win.webContents.executeJavaScript(`(async () => { const demoPause = () => new Promise(resolve => setTimeout(resolve, ${recording ? 750 : 0})); ${code} })()`);
         if (result !== true) throw new Error(`${name} failed: ${JSON.stringify(result)}`);
         checks.push(name);
-        if (recorder) { recorder.caption(`${String(checks.length).padStart(2,'0')} / 21 · ${name}\nPassed${/Microphone|focus notifications/i.test(name) ? ' · microphone controls simulated' : ''}`); await delay(1400); }
+        if (recorder) { recorder.caption(`${String(checks.length).padStart(2,'0')} · ${name}\nPassed${/Microphone|focus notifications/i.test(name) ? ' · microphone controls simulated' : ''}`); await delay(1400); }
       };
+      const promises = require('node:fs/promises');
+      const originalRename = promises.rename;
+      let failedFile = null;
+      promises.rename = async (from, to) => {
+        if (to === failedFile) { const error = new Error('Simulated disk write refusal'); error.code = 'EACCES'; throw error; }
+        return originalRename(from, to);
+      };
+      try {
+        failedFile = path.join(profile, 'settings.json');
+        await run('Failed settings write retains preference and displays Not saved', `
+          await showSettingsUI(); const before = (await ipcRenderer.invoke('get-settings')).timeFormat;
+          const result = await saveSetting('timeFormat', '24');
+          return !result.success && (await ipcRenderer.invoke('get-settings')).timeFormat === before && !document.getElementById('settings-save-error').hidden && document.getElementById('settings-saved-toast').textContent === 'Not saved';
+        `);
+        await delay(400); fs.writeFileSync(path.join(output, label + '-save-error.png'), (await win.webContents.capturePage()).toPNG());
+        failedFile = null;
+        await run('Settings retry saves and clears failure feedback', `
+          const result = await saveSetting('timeFormat', '24');
+          return result.success && (await ipcRenderer.invoke('get-settings')).timeFormat === '24' && document.getElementById('settings-save-error').hidden;
+        `);
+        failedFile = path.join(profile, 'settings.json');
+        await run('Failed custom action save retains draft and does not commit', `
+          showCustomActionForm(); customActionTriggerInput.value = 'quality test'; renderActionSequenceUI([{type:'speak',value:'Hello there'}]);
+          await onSaveCustomAction();
+          return customActionFormContainer.classList.contains('visible') && customActionTriggerInput.value === 'quality test' && !customActionSaveBtn.disabled && (await ipcRenderer.invoke('get-settings')).customActions.length === 0;
+        `);
+        failedFile = null;
+        await run('Custom action retry commits once and returns to Settings', `
+          await onSaveCustomAction(); return !customActionFormContainer.classList.contains('visible') && (await ipcRenderer.invoke('get-settings')).customActions.length === 1;
+        `);
+        failedFile = path.join(profile, 'reminders.json');
+        await run('Failed reminder save keeps editable draft', `
+          closeSettings(); showReminderUI({initialText:'Keep my draft',initialTime:formatDateTimeForInput(new Date(Date.now()+3600000))});
+          await onSaveReminder();
+          return reminderContainer.classList.contains('visible') && reminderTextInput.value === 'Keep my draft' && !reminderSaveBtn.disabled && !document.getElementById('reminder-save-error').hidden && (await ipcRenderer.invoke('get-reminders')).length === 0;
+        `);
+        await delay(400); fs.writeFileSync(path.join(output, label + '-reminder-error.png'), (await win.webContents.capturePage()).toPNG());
+        failedFile = null;
+        await run('Reminder retry stores one reminder', `
+          const original = speak; speak = async () => {};
+          try { await onSaveReminder(); return (await ipcRenderer.invoke('get-reminders')).length === 1 && !reminderContainer.classList.contains('visible'); }
+          finally { speak = original; setStateIdle(); }
+        `);
+        failedFile = path.join(profile, 'reminders.json');
+        await run('Failed reminder edit preserves the existing reminder', `
+          const before = (await ipcRenderer.invoke('get-reminders'))[0];
+          const result = await ipcRenderer.invoke('update-reminder', {id:before.id,reminder:'Do not commit this edit',reminderTime:new Date(Date.now()+7200000).toISOString()});
+          const after = (await ipcRenderer.invoke('get-reminders'))[0];
+          return !result.success && JSON.stringify(before) === JSON.stringify(after);
+        `);
+        await run('Failed reminder deletion keeps reminder scheduled', `
+          openNotebook('reminders'); await renderNotebookReminders(); const reminder = (await ipcRenderer.invoke('get-reminders'))[0];
+          const button = document.querySelector('#notebook-reminder-list button:last-child');
+          const result = await deleteReminder(reminder.id, button, document.getElementById('notebook-reminder-error'));
+          return !result && (await ipcRenderer.invoke('get-reminders')).length === 1 && !button.disabled && !document.getElementById('notebook-reminder-error').hidden;
+        `);
+        failedFile = null;
+        await run('Reminder deletion retry removes stored reminder', `
+          const reminder = (await ipcRenderer.invoke('get-reminders'))[0]; const result = await ipcRenderer.invoke('remove-reminder', reminder.id); closeNotebook();
+          return result.success && (await ipcRenderer.invoke('get-reminders')).length === 0;
+        `);
+        failedFile = path.join(profile, 'notebook.json');
+        await run('Notebook failure keeps typed notes without claiming success', `
+          openNotebook('notes'); notebookData.notes = 'Unsaved draft'; document.getElementById('notebook-notes-text').value = notebookData.notes;
+          const result = await persistNotebook(); return !result && document.getElementById('notebook-notes-text').value === 'Unsaved draft' && (await ipcRenderer.invoke('get-notebook')).notes !== 'Unsaved draft';
+        `);
+      } finally { failedFile = null; promises.rename = originalRename; }
+      // A timer expiring during a failed deletion must still fire exactly once.
+      const originalSend = win.webContents.send.bind(win.webContents);
+      let delivered = 0;
+      win.webContents.send = (channel, ...args) => {
+        if (channel === 'play-reminder-sound') { delivered++; return; }
+        return originalSend(channel, ...args);
+      };
+      const notification = require('electron').Notification;
+      const originalShow = notification.prototype.show;
+      notification.prototype.show = () => {};
+      try {
+        await run('Reminder remains scheduled when deletion fails across its due time', `
+          const created = await ipcRenderer.invoke('set-reminder',{reminder:'Due during failed delete',reminderTime:new Date(Date.now()+1000).toISOString()});
+          window.racingReminderId = created.reminder.id; return created.success;
+        `);
+        promises.rename = async (from, to) => {
+          if (to === path.join(profile, 'reminders.json')) { await delay(1400); promises.rename = originalRename; throw Object.assign(Error('Simulated delayed deletion failure'), {code:'EACCES'}); }
+          return originalRename(from, to);
+        };
+        await run('Expired reminder survives a pending failed delete and is delivered once', `
+          const result = await ipcRenderer.invoke('remove-reminder',window.racingReminderId);
+          await new Promise(resolve=>setTimeout(resolve,200));
+          return !result.success && !(await ipcRenderer.invoke('get-reminders')).some(item=>item.id===window.racingReminderId);
+        `);
+        if (delivered !== 1) throw Error('Reminder notification did not fire exactly once');
+      } finally { promises.rename = originalRename; notification.prototype.show = originalShow; win.webContents.send = originalSend; }
+      await run('Concurrent reminder edits and deletes preserve the saved final list', `
+        const [a,b] = await Promise.all(['First','Second'].map(reminder=>ipcRenderer.invoke('set-reminder',{reminder,reminderTime:new Date(Date.now()+3600000).toISOString()})));
+        if (!a.success || !b.success) return false;
+        const [edit,remove] = await Promise.all([ipcRenderer.invoke('update-reminder',{id:a.reminder.id,reminder:'Edited first',reminderTime:new Date(Date.now()+7200000).toISOString()}),ipcRenderer.invoke('remove-reminder',b.reminder.id)]);
+        const list = await ipcRenderer.invoke('get-reminders');
+        const correct = edit.success && remove.success && list.length===1 && list[0].text==='Edited first';
+        await ipcRenderer.invoke('remove-reminder',a.reminder.id); return correct;
+      `);
+      await run('Custom command failure stops the sequence and reports the failed step', `
+        if ((await ipcRenderer.invoke('run-action-command','cmd /c exit 1')).success) return false;
+        if (!(await ipcRenderer.invoke('run-action-command','cmd /c exit 0')).success) return false;
+        const original = displayAndSpeak; const messages=[];
+        displayAndSpeak = (text,callback)=>{messages.push(text); callback?.();};
+        try { await executeActionSequence([{type:'run_command',value:'cmd /c exit 1'},{type:'speak',value:'Incorrect success'}]); return messages.length===1 && messages[0].includes("couldn't finish step 1"); }
+        finally { displayAndSpeak = original; setStateIdle(); }
+      `);
+      await run('Weather city control saves the existing Notebook preference', `
+        await showSettingsUI(); const city = document.getElementById('weather-city-input'); city.value = 'Chicago'; await city.onchange(); return (await ipcRenderer.invoke('get-notebook')).profile.weatherCity === 'Chicago';
+      `);
+      await run('Startup switch remains editable after enable and rejection', `
+        const original = ipcRenderer.invoke;
+        try {
+          ipcRenderer.invoke = async (channel,...args) => channel === 'set-startup' ? {supported:true,enabled:true} : original.call(ipcRenderer,channel,...args);
+          startupToggle.disabled = false; startupToggle.checked = true; await onStartupToggleChanged();
+          if (!startupToggle.checked || startupToggle.disabled) return false;
+          ipcRenderer.invoke = async (channel,...args) => channel === 'set-startup' ? {supported:true,enabled:false,error:'Windows did not change startup.'} : original.call(ipcRenderer,channel,...args);
+          startupToggle.checked = true; await onStartupToggleChanged(); return !startupToggle.checked && !startupToggle.disabled && startupWarning.textContent.includes('did not change');
+        } finally { ipcRenderer.invoke = original; await loadAndApplySettings(); }
+      `);
+      await run('Startup read failure leaves the switch available with an honest error', `
+        const original=ipcRenderer.invoke;
+        try {
+          ipcRenderer.invoke=async(channel,...args)=>channel==='set-startup'?{supported:true,state:'error',enabled:null,error:'Could not read Windows startup settings.'}:original.call(ipcRenderer,channel,...args);
+          startupToggle.disabled=false; startupToggle.checked=true; await onStartupToggleChanged();
+          return !startupToggle.disabled && !startupToggle.checked && startupWarning.textContent.includes('Could not read');
+        } finally { ipcRenderer.invoke=original; await loadAndApplySettings(); }
+      `);
+      await run('A stale Settings refresh cannot undo an explicit startup change', `
+        const original=ipcRenderer.invoke; let release;
+        try {
+          startupToggle.disabled=false; startupToggle.checked=false;
+          const pending=new Promise(resolve=>{release=resolve;});
+          ipcRenderer.invoke=async(channel,...args)=>channel==='get-settings'?pending:channel==='set-startup'?{supported:true,enabled:true}:original.call(ipcRenderer,channel,...args);
+          const refreshing=showSettingsUI(); await new Promise(resolve=>setTimeout(resolve,100));
+          startupToggle.checked=true; await onStartupToggleChanged();
+          release({openAtLogin:false,startupStatus:{supported:true}}); await refreshing;
+          return startupToggle.checked && !startupToggle.disabled;
+        } finally { ipcRenderer.invoke=original; await loadAndApplySettings(); }
+      `);
+      await run('Update check retries after failure and requests verified release page', `
+        const original = ipcRenderer.invoke; let fail = true, opened = false;
+        ipcRenderer.invoke = async (channel,...args) => {
+          if (channel === 'check-for-updates') return fail ? {available:false,currentVersion:'8.0.0',error:'Could not check for updates.'} : {available:false,currentVersion:'8.0.0',remoteVersion:'8.0.0'};
+          if (channel === 'open-update-release') { opened = true; return {success:true}; }
+          return original.call(ipcRenderer,channel,...args);
+        };
+        try {
+          const button = document.getElementById('check-updates-button'); await button.onclick();
+          if (button.disabled || !document.getElementById('update-feedback').textContent.includes('Could not')) return false;
+          fail = false; await button.onclick(); if (!document.getElementById('update-feedback').textContent.includes('latest')) return false;
+          ipcRenderer.emit('update-status',{}, {available:true,currentVersion:'8.0.0',remoteVersion:'9.0.0'});
+          document.getElementById('update-button').click(); await new Promise(resolve => setTimeout(resolve,0)); return opened;
+        } finally { ipcRenderer.invoke = original; ipcRenderer.emit('update-status',{}, {available:false,currentVersion:'8.0.0',remoteVersion:'8.0.0'}); }
+      `);
+      await run('Settings Escape restores navigation focus', `
+        await showSettingsUI(); document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'})); return !settingsContainer.classList.contains('visible') && document.activeElement === settingsBtn;
+      `);
+
       await run('Notebook add/check/note persistence', `
         openNotebook('todos');
         await demoPause();
@@ -94,12 +259,12 @@ app.whenReady().then(async () => {
         await demoPause();
         const correct = reminderTextInput.value === 'Smoke reminder' && !!reminderTimeInput.value;
         const reminders = await ipcRenderer.invoke('get-reminders');
-        ipcRenderer.send('remove-reminder', reminders[0].id);
+        await ipcRenderer.invoke('remove-reminder', reminders[0].id);
         setStateIdle();
         return correct && (await ipcRenderer.invoke('get-reminders')).length === 0;
       `);
       await run('Unavailable Eva preference is retained', `
-        ipcRenderer.send('set-setting', { key: 'preferredVoice', value: 'Missing Eva Smoke Voice' });
+        await ipcRenderer.invoke('set-setting', { key: 'preferredVoice', value: 'Missing Eva Smoke Voice' });
         await loadAndApplySettings(); setupTTS();
         return (await ipcRenderer.invoke('get-settings')).preferredVoice === 'Missing Eva Smoke Voice';
       `);
@@ -130,6 +295,10 @@ app.whenReady().then(async () => {
         let body = ''; request.setEncoding('utf8'); request.on('data', chunk => body += chunk);
         request.on('end', () => {
           const data = JSON.parse(body);
+          if (data.messages?.at(-1)?.content === 'quality-auth-test') {
+            response.writeHead(401, { 'Content-Type': 'application/json' });
+            response.end(JSON.stringify({error:{message:'Unfiltered provider response'}})); return;
+          }
           const valid = request.url === '/v1/chat/completions' && data.model === 'phi3:mini' && data.stream === false;
           response.writeHead(valid ? 200 : 400, { 'Content-Type': 'application/json' });
           response.end(JSON.stringify({ choices: [{ message: { content: 'Local answer café 🌙' } }] }));
@@ -137,12 +306,45 @@ app.whenReady().then(async () => {
       });
       await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
       await run('Ollama compatible request and Unicode response', `
-        ipcRenderer.send('set-setting', { key: 'aiApiUrl', value: 'http://127.0.0.1:${server.address().port}/v1' });
-        ipcRenderer.send('set-setting', { key: 'aiModel', value: 'phi3:mini' });
+        await ipcRenderer.invoke('set-setting', { key: 'aiApiUrl', value: 'http://127.0.0.1:${server.address().port}/v1' });
+        await ipcRenderer.invoke('set-setting', { key: 'aiModel', value: 'phi3:mini' });
         const result = await ipcRenderer.invoke('ask-openai', 'hello');
         return result.success && result.text === 'Local answer café 🌙';
       `);
+      await run('AI authentication failure gives actionable feedback without provider details', `
+        const result = await ipcRenderer.invoke('ask-openai', 'quality-auth-test');
+        return !result.success && result.error.includes('API key') && !result.error.includes('Unfiltered');
+      `);
       await new Promise(resolve => server.close(resolve));
+      await run('Late AI answer cannot interrupt Settings after navigation', `
+        const originalInvoke = ipcRenderer.invoke, originalDisplay = displayAndSpeak, previousEnabled = aiEnabled, previousUrl = aiApiUrl;
+        let resolveAnswer, displayed = 0;
+        ipcRenderer.invoke = (channel,...args) => channel === 'ask-openai' ? new Promise(resolve => { resolveAnswer = resolve; }) : originalInvoke.call(ipcRenderer,channel,...args);
+        displayAndSpeak = () => { displayed++; };
+        try {
+          aiEnabled = true; aiApiUrl = 'http://127.0.0.1:1234'; processQuery('qualityfallbacktest');
+          if (!resolveAnswer) return false;
+          await showSettingsUI(); resolveAnswer({success:true,text:'Stale answer'});
+          await new Promise(resolve => setTimeout(resolve,0));
+          return displayed === 0 && settingsContainer.classList.contains('visible');
+        } finally { aiEnabled = previousEnabled; aiApiUrl = previousUrl; ipcRenderer.invoke = originalInvoke; displayAndSpeak = originalDisplay; closeSettings(); }
+      `);
+      const shell = require('electron').shell, originalOpenPath = shell.openPath;
+      shell.openPath = async () => 'No associated calendar app';
+      try {
+        await run('Calendar launch failure cannot report an event as added', `
+          const result = await ipcRenderer.invoke('create-calendar-event', {title:'Calendar test',dateTime:new Date(Date.now()+3600000).toISOString()});
+          return !result.success && result.error.includes('calendar app');
+        `);
+      } finally { shell.openPath = originalOpenPath; }
+      await run('Custom action stops at a failed file-opening step', `
+        const originalInvoke = ipcRenderer.invoke, originalDisplay = displayAndSpeak, originalError = console.error;
+        let opened = 0, message = '';
+        ipcRenderer.invoke = async (channel,...args) => channel === 'open-action-path' ? {success:false} : channel === 'open-action-url' ? (opened++,{success:true}) : originalInvoke.call(ipcRenderer,channel,...args);
+        displayAndSpeak = text => { message = text; }; console.error = () => {};
+        try { await executeActionSequence([{type:'open_app',value:'missing.exe'},{type:'open_url',value:'https://example.com'}]); return opened === 0 && message.includes('step 1'); }
+        finally { ipcRenderer.invoke = originalInvoke; displayAndSpeak = originalDisplay; console.error = originalError; }
+      `);
       await run('Offline local commands do not await internet suggestions', `
         Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
         let calls = 0; const original = generateWebSuggestions;
@@ -280,7 +482,20 @@ app.whenReady().then(async () => {
           state.startupStatus.supported === false;
       `);
       fs.writeFileSync(path.join(output, `${label}-settings.png`), (await win.webContents.capturePage()).toPNG());
-      await win.webContents.executeJavaScript(`closeSettings()`);
+      for (const [section, id] of [['voice','recognition-mode-select'],['search','weather-city-input'],['system','startup-toggle']]) {
+        await win.webContents.executeJavaScript(`document.getElementById('${id}').closest('.settings-section').scrollIntoView({block:'start'});`);
+        await delay(100); fs.writeFileSync(path.join(output, `${label}-settings-${section}.png`), (await win.webContents.capturePage()).toPNG());
+      }
+      await win.webContents.executeJavaScript(`aiEnabled = true; aiToggle.checked = true; updateAIUI(); aiPresetSelect.value = 'openai'; updateAIProviderUI('openai'); aiToggle.closest('.settings-section').scrollIntoView({block:'start'});`);
+      await run('AI reply instructions use the full column width', `
+        const field = document.getElementById('ai-system-prompt-input');
+        const column = field.parentElement.getBoundingClientRect(), rectangle = field.getBoundingClientRect();
+        const style = getComputedStyle(field.parentElement);
+        const available = column.width - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+        return Math.abs(rectangle.width - available) < 2 && rectangle.height >= 96;
+      `);
+      await delay(100); fs.writeFileSync(path.join(output, label + '-settings-ai.png'), (await win.webContents.capturePage()).toPNG());
+      await win.webContents.executeJavaScript(`aiEnabled = false; aiToggle.checked = false; updateAIUI(); closeSettings()`);
       await win.webContents.executeJavaScript(`openNotebook()`); await delay(400);
       fs.writeFileSync(path.join(output, `${label}-1607-notebook.png`), (await win.webContents.capturePage()).toPNG());
       await win.webContents.executeJavaScript(`selectNotebookPage('about')`); await delay(400);
@@ -406,4 +621,4 @@ app.whenReady().then(async () => {
     app.quit();
   } catch (error) { recorder?.abort(); console.error(error); app.exit(1); }
 });
-setTimeout(() => { recorder?.abort(); console.error('Smoke test timed out'); app.exit(1); }, recording ? 180000 : 60000).unref();
+setTimeout(() => { recorder?.abort(); console.error('Smoke test timed out'); app.exit(1); }, recording ? 240000 : 120000).unref();
