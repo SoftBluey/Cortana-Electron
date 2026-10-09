@@ -11,8 +11,8 @@ So, I decided to try and work on bringing Cortana back, the way I remember.
 
 ### Features
 
-*   **Voice Search:** WinRT online dictation or an explicit offline mode for built-in commands. Final words auto-submit after the microphone is released. Speech errors appear above the search bar with a Settings shortcut. Recognition currently fails on the reported Windows 11 installation; see the [speech investigation](docs/1607-notebook-and-speech-followup.md). No older speech API is used as a fallback.
-*   **"Hey Cortana" Wake Word:** Optional, off by default. Say "Hey Cortana" anytime and a slim UI pops up ready for your voice command. Works even when the app is hidden.
+*   **Voice Search:** Use the microphone for voice commands, with an offline mode for built-in commands. Recognition may fail on affected Windows systems; see the known limitations below. Typed commands remain available.
+*   **"Hey Cortana" Wake Word:** Optional, off by default. Opens a slim UI ready for your voice command, even when the app is hidden. Subject to the same recognition limitations as voice search.
 *   **Edge Neural Text-to-Speech:** High-quality Microsoft Edge Neural voices for natural-sounding responses. System TTS (like Windows Zira) is also available as a fallback.
 *   **Embedded Web Search:** Search results are fetched and displayed right inside the app in a clean dark-themed list. No need to leave the conversation.
 *   **ChatGPT / AI Integration:** Connect to any OpenAI-compatible API for intelligent responses. Set your own API key, model, and system prompt.
@@ -38,11 +38,17 @@ So, I decided to try and work on bringing Cortana back, the way I remember.
 
 ---
 
+### Install Cortana
+
+Download the **Setup `.exe` installer** from the [latest release](https://github.com/SoftBluey/Cortana-Electron/releases/latest), run it, and open **Cortana Electron** from the Start Menu. You can also pin it to the taskbar.
+
+Enable **Start with Windows** in Settings to launch quietly in the tray. Disabling Cortana in Windows Startup Apps is respected on later launches.
+
 ### Build it yourself
 
 #### Prerequisites
 
-Use Windows 10/11 on x64 or ARM64 and a supported [Node.js](https://nodejs.org/) installation (Node 22.12 or newer for the build tools). The tested environment is Windows 11 x64, Node 26 for development, and Electron 44.7.0 with embedded Node 24.21.0. Windows 10 and ARM64 runtime behavior still require hardware validation.
+Use Windows and [Node.js](https://nodejs.org/) 22.12 or newer. The tested environment is Windows 11 x64; Windows 10 and ARM64 still need testing.
 
 Edge TTS (the default voice engine) works out of the box with an internet connection. If you prefer offline speech, switch to System TTS in settings and make sure you have at least one speech language installed in Windows.
 
@@ -56,71 +62,43 @@ When Edge speech is unavailable, Cortana temporarily falls back to an installed 
     ```
 2.  **Navigate to the project directory:**
     ```sh
-    cd cortana-electron
+    cd Cortana-Electron
     ```
 3.  **Install NPM packages:**
     ```sh
-    npm install
+    npm ci
     ```
 4.  **Run the app in development mode:**
     ```sh
     npm start
     ```
 
-For WinRT speech development, enable Windows Developer Mode yourself and run `npm run identity:dev` once after installing or updating Electron. This registers a development package identity with microphone capability. It does not enable Developer Mode, trust certificates or modify audio devices. Normal users receive identity through a signed release package and do not need Developer Mode. Microsoft's [WinRT dictation guide](https://learn.microsoft.com/en-us/windows/apps/develop/input/enable-continuous-dictation) requires package identity; identity alone does not fix the reported Windows speech regression.
+### Build the Windows installer
 
-This development identity is optional and is never registered by normal startup or the NSIS installer. To remove its temporary Windows entry, quit development Cortana from its tray and run `npm run identity:remove`. The cleanup removes only this workspace's `cortana-electron.debug` package and restores its version-matched original Electron executable. It does not change Developer Mode or audio devices.
-
-### Building for Distribution
-
-For the Windows package with identity needed by WinRT speech, build:
-
-```sh
-npm run dist:msix
-```
-
-This creates an AppX package. A public release must be signed with a trusted publisher certificate or distributed through the Microsoft Store. The unsigned local build is a verification artifact, not a ready-to-install public release. Normal signed installation does not require Developer Mode.
-
-The existing `.exe` installer remains available:
+To create the `.exe` installer:
 
 ``` sh
 npm run dist
 ```
 
-The NSIS installer creates a Start Menu shortcut named **Cortana Electron**. Find it by typing that name into Windows Search, or pin it to the taskbar. This provides convenient access without modifying Windows Search.
+The installer is saved in `dist`. Development runs do not add Electron to Windows startup; **Start with Windows** is available in the installed app.
 
-**Start with Windows** uses the packaged `.exe` and opens Cortana quietly in the tray. Turning Cortana off in Windows Startup Apps is respected on later launches. Source-development runs do not register Electron at login. The startup toggle is unavailable in source runs and Store/AppX builds; use the `.exe` installation for this option.
-
-NSIS currently does not register package identity. Typed commands, Notebook and TTS remain available; do not advertise this installer as providing supported WinRT dictation until signed identity registration is integrated.
-
-### Validation and troubleshooting
+### Development checks
 
 ```sh
 npm run check
 npm test
 npm run smoke -- --workflows
-npx electron scripts/motion-smoke.cjs --classic
-npx electron scripts/motion-smoke.cjs
-npx electron scripts/opening-smoke.cjs
 ```
 
-The smoke test uses a disposable profile under `.verification` and skips Windows startup registration. It checks the real renderer and IPC workflows, writes screenshots and performance samples, then exits.
+The smoke test checks interface workflows with a temporary profile and saves its results under `.verification`. It does not change your normal settings or Windows startup registration. Microphone actions are simulated.
 
-To record the real UI workflow tests as a captioned demonstration, install FFmpeg separately and run `npm run smoke -- --workflows --classic --quick --record --label=cortana-8-smoke-demo`. Recording captures only the app's complete rendered view, without the desktop or audio. Tests use dummy data and pause for readability. The video labels simulated microphone checks and does not claim that live recognition works. Output is an MP4 and subtitle file under `.verification`; recording does not add a production dependency. Performance samples from a recording run are not comparable with ordinary smoke runs.
+### Known limitations and troubleshooting
 
-For a brief default-microphone test without saving audio or transcripts:
+Speech recognition and the listening-related speaker pop remain unresolved on affected Windows systems. The installer does not fix these issues. You can continue using typed commands, Notebook and text-to-speech.
 
-```sh
-npx electron scripts/probe-winrt.cjs
-npx electron scripts/probe-winrt.cjs --commands
-```
+If you run into a speech problem, open **Settings > Troubleshooting > Copy speech diagnostics** and include the details in your report. Diagnostics exclude recognized speech and API keys.
 
-For a read-only inventory of default audio routes, input volume and mute state, use `powershell.exe -NoProfile -File speech.ps1 -Inventory`. This does not open an audio stream or alter device settings. Version 8 restores the classic microphone on/off cues once after the muted troubleshooting build. Later choices to mute Listening sounds in Settings are preserved.
-
-The packaged executable also accepts `--diagnostic-smoke`. It uses a new temporary profile, tests startup and local microphone start/cancel, writes `smoke-result.json` in that profile, and quits. Add `--skip-speech` to verify startup without opening the microphone. Without that flag, it briefly activates the default microphone. Do not use these arguments for a normal launch.
-
-For normal-use failures, expand **Settings > Troubleshooting > Copy speech diagnostics**. Technical details stay out of normal error messages. Logs include OS/architecture, Electron/Node versions, speech stages and HRESULT values. They exclude recognized text and API keys. The rotating `speech-diagnostics.jsonl` log is stored with your application settings; copied diagnostics include its path. Use `--speech-debug` only when console speech-stage output is needed.
-
-See [the version 8 release notes](docs/release-8.0.0.md), [the speech investigation](docs/1607-notebook-and-speech-followup.md) and [the earlier maintenance report](docs/maintenance-2026-10-08.md) for issue status, measured performance, compatibility limits and remaining physical-device checks.
+See the [8.0.0 release notes](https://github.com/SoftBluey/Cortana-Electron/releases/tag/v8.0.0) for the major changes and remaining limitations.
 
 ### This project is licensed under the GNU General Public License v3.0, see the LICENSE file for details.
