@@ -3,6 +3,8 @@ A custom, local Cortana client built with Electron, inspired by the classic desi
 
 We are not affiliated with Microsoft! We do not own the licenses for Cortana. This is just a faithful recreation project.
 
+<img width="378" height="660" alt="Cortana Electron 8.0.0" src="https://github.com/user-attachments/assets/845eca5a-4a70-4358-8837-0a9818e35b58" />
+
 ### About The Project
 
 As a kid, my Nana got me into tech. What was one thing she let me do? Talk to Cortana. She had a whole Microphone setup for Cortana. I miss those days, and I want Cortana back. (I love you Nana!)
@@ -16,7 +18,7 @@ So, I decided to try and work on bringing Cortana back, the way I remember.
 *   **Edge Neural Text-to-Speech:** High-quality Microsoft Edge Neural voices for natural-sounding responses. System TTS (like Windows Zira) is also available as a fallback.
 *   **Embedded Web Search:** Search results are fetched and displayed right inside the app in a clean dark-themed list. No need to leave the conversation.
 *   **ChatGPT / AI Integration:** Connect to any OpenAI-compatible API for intelligent responses. Set your own API key, model, and system prompt.
-*   **Notebook:** Local notes, tasks and reminders, plus a nickname used in Cortana's greeting. The classic rail and miniature Cortana share the main assistant's animation and accent color. Settings has a consistent transition without overlapping pages.
+*   **Notebook:** Keep local notes, tasks and reminders, and tell Cortana what to call you!
 *   **Assistant Shortcut:** Configure a global keyboard shortcut in Settings, optionally starting voice recognition. Compatible hardware buttons can be mapped to it through device software.
 *   **Background Preference:** Keep Cortana in the tray for reminders, or choose to quit when dismissed.
 *   **Built-in Skills:**
