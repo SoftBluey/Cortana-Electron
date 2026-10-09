@@ -15,7 +15,7 @@ app.setPath('userData', profile);
 app.setAppPath(root);
 app.setLoginItemSettings = () => { throw Error('Checkup must not register startup'); };
 fs.writeFileSync(path.join(profile, 'settings.json'), JSON.stringify({
-  openAtLogin: false, heyCortana: false, isMovable: true, ttsEngine: 'system',
+  firstRunComplete: true, openAtLogin: false, heyCortana: false, isMovable: true, ttsEngine: 'system',
 }));
 const desktopActions = [];
 shell.openPath = async target => { desktopActions.push({ type: 'path', target }); return ''; };

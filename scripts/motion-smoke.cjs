@@ -12,7 +12,7 @@ app.setPath('userData', fs.mkdtempSync(path.join(output, 'motion-profile-')));
 app.setAppPath(root);
 app.setLoginItemSettings = () => {};
 fs.writeFileSync(path.join(app.getPath('userData'), 'settings.json'), JSON.stringify({
-  openAtLogin: false, heyCortana: false, isMovable: !classic, ttsEngine: 'system', listeningSounds: false, interfaceRelease: 8,
+  firstRunComplete: true, openAtLogin: false, heyCortana: false, isMovable: !classic, ttsEngine: 'system', listeningSounds: false, interfaceRelease: 8,
 }));
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 require('../main.js');

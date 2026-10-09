@@ -8,7 +8,7 @@ fs.mkdirSync(output, { recursive: true });
 app.setPath('userData', fs.mkdtempSync(path.join(output, 'opening-profile-')));
 app.setAppPath(root);
 fs.writeFileSync(path.join(app.getPath('userData'), 'settings.json'), JSON.stringify({
-  openAtLogin: false, heyCortana: false, ttsEngine: 'system', isMovable: false,
+  firstRunComplete: true, openAtLogin: false, heyCortana: false, ttsEngine: 'system', isMovable: false,
 }));
 let settingsReplied = false;
 const handle = ipcMain.handle.bind(ipcMain);

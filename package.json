@@ -1,7 +1,7 @@
 {
   "name": "cortana-electron",
   "version": "8.1.0",
-  "description": "A electron app to bring Cortana back to your desktop!",
+  "description": "An Electron app to bring Cortana back to your desktop!",
   "main": "main.js",
   "author": "BlueySoft",
   "license": "GPL-3.0",
@@ -21,7 +21,8 @@
     "dist:msix": "node scripts/ensure-bindings.cjs && electron-builder --win appx",
     "identity:dev": "node scripts/dev-identity.cjs",
     "identity:remove": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/remove-debug-identity.ps1",
-    "smoke:productivity": "electron scripts/productivity-smoke.cjs"
+    "smoke:productivity": "electron scripts/productivity-smoke.cjs",
+    "smoke:tour": "electron scripts/first-run-smoke.cjs"
   },
   "dependencies": {
     "@microsoft/dynwinrt": "0.1.0-preview.22",
@@ -40,6 +41,7 @@
     "productName": "Cortana Electron",
     "icon": "assets/icon.ico",
     "files": [
+      "LICENSE",
       "main.js",
       "preload.js",
       "renderer.js",

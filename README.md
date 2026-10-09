@@ -17,10 +17,11 @@ Download the **Setup `.exe` installer** from the [latest release](https://github
 
 Enable **Start with Windows** in Settings to launch quietly in the tray. Turning it off in Windows Startup apps keeps it off when Cortana next opens.
 
-Version **8.1.0** is in testing, with named lists, recurring reminders, persistent named timers, a personal day summary, Windows media controls, and interface/startup fixes. The latest published installer is still **8.0.0**.
+Version **8.1.0** is in testing, with a welcome tour, named lists, recurring reminders, persistent named timers, a personal day summary, Windows media controls, and interface/startup improvements. The latest published installer is still **8.0.0**.
 
 ### Features
 
+*   **Welcome tour:** See what Cortana can do when you first install her or upgrade from a version without the tour. You can add an optional name and weather city, or skip it. Your existing settings, notes, lists and reminders are kept. Replay it from Settings > System > Take a tour.
 *   **Voice Search:** Use the microphone for voice commands, with an offline mode for built-in commands. Recognition may fail on affected Windows systems; see the known limitations below. Typed commands remain available.
 *   **"Hey Cortana" Wake Word:** Optional, off by default. Opens a slim UI ready for your voice command, even when the app is hidden. Subject to the same recognition limitations as voice search.
 *   **Edge Neural Text-to-Speech:** High-quality Microsoft Edge Neural voices for natural-sounding responses. System TTS (like Windows Zira) is also available as a fallback.
@@ -32,7 +33,7 @@ Version **8.1.0** is in testing, with named lists, recurring reminders, persiste
 *   **Assistant Shortcut:** Configure a global keyboard shortcut in Settings, such as "Ctrl+Shift+C", optionally starting voice recognition. Compatible hardware buttons can be mapped to it through device software.
 *   **Background Preference:** Keep Cortana in the notification area for reminders and timers, or choose to quit when dismissed. They alert while Cortana runs. On restart, overdue timers alert once and recurring reminders deliver one overdue alert and advance to their next occurrence.
 *   **Built-in Skills:**
-    *   **Weather Forecast:** Ask "weather in Chicago" to get current conditions. In this checkout, Settings also lets you choose a default weather city. Weather needs an internet connection.
+    *   **Weather:** Ask "weather in Chicago" for current conditions, or save a weather city in Settings and ask "my weather". Weather needs an internet connection.
     *   **Calculator:** Type a simple calculation, like "12 * 3", to get a quick answer.
     *   **Time Lookup:** Ask for the time locally ("What time is it?") or in a city ("What is the time in Tokyo"). Supports 12-hour and 24-hour formats.
     *   **Jokes:** Ask Cortana to tell you a joke.

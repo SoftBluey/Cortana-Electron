@@ -25,9 +25,7 @@ app.whenReady().then(async()=>{
    if(!skip)await run('Chosen name and weather city survive restart',"return notebookData.profile.name==='Bluey'&&notebookData.profile.weatherCity==='Chicago';");
   }else{
    if(existing){
-    await run('Existing installation migrates without interrupting Home',"return (await cortana.getSettings()).firstRunComplete&&!firstRun.visible&&!searchBar.disabled;");
-    await js("await showSettingsUI();document.getElementById('first-run-replay').click();");await delay(350);
-    await run('Settings can replay the original introduction',"return firstRun.visible&&settingsContainer.hidden&&document.getElementById('first-run-next').textContent==='Next';");
+    await run('Upgrading from 8.0 opens the tour and preserves saved settings and Notebook',"const settings=await cortana.getSettings(),data=await cortana.getNotebook();return !settings.firstRunComplete&&firstRun.visible&&searchBar.disabled&&settings.themeColor==='#c04090'&&settings.openAtLogin===false&&settings.heyCortana===false&&data.notes==='Keep this note'&&data.todos[0].id==='keep';");
    }else await run('Fresh or unfinished installation opens the tour before Home',"return !(await cortana.getSettings()).firstRunComplete&&firstRun.visible&&searchBar.disabled&&micBtn.disabled&&animationContainer.inert;");
    fs.writeFileSync(path.join(output,label+'-welcome.png'),(await win.webContents.capturePage()).toPNG());
    await run('Original layout keeps its header, scrolling cards and fixed footer above Search',"const panel=document.getElementById('first-run-panel').getBoundingClientRect(),scroll=document.getElementById('first-run-features').getBoundingClientRect(),footer=document.querySelector('.first-run-actions').getBoundingClientRect(),search=document.querySelector('.search-container').getBoundingClientRect(),close=document.getElementById('close-btn').getBoundingClientRect();const closeVisible=close.width>0?!!document.elementFromPoint(close.left+close.width/2,close.top+close.height/2)?.closest('#close-btn'):document.body.classList.contains('movable-mode');return {passed:panel.left===48&&panel.bottom<=search.top+1&&scroll.bottom<=footer.top+1&&footer.bottom<=search.top+1&&closeVisible,panel:panel.toJSON(),scroll:scroll.toJSON(),footer:footer.toJSON(),search:search.toJSON()};");
@@ -48,8 +46,7 @@ app.whenReady().then(async()=>{
    await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia',{features:[]});win.webContents.debugger.detach();await delay(150);
    await run('Reminder alerts do not speak over the introduction',"let count=0;const previous=speak;speak=()=>{count++;};try{ipcRenderer.emit('timer-fired',{}, {id:'tour-test',label:'Test'});return firstRun.visible&&count===0;}finally{speak=previous;}");
    await js("await showSettingsUI();applyThemeColor('#0078d7');document.getElementById('navigation-home').click();");await delay(200);
-   if(!existing)await run('Returning from Settings resumes unfinished setup',"return firstRun.visible&&searchBar.disabled;");
-   else await js('await openFirstRun();');
+   await run('Returning from Settings resumes unfinished setup',"return firstRun.visible&&searchBar.disabled;");
    if(skip){
     await js("document.getElementById('first-run-back').click();");await delay(200);
     await run('Not interested remembers the choice without changing personal details',"return (await cortana.getSettings()).firstRunComplete&&!firstRun.visible&&!searchBar.disabled&&notebookData.profile.name===''&&notebookData.profile.weatherCity==='';");
@@ -80,6 +77,12 @@ app.whenReady().then(async()=>{
     await run('Setup weather city is used by the actual command route',"const original=getWeather;let location;getWeather=city=>{location=city;};try{processQuery('my weather');return location==='Chicago';}finally{getWeather=original;setStateIdle();}");
     }
    }
+  }
+  if(!process.argv.includes('--continue-for-now')) {
+   await js("await showSettingsUI();document.getElementById('first-run-replay').click();");await delay(250);
+   await run('Completed or skipped tour remains available in Settings',"return firstRun.visible&&settingsContainer.hidden&&document.getElementById('first-run-next').textContent==='Next'&&(await cortana.getSettings()).firstRunComplete;");
+   await js("document.getElementById('navigation-home').click();");
+   await run('Leaving a replay returns to Home without restarting setup',"return !firstRun.visible&&!searchBar.disabled&&!firstRunNeeded;");
   }
   fs.writeFileSync(path.join(output,label+'.json'),JSON.stringify({profile,checks,errors},null,2));console.log('FIRST_RUN_RESULT',JSON.stringify({profile,passed:checks.length,total:checks.length,errors}));app.exit(errors.length?1:0);
  }catch(error){fs.writeFileSync(path.join(output,label+'.json'),JSON.stringify({profile,checks,errors,error:error.message},null,2));console.error(error);app.exit(1);}
