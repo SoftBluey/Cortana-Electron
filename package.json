@@ -33,7 +33,7 @@
   "devDependencies": {
     "@microsoft/dynwinrt-codegen": "0.1.0-preview.22",
     "@microsoft/winappcli": "0.7.1",
-    "electron": "44.7.0",
+    "electron": "44.9.1",
     "electron-builder": "^26.15.7"
   },
   "build": {
