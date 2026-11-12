@@ -21,6 +21,13 @@ const workflows = process.argv.includes('--workflows');
 const classic = process.argv.includes('--classic');
 const recording = process.argv.includes('--record');
 let recorder;
+const originalRegisterShortcut = globalShortcut.register.bind(globalShortcut);
+let triggerAssignedShortcut;
+globalShortcut.register = (accelerator, callback) => {
+  const registered = originalRegisterShortcut(accelerator, callback);
+  if (registered && accelerator === 'CommandOrControl+Shift+Alt+F12') triggerAssignedShortcut = callback;
+  return registered;
+};
 if (classic && !reuse) fs.writeFileSync(path.join(profile, 'settings.json'), JSON.stringify({ firstRunComplete: true, firstRunRelease: '8.1.0', openAtLogin: false, heyCortana: false, isMovable: false, ttsEngine: 'system' }));
 require('../main.js');
 app.whenReady().then(async () => {
@@ -291,7 +298,42 @@ app.whenReady().then(async () => {
         return !result.success && state.accelerator === 'CommandOrControl+Shift+Alt+F12';
       `);
       globalShortcut.unregister('CommandOrControl+Shift+Alt+F11');
+      win.show(); win.focus();
+      await win.webContents.executeJavaScript(`(async () => {
+        await showSettingsUI();
+        document.getElementById('assistant-hotkey').click();
+        await ipcRenderer.invoke('get-hotkey-status');
+      })()`);
+      triggerAssignedShortcut();
+      await run('Pressing the assigned global shortcut during recording keeps Settings open and retains the mapping', `
+        const button = document.getElementById('assistant-hotkey');
+        for (let i=0; i<100 && button.getAttribute('aria-pressed') === 'true'; i++)
+          await new Promise(resolve => setTimeout(resolve, 15));
+        const hotkey = await ipcRenderer.invoke('get-hotkey-status');
+        return button.getAttribute('aria-pressed') === 'false' &&
+          settingsContainer.classList.contains('visible') &&
+          hotkey.accelerator === 'CommandOrControl+Shift+Alt+F12' && hotkey.accelerator === hotkey.configured;
+      `);
       await run('Shortcut disables cleanly', `return (await ipcRenderer.invoke('set-assistant-hotkey', '')).success;`);
+      await run('Shortcut button records a chord, cancels with Escape, and clears the saved shortcut', `
+        await showSettingsUI();
+        const record = document.getElementById('assistant-hotkey');
+        const clear = document.getElementById('clear-assistant-hotkey');
+        const press = (key, options) => record.dispatchEvent(new KeyboardEvent('keydown', {key, bubbles:true, cancelable:true, ...options}));
+        const waitForSave = async () => {
+          for (let i=0; i<100 && record.disabled; i++) await new Promise(resolve => setTimeout(resolve, 15));
+        };
+        record.click(); press('Control', {ctrlKey:true});
+        if (record.getAttribute('aria-pressed') !== 'true') return false;
+        press('Escape');
+        if (record.getAttribute('aria-pressed') !== 'false' || !settingsContainer.classList.contains('visible')) return false;
+        record.click(); press('F12', {ctrlKey:true, altKey:true, shiftKey:true});
+        await waitForSave();
+        if (record.textContent !== 'Ctrl+Alt+Shift+F12' ||
+            (await ipcRenderer.invoke('get-settings')).assistantHotkey !== 'Control+Alt+Shift+F12') return false;
+        clear.click(); await waitForSave();
+        return record.textContent === 'Record shortcut' && (await ipcRenderer.invoke('get-hotkey-status')).accelerator === '';
+      `);
       const server = require('node:http').createServer((request, response) => {
         let body = ''; request.setEncoding('utf8'); request.on('data', chunk => body += chunk);
         request.on('end', () => {

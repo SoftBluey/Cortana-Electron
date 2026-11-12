@@ -1583,8 +1583,9 @@ body.slim-mode #cortana-container { left: 0; width: 100%; }
 .settings-content .settings-text-input { min-width: 0; max-width: 100%; }
 .settings-content .setting-item > .settings-text-input { flex: 1 1 160px; width: 160px; }
 .settings-content .assistant-shortcut { flex-direction: column; align-items: stretch; gap: 8px; }
-.settings-content .assistant-shortcut > #assistant-hotkey { flex: 0 0 auto; width: 100%; height: 34px; box-sizing: border-box; padding: 6px 8px; font-size: 13px; }
-.assistant-shortcut > .settings-button { align-self: flex-start; }
+.assistant-shortcut-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.assistant-shortcut-buttons > .settings-button { width: auto; min-height: 34px; margin: 0; }
+#assistant-hotkey[aria-pressed="true"] { outline: 2px solid currentColor; outline-offset: -2px; }
 #assistant-hotkey-status { font-size: 12px; overflow-wrap: anywhere; }
 .settings-content p { overflow-wrap: anywhere; }
 @container (max-width: 330px) {

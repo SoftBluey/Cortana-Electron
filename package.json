@@ -1,6 +1,6 @@
 {
   "name": "cortana-electron",
-  "version": "8.1.0",
+  "version": "8.1.1",
   "description": "An Electron app to bring Cortana back to your desktop!",
   "main": "main.js",
   "author": "BlueySoft",
@@ -25,13 +25,14 @@
     "smoke:tour": "electron scripts/first-run-smoke.cjs"
   },
   "dependencies": {
-    "@microsoft/dynwinrt": "0.1.0-preview.22",
+    "@microsoft/dynwinrt": "0.1.0-preview.23",
     "city-timezones": "^1.3.1",
     "gifuct-js": "^2.1.2",
-    "node-edge-tts": "^1.2.10"
+    "node-edge-tts": "1.2.12",
+    "ws": "8.21.1"
   },
   "devDependencies": {
-    "@microsoft/dynwinrt-codegen": "0.1.0-preview.22",
+    "@microsoft/dynwinrt-codegen": "0.1.0-preview.23",
     "@microsoft/winappcli": "0.7.1",
     "electron": "44.9.1",
     "electron-builder": "^26.15.7"

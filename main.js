@@ -27,7 +27,7 @@ app.on('will-quit', () => animations.dispose());
 const fs = require("fs/promises");
 const fssync = require("fs");
 const cityTimezones = require("city-timezones");
-const { EdgeTTS } = require("node-edge-tts");
+const { EdgeTTS } = require('./lib/edge-tts');
 const os = require("os");
 const { SpeechController, errorDetails } = require('./lib/speech-controller');
 const { createWriter, createSettingsSaver, createMutationQueue, validNotebook, migrateInterfaceSettings, migrateFirstRunSettings } = require('./lib/preferences');
@@ -45,6 +45,7 @@ const mutateReminders = createMutationQueue();
 let speech = null;
 let appScanInterval = null;
 let registeredHotkey = '';
+let recordingAssistantShortcut = false;
 let notebook = { notes: '', todos: [], introduced: false };
 let NOTEBOOK_FILE;
 let diagnosticsFile;
@@ -91,6 +92,10 @@ function registerAssistantHotkey(accelerator) {
   try {
     const registered = globalShortcut.register(accelerator, () => {
       if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (recordingAssistantShortcut && mainWindow.isFocused()) {
+        mainWindow.webContents.send('assistant-shortcut-reused');
+        return;
+      }
       showWindow();
       if (settings.hotkeyStartsListening) mainWindow.webContents.send('activate-assistant');
     });
@@ -98,7 +103,7 @@ function registerAssistantHotkey(accelerator) {
     if (registeredHotkey) globalShortcut.unregister(registeredHotkey);
     registeredHotkey = accelerator;
     return { success: true, accelerator };
-  } catch (_) { return { success: false, error: 'That shortcut is not valid. Try Ctrl+Shift+C.' }; }
+  } catch (_) { return { success: false, error: 'That shortcut is not valid. Record another combination, such as Ctrl+Shift+C.' }; }
 }
 
 let updateAvailable = false;
@@ -179,20 +184,29 @@ let REMINDERS_FILE;
 let iconPath;
 let assetsPath;
 let onlineSpeechEnabled = false;
+let windowsBuildRead;
 
-// Reads Windows' "Online speech recognition" privacy consent. Re-checked
-// fresh on every manual speech-start since it can change while the app runs.
-function checkOnlineSpeechEnabled() {
+function readRegistryDword(key, value) {
   return new Promise((resolve) => {
-    const cmd = `reg query "HKCU\\Software\\Microsoft\\Speech_OneCore\\Settings\\OnlineSpeechPrivacy" /v HasAccepted`;
-    exec(cmd, { timeout: 3000, windowsHide: true }, (error, stdout) => {
-      if (error) {
-        resolve(false);
-        return;
-      }
-      resolve(/HasAccepted\s+REG_DWORD\s+0x1/i.test(stdout || ""));
+    execFile('reg.exe', ['query', key, '/v', value], { timeout: 3000, windowsHide: true }, (error, stdout) => {
+      const match = !error && stdout.match(/\sREG_DWORD\s+0x([\da-f]{1,8})\s*$/im);
+      resolve(match ? Number.parseInt(match[1], 16) : null);
     });
   });
+}
+
+// Re-check consent for every manual dictation attempt because it can change at runtime.
+async function checkOnlineSpeechEnabled() {
+  return await readRegistryDword('HKCU\\Software\\Microsoft\\Speech_OneCore\\Settings\\OnlineSpeechPrivacy', 'HasAccepted') === 1;
+}
+
+async function speechEnvironment() {
+  const release = os.release();
+  windowsBuildRead ??= readRegistryDword('HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion', 'UBR');
+  const revision = await windowsBuildRead;
+  return { platform: process.platform, arch: process.arch, os: release,
+    windowsBuild: revision === null ? release : `${release}.${revision}`,
+    versions: process.versions, packaged: app.isPackaged, microphoneAccess: systemPreferences.getMediaAccessStatus('microphone') };
 }
 
 function normalizeAccentColor(raw) {
@@ -796,8 +810,7 @@ if (gotTheLock) {
   REMINDERS_FILE = path.join(app.getPath("userData"), "reminders.json");
   NOTEBOOK_FILE = path.join(app.getPath('userData'), 'notebook.json');
   diagnosticsFile = path.join(app.getPath('userData'), 'speech-diagnostics.jsonl');
-  logSpeech('environment', { platform: process.platform, arch: process.arch, os: os.release(),
-    versions: process.versions, packaged: app.isPackaged, microphoneAccess: systemPreferences.getMediaAccessStatus('microphone') });
+  speechEnvironment().then(details => logSpeech('environment', details));
   try {
     const saved = JSON.parse(await fs.readFile(NOTEBOOK_FILE, 'utf8'));
     if (validNotebook(saved)) notebook = saved;
@@ -879,6 +892,9 @@ if (gotTheLock) {
     onlineConsent: checkOnlineSpeechEnabled,
     getMode: () => settings.recognitionMode,
     getIdentity: () => require('@microsoft/dynwinrt').hasPackageIdentity(),
+    getWindowState: () => mainWindow && !mainWindow.isDestroyed() ? {
+      visible: mainWindow.isVisible(), focused: mainWindow.isFocused(), minimized: mainWindow.isMinimized(),
+    } : null,
     log: logSpeech,
     send: (channel, data) => {
       if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -903,6 +919,7 @@ if (gotTheLock) {
   });
   ipcMain.on('set-settings-visibility', (_event, visible) => {
     isSettingsVisible = visible === true;
+    if (!isSettingsVisible) recordingAssistantShortcut = false;
     speech.setPaused(isSettingsVisible).catch(error => logSpeech('settings-pause-failed', errorDetails(error)));
     if (isSettingsVisible && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('speech-force-stop');
   });
@@ -1358,8 +1375,12 @@ function registerIpcHandlers() {
     }
   });
 
+  ipcMain.on('set-assistant-shortcut-recording', (event, recording) => {
+    if (event.sender !== mainWindow?.webContents || typeof recording !== 'boolean') return;
+    recordingAssistantShortcut = recording && isSettingsVisible && mainWindow.isFocused();
+  });
   ipcMain.handle('set-assistant-hotkey', async (_event, accelerator) => {
-    if (typeof accelerator !== 'string') return { success: false, error: 'Enter a shortcut such as Ctrl+Shift+C.' };
+    if (typeof accelerator !== 'string') return { success: false, error: 'Record a shortcut such as Ctrl+Shift+C.' };
     accelerator = parseShortcut(accelerator);
     if (!validateSettingValue('assistantHotkey', accelerator)) return { success: false, error: 'Invalid keyboard shortcut.' };
     const previous = registeredHotkey;
@@ -1396,8 +1417,7 @@ function registerIpcHandlers() {
       return { success: true };
     } catch (error) { return { success: false, error: 'Could not save your Notebook on this computer. Your changes are still here; check the data folder and try again.' }; }
   });
-  ipcMain.handle('speech-diagnostics', async () => ({ environment: { arch: process.arch, os: os.release(),
-    versions: process.versions, packaged: app.isPackaged, microphoneAccess: systemPreferences.getMediaAccessStatus('microphone') },
+  ipcMain.handle('speech-diagnostics', async () => ({ environment: await speechEnvironment(),
     audioDefaults: await new Promise(resolve => {
       execFile('powershell.exe', ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File',
         app.isPackaged ? path.join(process.resourcesPath, 'speech.ps1') : path.join(__dirname, 'speech.ps1'), '-Inventory'],
@@ -2183,6 +2203,7 @@ const VALID_TTS_VOICES = [
 ];
 
 ipcMain.handle("synthesize-edge-tts", async (event, { text, voice, pitch, rate }) => {
+    let outFile;
     try {
       // Validate text
       if (typeof text !== 'string' || !text.trim()) {
@@ -2208,7 +2229,7 @@ ipcMain.handle("synthesize-edge-tts", async (event, { text, voice, pitch, rate }
       }
 
       const tempDir = os.tmpdir();
-      const outFile = path.join(tempDir, `cortana-tts-${crypto.randomUUID()}.mp3`);
+      outFile = path.join(tempDir, `cortana-tts-${crypto.randomUUID()}.mp3`);
 
       const pitchVal = Math.round((pitch - 1) * 100);
       const pitchStr = pitch !== undefined && pitch !== 1
@@ -2228,10 +2249,12 @@ ipcMain.handle("synthesize-edge-tts", async (event, { text, voice, pitch, rate }
         rate: rateStr,
       });
       await tts.ttsPromise(text, outFile);
+      if ((await fs.stat(outFile)).size === 0) throw new Error('Edge speech returned no audio.');
 
       generatedTtsFiles.add(outFile);
       return { success: true, filePath: outFile };
     } catch (error) {
+      if (outFile) await fs.unlink(outFile).catch(() => {});
       console.error("Edge TTS synthesis failed:", error);
       logSpeech('edge-tts-failed', errorDetails(error));
       return { success: false, error: error.message };
@@ -2432,6 +2455,7 @@ function createWindow() {
   });
 
   const handleBlur = () => {
+    recordingAssistantShortcut = false;
     if (isSettingsVisible || settings.isMovable) {
       return;
     }
@@ -2457,6 +2481,7 @@ function createWindow() {
     return { action: 'deny' };
   });
   mainWindow.on('hide', () => {
+    recordingAssistantShortcut = false;
     mainWindow.webContents.send('window-visibility', false);
     mainWindow.webContents.send('speech-force-stop');
     cancelManualSpeech();
@@ -2465,6 +2490,7 @@ function createWindow() {
   mainWindow.on('focus', () => mainWindow.webContents.send('window-focus', true));
   mainWindow.on('blur', () => mainWindow.webContents.send('window-focus', false));
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    recordingAssistantShortcut = false;
     logSpeech('renderer-gone', details);
     speech?.setSpeaking(false).catch(() => {});
     cancelManualSpeech();

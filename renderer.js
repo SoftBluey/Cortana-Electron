@@ -1228,13 +1228,15 @@ window.addEventListener('DOMContentLoaded', async () => {
             ? "I couldn't hear a complete request. Try again or type your question."
             : 'Speech recognition is unavailable right now. Try again or type your question.';
         document.getElementById('speech-feedback').hidden = false;
+        document.getElementById('speech-feedback').dataset.settingsTarget = 'recognition-mode-select';
     });
     document.getElementById('speech-feedback-dismiss').onclick = () => { document.getElementById('speech-feedback').hidden = true; };
     document.getElementById('speech-feedback-settings').onclick = async () => {
+        const target = document.getElementById('speech-feedback').dataset.settingsTarget || 'recognition-mode-select';
         document.getElementById('speech-feedback').hidden = true;
         await showSettingsUI();
-        document.getElementById('recognition-mode-select').scrollIntoView({ block: 'center' });
-        document.getElementById('recognition-mode-select').focus();
+        document.getElementById(target).scrollIntoView({ block: 'center' });
+        document.getElementById(target).focus();
     };
 
     micBtn.addEventListener('click', (e) => {
@@ -1578,6 +1580,7 @@ const PANEL_ICONS = {
 };
 
 let searchPanelGeneration = 0;
+let searchPanelQuery = '';
 async function onSearchInput(event) {
     const generation=++searchPanelGeneration;
     cancelSpeechOutput();
@@ -1771,6 +1774,8 @@ function generateWebSuggestions(query) {
 }
 
 function showSearchPanel(categories) {
+    const query = searchBar.value.trim();
+    searchPanelQuery = query;
     selectedPanelIndex = -1;
     allPanelItems = [];
     searchPanel.innerHTML = ''; searchPanel.scrollTop = 0;
@@ -1823,6 +1828,10 @@ function showSearchPanel(categories) {
             el.addEventListener('click', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
+                if (searchBar.value.trim() !== query) {
+                    hideSearchPanel();
+                    return;
+                }
                 clearTimeout(blurCleanupTimer);
                 hideSearchPanel();
                 clearSearchBar();
@@ -1859,6 +1868,7 @@ function getIconChar(type) {
 
 function hideSearchPanel() {
     ++searchPanelGeneration;
+    searchPanelQuery = '';
     searchPanel.inert = true; document.getElementById('app-container').classList.remove('search-panel-open');
     searchPanel.classList.remove('visible');
     allPanelItems = [];
@@ -1868,6 +1878,8 @@ function hideSearchPanel() {
 
 function onSearchKeyDown(event) {
     if (event.isComposing) return;
+    // Suggestions can still belong to the previous input while a new lookup runs.
+    if (event.key === 'Enter' && allPanelItems.length && searchPanelQuery !== searchBar.value.trim()) hideSearchPanel();
     if (allPanelItems.length === 0) {
         if (event.key === 'Enter') {
             event.preventDefault();
@@ -2083,6 +2095,62 @@ function updateCloseButton(closeToTray) {
     button.setAttribute('aria-label', text);
 }
 
+function setupAssistantShortcutCapture() {
+    const button = document.getElementById('assistant-hotkey');
+    const clear = document.getElementById('clear-assistant-hotkey');
+    const status = document.getElementById('assistant-hotkey-status');
+    let recording = null;
+
+    function stopRecording() {
+        if (!recording) return;
+        button.textContent = recording.label;
+        status.textContent = recording.status;
+        button.setAttribute('aria-pressed', 'false');
+        recording = null;
+        ipcRenderer.send('set-assistant-shortcut-recording', false);
+    }
+
+    async function applyShortcut(accelerator) {
+        stopRecording();
+        button.disabled = clear.disabled = true;
+        try {
+            const result = await ipcRenderer.invoke('set-assistant-hotkey', accelerator);
+            if (!result.success) { status.textContent = result.error; return; }
+            const label = formatShortcut(result.accelerator);
+            button.textContent = label || 'Record shortcut';
+            status.textContent = label ? 'Active: ' + label : 'Shortcut disabled';
+            showSavedToast();
+        } catch (_) { status.textContent = 'Could not apply this shortcut. Try again.'; }
+        finally { button.disabled = clear.disabled = false; }
+    }
+
+    button.onclick = () => {
+        if (recording) { stopRecording(); return; }
+        recording = { label: button.textContent, status: status.textContent };
+        button.setAttribute('aria-pressed', 'true');
+        button.textContent = 'Press shortcut keys';
+        status.textContent = 'Press a combination such as Ctrl+Shift+C, or Esc to cancel.';
+        button.focus();
+        ipcRenderer.send('set-assistant-shortcut-recording', true);
+    };
+    button.onblur = stopRecording;
+    window.addEventListener('blur', stopRecording);
+    ipcRenderer.on('assistant-shortcut-reused', () => {
+        if (!recording) return;
+        stopRecording();
+        showSavedToast();
+    });
+    button.onkeydown = event => {
+        if (!recording || event.key === 'Tab') return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.key === 'Escape') { stopRecording(); return; }
+        const accelerator = CortanaShortcuts.captureShortcut(event);
+        if (accelerator) void applyShortcut(accelerator);
+    };
+    clear.onclick = () => void applyShortcut('');
+}
+
 async function loadAndApplySettings() {
     const settings = await ipcRenderer.invoke('get-settings');
     firstRunNeeded = settings.firstRunComplete === false;
@@ -2092,7 +2160,7 @@ async function loadAndApplySettings() {
     document.getElementById('close-to-tray-toggle').checked = settings.closeToTray !== false;
     updateCloseButton(settings.closeToTray !== false);
     document.getElementById('hotkey-listen-toggle').checked = settings.hotkeyStartsListening === true;
-    document.getElementById('assistant-hotkey').value = formatShortcut(settings.assistantHotkey);
+    document.getElementById('assistant-hotkey').textContent = formatShortcut(settings.assistantHotkey) || 'Record shortcut';
     const hotkey = await ipcRenderer.invoke('get-hotkey-status');
     document.getElementById('assistant-hotkey-status').textContent = hotkey.accelerator ? `Active: ${formatShortcut(hotkey.accelerator)}` : hotkey.configured ? 'Configured shortcut could not be registered; choose another.' : 'Shortcut disabled';
     preferredVoiceName = settings.preferredVoice;
@@ -2815,11 +2883,14 @@ function setupTTS() {
 let currentEdgeAudio = null;
 let currentEdgeFilePath = null;
 let outputGeneration = 0;
+let outputAbort = new AbortController();
 function removeSpeechFile(filename) {
     if (filename) ipcRenderer.invoke('release-tts-file', filename).catch(() => {});
 }
 function cancelSpeechOutput() {
     ++outputGeneration;
+    outputAbort.abort();
+    outputAbort = new AbortController();
     window.speechSynthesis.cancel();
     if (currentEdgeAudio) {
         currentEdgeAudio.onended = null;
@@ -2834,6 +2905,8 @@ function cancelSpeechOutput() {
 
 async function speak(text, onSpeechEndCallback) {
     cancelSpeechOutput();
+    const feedback = document.getElementById('speech-feedback');
+    if (feedback.dataset.settingsTarget === 'tts-engine-select') feedback.hidden = true;
     const generation = outputGeneration;
     let completed = false;
     const finish = () => {
@@ -2848,7 +2921,7 @@ async function speak(text, onSpeechEndCallback) {
         await ipcRenderer.invoke('tts-begin');
         if (generation !== outputGeneration) return;
         if (ttsEngine === 'edge' && navigator.onLine) await speakEdge(text, finish, generation);
-        else speakSystem(text, finish);
+        else await speakSystem(text, finish, generation);
     } catch (error) {
         console.error('Speech output failed:', error);
         finish();
@@ -2862,8 +2935,8 @@ async function speakEdge(text, finish, generation) {
     if (generation !== outputGeneration) { removeSpeechFile(result.filePath); return; }
     if (!result.success) {
         console.warn('Edge TTS failed; using local voice:', result.error);
-        speakSystem(text, finish);
-        return;
+        showSpeechOutputError('The selected Edge voice is unavailable. Using your Windows voice for this reply.');
+        return speakSystem(text, finish, generation);
     }
     currentEdgeFilePath = result.filePath;
     const audio = new Audio(window.cortana.fileUrl(result.filePath));
@@ -2873,28 +2946,57 @@ async function speakEdge(text, finish, generation) {
         if (currentEdgeAudio === audio) { currentEdgeAudio = null; currentEdgeFilePath = null; }
     };
     audio.onended = () => { cleanup(); finish(); };
+    let fallingBack = false;
     const fallback = () => {
-        if (generation !== outputGeneration) return;
+        if (fallingBack || generation !== outputGeneration) return;
+        fallingBack = true;
         audio.onended = audio.onerror = null;
         audio.pause();
         cleanup();
-        speakSystem(text, finish);
+        showSpeechOutputError('The selected Edge voice could not play. Using your Windows voice for this reply.');
+        void speakSystem(text, finish, generation);
     };
     audio.onerror = fallback;
     audio.play().catch(fallback);
 }
 
-function speakSystem(text, finish) {
-    const generation = outputGeneration;
-    currentVoice = resolveVoice(availableVoices, preferredVoiceName);
-    if (!currentVoice) { finish(); return; }
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.voice = currentVoice;
-    utterance.pitch = pitch;
-    utterance.rate = rate;
-    utterance.onend = () => { if (generation === outputGeneration) finish(); };
-    utterance.onerror = () => { if (generation === outputGeneration) finish(); };
-    window.speechSynthesis.speak(utterance);
+function showSpeechOutputError(message) {
+    recordSpeechError(message);
+    const feedback = document.getElementById('speech-feedback');
+    feedback.dataset.settingsTarget = 'tts-engine-select';
+    document.getElementById('speech-feedback-message').textContent = message;
+    feedback.hidden = false;
+}
+
+async function speakSystem(text, finish, generation = outputGeneration) {
+    try {
+        // Windows can expose its voices after first paint. Wait only for this reply,
+        // and release the listener immediately when the reply is cancelled.
+        const voices = await CortanaVoicePolicy.waitForVoices(window.speechSynthesis, { signal: outputAbort.signal });
+        if (generation !== outputGeneration) return;
+        availableVoices = voices;
+        currentVoice = resolveVoice(voices, preferredVoiceName);
+        if (!currentVoice) {
+            showSpeechOutputError('No Windows voice is available for spoken replies. Choose a voice in Settings or check your installed Windows speech languages.');
+            finish();
+            return;
+        }
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.voice = currentVoice;
+        utterance.pitch = pitch;
+        utterance.rate = rate;
+        utterance.onend = () => { if (generation === outputGeneration) finish(); };
+        utterance.onerror = () => {
+            if (generation !== outputGeneration) return;
+            showSpeechOutputError('Windows could not play this spoken reply. Check your voice and sound output in Settings.');
+            finish();
+        };
+        window.speechSynthesis.speak(utterance);
+    } catch (_) {
+        if (generation !== outputGeneration) return;
+        showSpeechOutputError('Windows spoken replies are unavailable right now. Check your voice in Settings.');
+        finish();
+    }
 }
 
 function onActionFinished() {
@@ -4093,6 +4195,23 @@ async function controlMedia(action, confirmation, level) {
     }
 }
 
+const timerNumberPattern = `\\d+|(?:${Object.keys(temporalNumberWords).join('|')})(?:[\\s-](?:${Object.keys(temporalNumberWords).join('|')}))*`;
+const timerUnitPattern = 'minute|min|second|sec|hour|hr';
+const timerCommand = {
+    // Accept both "a timer for 15 min" and "a 15 min timer" without changing routing.
+    regex: new RegExp(
+        `^\\s*(?:set|start)\\s+a\\s+(?:timer\\s+(?:for\\s+)?(?:about\\s+)?(${timerNumberPattern})\\s*(${timerUnitPattern})s?|(?:about\\s+)?(${timerNumberPattern})\\s*(${timerUnitPattern})s?\\s+timer)(?:\\s+(?:named|called)\\s+(.{1,128}))?\\s*$`,
+        'i'
+    ),
+    handler: match => {
+        const amount = match[1] || match[3];
+        const value = /^\d+$/.test(amount) ? Number(amount) : parseTemporalNumberWords(amount);
+        const unit = (match[2] || match[4]).toLowerCase();
+        const multiplier = unit.startsWith('min') ? 60000 : unit.startsWith('sec') ? 1000 : 3600000;
+        return startTimer(value, unit, value * multiplier, match[5] || '');
+    }
+};
+
 const commands = [
     {regex:/^(?:set|turn)(?: the)? volume (?:to )?(\d{1,3})(?: ?%| percent)?[.!]*$/i,handler:match=>controlMedia('setvolume',`Volume set to ${match[1]} percent.`,Number(match[1]))},
     {regex:/^(?:what(?:'s| is)(?: the| my)? volume|volume status)[?!.]*$/i,handler:async()=>{const generation=assistantRequestGeneration;const state=await ipcRenderer.invoke('media-state');if(generation!==assistantRequestGeneration)return;displayAndSpeak(state.success?`Volume is ${Math.round(state.volume)} percent${state.muted?', muted':''}.`:state.error,onActionFinished,{},!state.success);}},
@@ -4158,24 +4277,7 @@ const commands = [
             displayAndSpeak(response, onActionFinished, {}, true);
         }
     },
-    {
-        regex: new RegExp(
-            `^(?:set|start) a timer (?:for )?(?:about )?(\\d+|(?:${Object.keys(temporalNumberWords).join('|')})(?:[\\s-](?:${Object.keys(temporalNumberWords).join('|')}))*)\\s*(minute|min|second|sec|hour|hr)s?(?: (?:named|called) (.{1,128}))?\\s*$`,
-            'i'
-        ),
-        handler: (match) => {
-            const value = /^\d+$/.test(match[1])
-                ? parseInt(match[1], 10)
-                : parseTemporalNumberWords(match[1]);
-            const unit = match[2].toLowerCase();
-            let ms;
-            if (unit.startsWith('min')) ms = value * 60000;
-            else if (unit.startsWith('sec')) ms = value * 1000;
-            else if (unit.startsWith('hour') || unit.startsWith('hr')) ms = value * 3600000;
-            else { displayAndSpeak("Sorry, I didn't understand that time unit.", onActionFinished, {}, true); return; }
-            startTimer(value, unit, ms, match[3] || '');
-        }
-    },
+    timerCommand,
     {
         regex: /^(?:cancel|stop|delete)(?: the| my)? (?:(.+?) )?timer$/i,
         handler: match => cancelNamedTimer(match[1] || ''),
@@ -5371,18 +5473,7 @@ async function setupNotebookAndSystemControls() {
             if (result.success && key === 'closeToTray') updateCloseButton(enabled);
         };
     }
-    document.getElementById('save-assistant-hotkey').onclick = async () => {
-        const button = document.getElementById('save-assistant-hotkey');
-        const field = document.getElementById('assistant-hotkey');
-        const value = field.value.trim(); button.disabled = true;
-        try {
-            const result = await ipcRenderer.invoke('set-assistant-hotkey', value);
-            document.getElementById('assistant-hotkey-status').textContent = result.success
-                ? (result.accelerator ? 'Active: ' + formatShortcut(result.accelerator) : 'Shortcut disabled') : result.error;
-            if (result.success) { field.value = formatShortcut(result.accelerator); showSavedToast(); }
-        } catch (_) { document.getElementById('assistant-hotkey-status').textContent = 'Could not apply this shortcut. Try again.'; }
-        finally { button.disabled = false; }
-    };
+    setupAssistantShortcutCapture();
     document.getElementById('copy-speech-diagnostics').onclick = async () => {
         const data = await ipcRenderer.invoke('speech-diagnostics');
         window.cortana.copyDiagnostics(JSON.stringify(data, null, 2));

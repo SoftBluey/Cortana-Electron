@@ -9,7 +9,7 @@ const label=process.argv.find(a=>a.startsWith('--label='))?.slice(8)||'productiv
 app.setPath('userData',profile);app.setAppPath(root);app.setLoginItemSettings=()=>{throw Error('No startup changes allowed');};
 Notification.prototype.show=()=>{};
 if(!reuse) {
- fs.writeFileSync(path.join(profile,'settings.json'),JSON.stringify({firstRunComplete:true,firstRunRelease:'8.1.0',openAtLogin:false,heyCortana:false,isMovable:true,ttsEngine:'system'}));
+ fs.writeFileSync(path.join(profile,'settings.json'),JSON.stringify({firstRunComplete:true,firstRunRelease:'8.1.0',openAtLogin:false,heyCortana:false,isMovable:!process.argv.includes('--classic'),ttsEngine:'system'}));
  fs.writeFileSync(path.join(profile,'notebook.json'),JSON.stringify({notes:'Legacy note',introduced:true,todos:[{id:'legacy',text:'Legacy task',done:false}],profile:{name:'',home:'',work:'',weatherCity:''}}));
 }
 require('../main.js');
@@ -40,6 +40,19 @@ app.whenReady().then(async()=>{
    await run('Name command saves and identifies the user locally',"processQuery('call me Bluey');await new Promise(r=>setTimeout(r,150));processQuery('what is my name');await new Promise(r=>setTimeout(r,30));return notebookData.profile.name==='Bluey'&&resultsDisplay.textContent.includes('Bluey');");
    await run('Weekly voice command fills repeat form and persists',"processQuery('remind me to Stretch every Friday at 3 pm');await new Promise(r=>setTimeout(r,20));if(reminderTextInput.value!=='Stretch'||document.getElementById('reminder-repeat').value!=='weekly')return {text:reminderTextInput.value,repeat:document.getElementById('reminder-repeat').value};await onSaveReminder();return (await ipcRenderer.invoke('get-reminders')).some(r=>r.text==='Stretch'&&r.recurrence==='weekly');");
    await run('Reminder editing retains its recurrence',"const r=(await ipcRenderer.invoke('get-reminders')).find(r=>r.text==='Stretch');openNotebook('reminders');await renderNotebookReminders();document.querySelector('#notebook-reminder-list button').click();const correct=document.getElementById('reminder-repeat').value==='weekly';await onSaveReminder();return correct&&(await ipcRenderer.invoke('get-reminders')).find(x=>x.id===r.id).recurrence==='weekly';");
+   await run('Enter runs the current named timer command while older web suggestions are visible',`
+     closeNotebook({immediate:true}); searchBar.disabled=false; isBusy=false;
+     let staleActionRan=false;
+     searchBar.value='set a 2 hour';
+     showSearchPanel([{name:'Web',items:[{title:'Search the web',icon:'web',action:()=>{staleActionRan=true;}}]}]);
+     searchBar.value='set a 2 hour timer named QA';
+     searchBar.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+     await new Promise(r=>setTimeout(r,200));
+     const timers=await ipcRenderer.invoke('get-timers');
+     const timer=timers.find(item=>item.label==='QA');
+     if(timer) await ipcRenderer.invoke('cancel-timer',timer.id);
+     return !staleActionRan && !!timer && timer.remaining>7100000;
+   `);
    await run('Named timer commands save two independent timers',"closeNotebook({immediate:true});processQuery('set a timer for 20 minutes named Tea');await new Promise(r=>setTimeout(r,200));processQuery('set a timer for 30 minutes named Oven');await new Promise(r=>setTimeout(r,200));const timers=await ipcRenderer.invoke('get-timers');return timers.length===2&&timers[0].label==='Tea'&&timers[1].label==='Oven';");
    await run('Invalid timer and ambiguous cancellation retain both timers',"await startTimer(1000,'hours',3600000000);await cancelNamedTimer('');return (await ipcRenderer.invoke('get-timers')).length===2&&document.querySelectorAll('.reminder-list-item').length===2;");
    await run('My day uses the Notebook page with nickname, tasks and running timers',"await showMyDay();const day=document.getElementById('notebook-day');return {passed:!day.hidden&&document.getElementById('notebook-title').textContent==='My day'&&day.textContent.includes('Bluey')&&day.textContent.includes('Fresh Milk')&&day.textContent.includes('Tea')&&day.textContent.includes('Legacy task')&&!resultsDisplay.classList.contains('day-summary'),hidden:day.hidden,title:document.getElementById('notebook-title').textContent,text:day.textContent,request:assistantRequestGeneration,page:notebookPage};");

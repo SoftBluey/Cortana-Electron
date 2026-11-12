@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createSettingsSaver } = require('../lib/preferences');
 const { releaseInfo } = require('../lib/release');
-const { formatShortcut, parseShortcut } = require('../lib/shortcuts');
+const { formatShortcut, parseShortcut, captureShortcut } = require('../lib/shortcuts');
 const { createStartup } = require('../lib/startup');
 
 test('failed settings writes leave committed data intact and later patches retain unrelated preferences', async () => {
@@ -41,6 +41,17 @@ test('Windows shortcut names round-trip while existing Electron accelerators rem
   assert.equal(parseShortcut('Windows+Enter'), 'Super+Return');
   assert.equal(parseShortcut('CommandOrControl+Shift+C'), 'CommandOrControl+Shift+C');
   assert.equal(parseShortcut(''), '');
+});
+
+test('shortcut recording translates key events and ignores incomplete chords', () => {
+  assert.equal(captureShortcut({ key: 'C', ctrlKey: true, shiftKey: true }), 'Control+Shift+C');
+  assert.equal(captureShortcut({ key: 'Enter', altKey: true }), 'Alt+Return');
+  assert.equal(captureShortcut({ key: 'ArrowRight', metaKey: true }), 'Super+Right');
+  assert.equal(captureShortcut({ key: 'F12' }), 'F12');
+  for (const event of [{ key: 'c' }, { key: 'Shift', ctrlKey: true }, { key: 'C', ctrlKey: true, repeat: true },
+    { key: 'e', ctrlKey: true, isComposing: true }, { key: 'e', ctrlKey: true, altKey: true, getModifierState: () => true }]) {
+    assert.equal(captureShortcut(event), '');
+  }
 });
 
 test('startup uses Cortana own current-user entry and detects silent Windows rejection', () => {

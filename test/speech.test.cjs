@@ -4,10 +4,10 @@ const { SpeechController, bounded, errorDetails } = require('../lib/speech-contr
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture({ compile, recognize, consent = true, mode = 'dictation', start } = {}) {
-  const events = [], records = [], instances = [];
+function fixture({ compile, recognize, consent = true, mode = 'dictation', start, getWindowState } = {}) {
+  const events = [], records = [], instances = [], diagnostics = [];
   const bindings = {
-    SpeechRecognitionResultStatus: { Success: 0, Unknown: 6 }, SpeechRecognitionScenario: { Dictation: 0 },
+    SpeechRecognitionResultStatus: { Success: 0, UserCanceled: 5, Unknown: 6 }, SpeechRecognitionScenario: { Dictation: 0 },
     SpeechRecognitionTopicConstraint: class { constructor(_, tag) { this.tag = tag; } },
     SpeechRecognitionListConstraint: class { constructor(words, tag) { this.words = words; this.tag = tag; } },
     SpeechRecognizer: class {
@@ -29,13 +29,51 @@ function fixture({ compile, recognize, consent = true, mode = 'dictation', start
         };
       }
       async compileConstraintsAsync() { return compile ? compile() : { status: 0 }; }
+      onStateChanged(callback) { this.stateCallback = callback; return () => records.push('unsubscribe-state'); }
+      onHypothesisGenerated(callback) { this.hypothesisCallback = callback; return () => records.push('unsubscribe-hypothesis'); }
       close() { records.push('close'); this.closed = true; }
     },
   };
   const controller = new SpeechController({ loadBindings: () => bindings, onlineConsent: async () => consent,
-    getMode: () => mode, send: (channel, data) => events.push({ channel, data }), log() {} });
-  return { controller, events, records, instances };
+    getMode: () => mode, getIdentity: () => false, getWindowState,
+    send: (channel, data) => events.push({ channel, data }), log: (stage, details) => diagnostics.push({ stage, ...details }) });
+  return { controller, events, records, instances, diagnostics };
 }
+
+test('native cancellation records capture context without blaming consent or logging speech', async () => {
+  let windowFocused = true;
+  const f = fixture({
+    getWindowState: () => ({ visible: true, focused: windowFocused, minimized: false, title: 'private window title' }),
+    start: rec => setImmediate(() => {
+      rec.stateCallback(null, { state: 5 });
+      rec.hypothesisCallback(null, { hypothesis: { text: 'private spoken words' } });
+      windowFocused = false;
+      rec.completedCallback(null, { status: 5 });
+    }),
+  });
+  await f.controller.startManual();
+  const completed = f.diagnostics.find(event => event.stage === 'manual-completed');
+  assert.equal(completed.source, 'windows'); assert.equal(completed.statusName, 'UserCanceled');
+  assert.equal(completed.packageIdentity, false); assert.equal(completed.windowFocused, false);
+  assert.equal(completed.speechDetected, true); assert.equal(completed.hypothesisGenerated, true);
+  assert.ok(completed.listeningMs >= 0);
+  assert.equal(f.records.includes('capture-cancel'), false);
+  assert.match(f.events.at(-1).data, /without you pressing Cancel/);
+  assert.doesNotMatch(f.events.at(-1).data, /permission|consent/i);
+  assert.doesNotMatch(JSON.stringify(f.diagnostics), /private window title|private spoken words/);
+  assert.ok(f.records.includes('unsubscribe-hypothesis'));
+  const count = f.diagnostics.length;
+  f.instances[0].stateCallback(null, { state: 1 });
+  f.instances[0].hypothesisCallback(null, { hypothesis: { text: 'late words' } });
+  assert.equal(f.diagnostics.length, count);
+});
+
+test('unavailable window diagnostics cannot prevent recognition', async () => {
+  const f = fixture({ getWindowState: () => { throw Error('window destroyed'); } });
+  await f.controller.startManual();
+  assert.equal(f.events.at(-1).channel, 'speech-result');
+  assert.equal(f.diagnostics.find(event => event.stage === 'manual-listening').windowFocused, null);
+});
 
 test('loading capabilities does not activate a recognizer or microphone', () => {
   const f = fixture(); assert.equal(f.controller.initialize(), true); assert.equal(f.instances.length, 0);
@@ -84,7 +122,10 @@ test('WinRT failure returns actionable error and never invokes an older speech A
 });
 test('online dictation without consent fails before opening the microphone', async () => {
   const f = fixture({ consent: false }); await f.controller.startManual();
-  assert.equal(f.instances.length, 0); assert.match(f.events.at(-1).data, /Online speech/);
+  assert.equal(f.instances.length, 0);
+  assert.equal(f.diagnostics.find(event => event.stage === 'manual-failed').code, 'ONLINE_SPEECH_CONSENT_UNCONFIRMED');
+  assert.equal(f.events.some(event => event.channel === 'speech-ready'), false);
+  assert.match(f.events.at(-1).data, /did not open the microphone/);
 });
 test('WinRT built-in commands work without online consent', async () => {
   const f = fixture({ consent: false, mode: 'commands' }); await f.controller.startManual();

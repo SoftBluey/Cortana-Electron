@@ -493,16 +493,18 @@
                   </div>
                   <p class="setting-warning" style="display:block">When this is off, dismissing Cortana quits the app. Reminders, timers and the assistant shortcut stop working until you open it again.</p>
                   <div class="setting-item setting-column assistant-shortcut">
-                    <label for="assistant-hotkey">Assistant keyboard shortcut</label>
-                    <input id="assistant-hotkey" class="settings-text-input" placeholder="Ctrl+Shift+C" maxlength="128" />
-                    <button id="save-assistant-hotkey" class="settings-button">Apply shortcut</button>
+                    <span id="assistant-hotkey-label">Assistant keyboard shortcut</span>
+                    <div class="assistant-shortcut-buttons">
+                      <button id="assistant-hotkey" type="button" class="settings-button" aria-pressed="false" aria-labelledby="assistant-hotkey-label assistant-hotkey" aria-describedby="assistant-hotkey-status">Record shortcut</button>
+                      <button id="clear-assistant-hotkey" type="button" class="settings-button">Clear shortcut</button>
+                    </div>
                     <span id="assistant-hotkey-status" role="status"></span>
                   </div>
                   <div class="setting-item">
                     <label for="hotkey-listen-toggle">Shortcut starts listening</label>
                     <label class="toggle-switch"><input type="checkbox" id="hotkey-listen-toggle" /><span class="slider"></span></label>
                   </div>
-                  <p class="setting-warning" style="display:block">Map a compatible headset or keyboard button to this shortcut in your device software. Leave the shortcut empty to disable it.</p>
+                  <p class="setting-warning" style="display:block">Select the shortcut button and press your keys together. You can map a headset or keyboard button to the same shortcut in its device software.</p>
                 </div>
                 <details id="speech-troubleshooting" class="settings-section">
                   <summary>Troubleshooting</summary>

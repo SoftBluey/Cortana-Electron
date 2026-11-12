@@ -35,6 +35,7 @@ redistribution rights for Microsoft's artwork or voices.
 | `preload.js`, `lib/ui-bridge.js` | Named `window.cortana` capabilities and the renderer's compatibility wrapper. The renderer's `ipcRenderer` variable is this wrapper, not unrestricted Electron IPC. |
 | `index.html`, `style.css` | UI markup, Content Security Policy, shared styling, motion and responsive behaviour. Browser helper scripts load before `renderer.js`; preserve their dependency order. |
 | `lib/speech-controller.js` | WinRT recognition, wake/manual capture coordination, cancellation, timeouts, resource disposal and diagnostic error details. |
+| `lib/edge-tts.js` | Edge speech connection compatibility. Uses a pinned node-edge-tts client for synthesis and its v2 protocol; verify live synthesis and packaged loading when updating the client. |
 | `lib/preferences.js`, `lib/startup.js` | Serialized/atomic persistence, validation/migrations, and installed-app Windows startup state and rollback. |
 | `lib/lists.js`, `lib/recurrence.js`, `lib/timers.js`, `lib/first-run.js` | Named-list parsing/data rules, calendar recurrence, persistent named timers, and the welcome tour. |
 | Other `lib/` helpers | GIF decoding/worker loading, audio input and voice policies, AI endpoint normalization, shortcut parsing, release validation and weather commands. Several expose both CommonJS exports and browser globals. |
@@ -74,6 +75,7 @@ Run commands from the repository root:
 | `npm run smoke -- --workflows --classic` | Corresponding workflows in classic window mode. |
 | `npm run checkup` | Broader integration coverage: commands, cancellation, persistence, timers, reminders and a local AI fixture. Desktop actions are intercepted. |
 | `npm run checkup -- --live` | Adds explicit public-service checks for weather, search, Wikipedia, Edge synthesis, release checks and Everything availability. Does not prove microphone recognition or audible output. |
+| `npx --no-install electron scripts/offline-smoke.cjs --label=offline` | Blocks test-process HTTP(S) and exercises offline commands, timer routing and voice-failure feedback. Audio and desktop actions are simulated. Add `--classic` for classic mode. |
 | `npm run smoke:productivity` | List, reminder, timer, My day and related integration checks. |
 | `npm run smoke:tour` | Welcome-tour interaction and persistence checks. |
 | `npm run generate-bindings` | Force regeneration of Windows bindings when needed. |
@@ -177,6 +179,15 @@ problems on affected systems: mocks, initialized bindings and a successful build
 are not evidence that either is fixed. Confirm real results on affected hardware
 before changing those claims. `scripts/probe-winrt.cjs` opens the real default
 microphone; use it only for deliberate speech testing within the task's scope.
+Use `--window --commands --duration=30000 --label=NAME` for a foreground local
+grammar probe. Omit `--commands` for dictation; `--single` compares RecognizeAsync
+with the normal continuous controller. `--extend-silence` changes only the probe's
+initial-silence limit. Reports record stages and optional `--test-phrase` match
+booleans, never transcripts. Identity and foreground command success do not prove
+that dictation or background wake capture work.
+For deliberate comparisons of the Microsoft online service, `--single --web-search`
+selects its WebSearch topic grammar; `--window --system-ui` compares the system's
+RecognizeWithUIAsync path. These are diagnostic options, not shipping fallbacks.
 
 Edge TTS has a system-voice fallback. Keep the user's saved engine/voice choice
 when falling back, including unavailable Eva preferences. Prefer regular Zira over

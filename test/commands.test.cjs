@@ -64,3 +64,41 @@ test('city-time questions select the location and leave time-complexity queries 
   }
   assert.equal(vm.runInContext("matchAssistantSkill('what is the time complexity of sorting')", context), null);
 });
+
+function timerCommandFixture() {
+  const code = source.slice(source.indexOf('const timerNumberPattern ='), source.indexOf('const commands ='));
+  const calls = [];
+  const context = vm.createContext({ startTimer: (...args) => calls.push(args) });
+  vm.runInContext(temporal + code, context);
+  return { calls, run(query) {
+    context.input = query;
+    return vm.runInContext('(() => { const match = input.match(timerCommand.regex); if (!match) return false; timerCommand.handler(match); return true; })()', context);
+  } };
+}
+
+test('timer duration can come before or after timer without losing units or names', () => {
+  const fixture = timerCommandFixture();
+  for (const [query, expected] of [
+    ['set a timer for 15 min', [15, 'min', 900000, '']],
+    ['set a 15 min timer', [15, 'min', 900000, '']],
+    ['start a fifteen minute timer named Tea', [15, 'minute', 900000, 'Tea']],
+    ['set a timer for twenty-five minutes called Fresh Bread', [25, 'minute', 1500000, 'Fresh Bread']],
+    ['start a 30 sec timer called Rest', [30, 'sec', 30000, 'Rest']],
+    ['SET A TWO HOUR TIMER', [2, 'hour', 7200000, '']],
+    ['set a timer about 2 hrs', [2, 'hr', 7200000, '']],
+    ['  start a timer for 5 seconds  ', [5, 'second', 5000, '']],
+  ]) {
+    assert.equal(fixture.run(query), true, query);
+    assert.deepEqual(fixture.calls.at(-1), expected, query);
+  }
+});
+
+test('timer phrasing does not consume other commands or malformed durations', () => {
+  const fixture = timerCommandFixture();
+  for (const query of ['what is a 15 min timer', 'cancel my timer', 'set a timer for weather',
+    'remind me to set a timer for 15 min', 'set a -5 min timer', 'set a 1.5.2 min timer',
+    'set a 15 minute timer for my oven', 'set a 5 day timer', 'set a 5 minute timer named ' + 'a'.repeat(129)]) {
+    assert.equal(fixture.run(query), false, query);
+  }
+  assert.equal(fixture.calls.length, 0);
+});

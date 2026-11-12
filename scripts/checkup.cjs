@@ -15,7 +15,7 @@ app.setPath('userData', profile);
 app.setAppPath(root);
 app.setLoginItemSettings = () => { throw Error('Checkup must not register startup'); };
 fs.writeFileSync(path.join(profile, 'settings.json'), JSON.stringify({
-  firstRunComplete: true, firstRunRelease: '8.1.0', openAtLogin: false, heyCortana: false, isMovable: true, ttsEngine: 'system',
+  firstRunComplete: true, firstRunRelease: '8.1.0', openAtLogin: false, heyCortana: false, isMovable: !process.argv.includes('--classic'), ttsEngine: 'system',
 }));
 const desktopActions = [];
 shell.openPath = async target => { desktopActions.push({ type: 'path', target }); return ''; };
@@ -25,6 +25,11 @@ Notification.prototype.show = () => {};
 let mediaFails=false;
 const realExecFile=cp.execFile;
 cp.execFile=(executable,args,...rest)=>{
+  if (executable === 'reg.exe' && args?.at(-1) === 'HasAccepted') {
+    // Exercise the fresh-profile consent gate without opening the microphone.
+    queueMicrotask(() => rest.at(-1)(Error('No consent value in fixture'), '', ''));
+    return;
+  }
   if(Array.isArray(args)&&args.some(arg=>String(arg).endsWith('media.ps1'))) {
     desktopActions.push({type:'media',args});
     queueMicrotask(()=>rest.at(-1)(mediaFails?Error('Probe failure'):null,JSON.stringify(mediaFails?{success:false,error:'Could not access audio.'}:{success:true,volume:80,muted:false}),''));return;
@@ -72,6 +77,22 @@ app.whenReady().then(async () => {
         processQuery(query); await new Promise(r=>setTimeout(r,50));
         if (!new RegExp(expected,'i').test(resultsDisplay.textContent)) return {query,text:resultsDisplay.textContent};
       } return true;
+    `);
+    await run('Unconfirmed online speech consent keeps the microphone closed and typing available', `
+      const error = await new Promise(resolve => {
+        const timeout = setTimeout(() => { unsubscribe(); resolve(''); }, 3000);
+        const unsubscribe = cortana.onSpeechError(message => {
+          clearTimeout(timeout); unsubscribe(); resolve(message);
+        });
+        cortana.speechStart();
+      });
+      const { environment, events } = await cortana.speechDiagnostics();
+      const failure = events.find(event => event.stage === 'manual-failed' && event.code === 'ONLINE_SPEECH_CONSENT_UNCONFIRMED');
+      processQuery('12 * 3');
+      await new Promise(resolve => setTimeout(resolve, 50));
+      return { passed: !!failure && !events.some(event => event.stage === 'manual-listening') &&
+        error.includes('did not open the microphone') && resultsDisplay.textContent.includes('36') &&
+        environment.windowsBuild.startsWith(environment.os), windowsBuild: environment.windowsBuild };
     `);
     await run('Malformed calculator decimals do not produce a numeric answer', `
       return calculateResponse('1.2.3 + 4').isError && calculateResponse('2..5').isError || {answer:calculateResponse('1.2.3 + 4')};
@@ -289,6 +310,54 @@ app.whenReady().then(async () => {
         await js("return ipcRenderer.invoke('release-tts-file',"+JSON.stringify(audio.filePath)+");");
       }
       checks.push({name:'LIVE: Edge TTS produces audio',passed:bytes>1000,detail:{bytes,error:audio.error}});
+      await run('LIVE: two selected Edge voices reach playback without Windows fallback', `
+        const realAudio = window.Audio;
+        const realInvoke = ipcRenderer.invoke;
+        const realSpeak = window.speechSynthesis.speak;
+        const checkupSpeak = speak;
+        const requested = [], played = [];
+        let fallbackCount = 0;
+        try {
+          window.Audio = function (...args) {
+            const audio = new realAudio(...args);
+            audio.muted = true;
+            const voice = requested.at(-1);
+            audio.addEventListener('ended', () => played.push({ voice, duration: audio.duration }));
+            return audio;
+          };
+          ipcRenderer.invoke = (channel, ...args) => {
+            if (channel === 'synthesize-edge-tts') requested.push(args[0].voice);
+            return realInvoke.call(ipcRenderer, channel, ...args);
+          };
+          window.speechSynthesis.speak = utterance => {
+            fallbackCount++;
+            queueMicrotask(() => utterance.onend?.());
+          };
+          speak = checkupOriginalSpeak;
+          ttsEngineSelect.value = 'edge';
+          await onTtsEngineChanged();
+          const voices = ['en-US-JennyNeural', 'en-US-GuyNeural'];
+          for (const voice of voices) {
+            edgeVoiceSelect.value = voice;
+            if (edgeVoiceSelect.value !== voice) return { voice, requested, played, fallbackCount };
+            edgeVoiceSelect.dispatchEvent(new Event('change'));
+            const finished = await new Promise(resolve => {
+              const timeout = setTimeout(() => resolve(false), 20000);
+              speak('Hello. I am Cortana.', () => { clearTimeout(timeout); resolve(true); });
+            });
+            if (!finished) return { voice, requested, played, fallbackCount };
+          }
+          return { passed: fallbackCount === 0 && requested.length === voices.length &&
+            voices.every((voice, index) => requested[index] === voice && played[index]?.voice === voice &&
+              Number.isFinite(played[index].duration) && played[index].duration > 0), requested, played, fallbackCount };
+        } finally {
+          cancelSpeechOutput();
+          speak = checkupSpeak;
+          ipcRenderer.invoke = realInvoke;
+          window.Audio = realAudio;
+          window.speechSynthesis.speak = realSpeak;
+        }
+      `);
       await run('LIVE: update check returns a verified release version', `const result=await ipcRenderer.invoke('check-for-updates');return {passed:!!result.remoteVersion&&!result.error,...result};`);
       await run('LIVE: Everything service availability and file-search fallback', `
         await ipcRenderer.invoke('set-setting',{key:'useEverythingSearch',value:true});
